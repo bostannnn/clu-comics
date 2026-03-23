@@ -35,7 +35,11 @@ import re
 import heapq
 import zipfile
 import rarfile
+import tempfile
 import traceback
+
+# Use external unrar-free tool to avoid rarfile's native 2MB buffer limit
+rarfile.UNRAR_TOOL = "unrar-free"
 from api import app
 import core.app_state as app_state
 from routes.favorites import favorites_bp
@@ -3761,6 +3765,40 @@ def find_folder_thumbnails_batch(folder_paths):
     return results
 
 
+def _extract_single_rar_entry(rar_path, entry_name):
+    """Extract a single file from a RAR archive using unrar-free subprocess."""
+    try:
+        rar_path = os.path.realpath(rar_path)
+        from helpers.library import is_allowed_path
+        if not is_allowed_path(rar_path):
+            app_logger.error(f"Path not in allowed directory: {rar_path}")
+            return None
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            result = subprocess.run(
+                ["unrar-free", "e", "-y", "-o+", rar_path, entry_name, tmp_dir],
+                capture_output=True, timeout=60
+            )
+            if result.returncode != 0:
+                app_logger.error(f"unrar-free extraction failed: {result.stderr}")
+                return None
+            safe_name = os.path.basename(entry_name)
+            if not safe_name:
+                app_logger.error(f"Invalid RAR entry name: {entry_name}")
+                return None
+            extracted = os.path.join(tmp_dir, safe_name)
+            # Verify the resolved path is still within tmp_dir (path traversal guard)
+            if not os.path.realpath(extracted).startswith(os.path.realpath(tmp_dir)):
+                app_logger.error(f"Path traversal detected in RAR entry: {entry_name}")
+                return None
+            if os.path.exists(extracted):
+                with open(extracted, "rb") as f:
+                    return f.read()
+        return None
+    except Exception as e:
+        app_logger.error(f"Subprocess RAR extraction failed: {e}")
+        return None
+
+
 @app.route("/api/read/<path:comic_path>/page/<int:page_num>")
 def read_comic_page(comic_path, page_num):
     """Serve a specific page from a comic file."""
@@ -3815,10 +3853,22 @@ def read_comic_page(comic_path, page_num):
 
         # Read the requested page
         target_file = image_files[page_num]
-        image_data = archive.read(target_file)
+        try:
+            image_data = archive.read(target_file)
+        except rarfile.BadRarFile:
+            app_logger.warning(
+                f"rarfile failed to read {target_file} from {comic_path}, "
+                "falling back to unrar-free subprocess"
+            )
+            archive.close()
+            archive = None
+            image_data = _extract_single_rar_entry(comic_path, target_file)
+            if image_data is None:
+                return send_file("static/images/error.svg", mimetype="image/svg+xml")
 
         # Close archive
-        archive.close()
+        if archive:
+            archive.close()
 
         # Determine mime type
         file_ext = os.path.splitext(target_file)[1].lower()

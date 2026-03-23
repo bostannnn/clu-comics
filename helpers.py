@@ -48,6 +48,12 @@ def unzip_file(file_path):
     Returns:
         str: The full path to the directory where the files were extracted.
     """
+    # Validate path is within allowed directories
+    file_path = os.path.realpath(file_path)
+    from helpers.library import is_allowed_path
+    if not is_allowed_path(file_path):
+        raise ValueError(f"Path not in allowed directory: {file_path}")
+
     # Remove the .zip extension to form the directory name.
     base_dir, ext = os.path.splitext(file_path)
     if ext.lower() != '.bak':
@@ -74,70 +80,55 @@ def unzip_file(file_path):
 
 def extract_rar_with_unar(rar_path, output_dir):
     """
-    Extract a RAR file using the unar command-line tool.
-    Returns True if extraction was successful (even with some failed files),
-    False if extraction completely failed.
+    Extract a RAR file using unrar-free.
+    Returns True if extraction was successful, False if it completely failed.
 
     :param rar_path: Path to the RAR file.
     :param output_dir: Directory to extract the contents into.
     :return: bool: True if any files were extracted successfully
     """
     try:
-        # First check if unar is available
-        try:
-            subprocess.run(["unar", "--version"], check=True, capture_output=True)
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            app_logger.error("unar command not found. Please install unar first.")
-            raise RuntimeError("unar command not found. Please install unar first.")
-        
+        # Resolve to real paths to prevent path traversal
+        rar_path = os.path.realpath(rar_path)
+        output_dir = os.path.realpath(output_dir)
+
+        # Validate paths are within allowed directories
+        from helpers.library import is_allowed_path
+        if not is_allowed_path(rar_path):
+            raise ValueError(f"Path not in allowed directory: {rar_path}")
+        if not is_allowed_path(output_dir):
+            raise ValueError(f"Output path not in allowed directory: {output_dir}")
+
         # Check if the input file exists
         if not os.path.exists(rar_path):
             app_logger.error(f"Input file does not exist: {rar_path}")
             raise RuntimeError(f"Input file does not exist: {rar_path}")
-        
-        app_logger.info(f"Extracting {rar_path} to {output_dir}")
+
+        # Verify unrar-free is available
+        try:
+            subprocess.run(["unrar-free", "--version"], capture_output=True)
+        except FileNotFoundError:
+            app_logger.error("unrar-free not found. Please install it (apt-get install unrar-free).")
+            raise RuntimeError("unrar-free not found. Please install it (apt-get install unrar-free).")
+
+        app_logger.info(f"Extracting {rar_path} to {output_dir} using unrar-free")
+
+        # Ensure output_dir ends with separator for unrar-free
+        dest = output_dir if output_dir.endswith("/") else output_dir + "/"
         result = subprocess.run(
-            ["unar", "-o", output_dir, "-f", rar_path],
+            ["unrar-free", "x", "-y", "-o+", rar_path, dest],
             capture_output=True,
             text=True
         )
-        
-        stdout_msg = result.stdout.strip() if result.stdout else ""
-        stderr_msg = result.stderr.strip() if result.stderr else ""
-        
-        # Check if any files were extracted successfully
-        extracted_files = []
-        failed_files = []
-        
-        if stdout_msg:
-            for line in stdout_msg.split('\n'):
-                if '... OK.' in line:
-                    # Extract filename from line like "filename.jpg  (size B)... OK."
-                    filename = line.split('...')[0].strip().split('  ')[0]
-                    extracted_files.append(filename)
-                elif '... Failed!' in line:
-                    # Extract filename from line like "filename.jpg  (size B)... Failed!"
-                    filename = line.split('...')[0].strip().split('  ')[0]
-                    failed_files.append(filename)
-        
-        if extracted_files:
-            app_logger.info(f"Successfully extracted {len(extracted_files)} files from {rar_path}")
-            if failed_files:
-                app_logger.warning(f"Failed to extract {len(failed_files)} files: {', '.join(failed_files)}")
-            
-            # Check if the output directory has any files
-            if os.path.exists(output_dir) and any(os.listdir(output_dir)):
-                app_logger.info(f"Extraction completed. Output directory: {output_dir}")
-                return True
-            else:
-                app_logger.error("No files were actually extracted despite successful status")
-                return False
+
+        if result.returncode == 0 and os.path.exists(output_dir) and any(os.listdir(output_dir)):
+            app_logger.info(f"Extraction completed. Output directory: {output_dir}")
+            return True
         else:
-            app_logger.error(f"No files were extracted from {rar_path}")
-            if stderr_msg:
-                app_logger.error(f"stderr: {stderr_msg}")
+            stderr_msg = result.stderr.strip() if result.stderr else ""
+            app_logger.error(f"unrar-free extraction failed (rc={result.returncode}): {stderr_msg}")
             return False
-        
+
     except subprocess.CalledProcessError as e:
         error_msg = e.stderr.decode().strip() if e.stderr else "Unknown error"
         app_logger.error(f"Failed to extract {rar_path}: {error_msg}")
