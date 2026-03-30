@@ -751,8 +751,15 @@ def get_metadata_by_volume_id(api_key: str, volume_id: int, issue_number: str, y
         if not issue_data:
             return None
 
-        # Map to ComicInfo format (volume_data=None since we don't have full volume info)
-        comicinfo = map_to_comicinfo(issue_data, None, start_year=start_year)
+        volume_details = get_volume_details(api_key, volume_id)
+        volume_data = {
+            "id": volume_id,
+            "name": issue_data.get("volume_name", ""),
+            "publisher_name": volume_details.get("publisher_name"),
+            "start_year": volume_details.get("start_year") or start_year,
+        }
+
+        comicinfo = map_to_comicinfo(issue_data, volume_data)
         comicinfo['_image_url'] = issue_data.get('image_url')
 
         return comicinfo
@@ -1218,20 +1225,15 @@ def auto_fetch_metadata_for_folder(folder_path: str, api_key: str, target_file: 
     start_year = cvinfo_fields.get('start_year')
     publisher_name = cvinfo_fields.get('publisher_name')
 
-    # If not present in cvinfo, fetch from ComicVine and save
-    if not start_year or not publisher_name:
-        app_logger.info("Fetching volume details from ComicVine to get publisher/start_year")
-        volume_details = get_volume_details(api_key, volume_id)
+    app_logger.info("Fetching volume details from ComicVine to get publisher/start_year")
+    volume_details = get_volume_details(api_key, volume_id)
+    if volume_details.get('start_year'):
+        start_year = volume_details['start_year']
+    if volume_details.get('publisher_name'):
+        publisher_name = volume_details['publisher_name']
 
-        if volume_details.get('start_year') or volume_details.get('publisher_name'):
-            # Update local vars
-            if not start_year and volume_details.get('start_year'):
-                start_year = volume_details['start_year']
-            if not publisher_name and volume_details.get('publisher_name'):
-                publisher_name = volume_details['publisher_name']
-
-            # Save to cvinfo for future use
-            write_cvinfo_fields(cvinfo_path, publisher_name, start_year)
+    if start_year or publisher_name:
+        write_cvinfo_fields(cvinfo_path, publisher_name, start_year)
 
     # Get list of comic files to process
     comic_files = []
@@ -1271,8 +1273,18 @@ def auto_fetch_metadata_for_folder(folder_path: str, api_key: str, target_file: 
                 result['details'].append({'file': file_path, 'status': 'error', 'reason': 'no issue number'})
                 continue
 
-            # Fetch metadata from ComicVine (pass start_year for Volume field)
-            metadata = get_metadata_by_volume_id(api_key, volume_id, issue_number, start_year=start_year)
+            issue_data = get_issue_by_number(api_key, volume_id, issue_number)
+            if issue_data:
+                volume_data = {
+                    "id": volume_id,
+                    "name": issue_data.get("volume_name", ""),
+                    "publisher_name": publisher_name,
+                    "start_year": start_year,
+                }
+                metadata = map_to_comicinfo(issue_data, volume_data)
+                metadata["_image_url"] = issue_data.get("image_url")
+            else:
+                metadata = None
 
             if not metadata:
                 app_logger.warning(f"No metadata found for {file_path}, issue #{issue_number}")

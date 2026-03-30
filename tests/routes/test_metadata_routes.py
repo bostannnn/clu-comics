@@ -645,12 +645,18 @@ class TestBatchForceMetadata:
     @patch("core.database.update_file_index_from_comicinfo")
     @patch("cbz_ops.rename.rename_comic_from_metadata", side_effect=lambda file_path, metadata: (file_path, False))
     @patch("routes.metadata.add_comicinfo_to_cbz")
-    @patch("routes.metadata.comicvine.get_metadata_by_volume_id", return_value={
-        "Series": "Batman",
-        "Number": "1",
-        "Volume": 2016,
-        "Year": 2020,
-        "Notes": "Fetched from ComicVine",
+    @patch("routes.metadata.comicvine.get_issue_by_number", return_value={
+        "id": 1001,
+        "name": "Failsafe Part One",
+        "issue_number": "1",
+        "volume_name": "Batman",
+        "volume_id": 4050,
+        "publisher": None,
+        "year": 2020,
+        "month": 7,
+        "day": 5,
+        "description": "Fetched from ComicVine",
+        "image_url": None,
     })
     @patch("routes.metadata.comicvine.get_volume_details", return_value={"start_year": 2016, "publisher_name": "DC Comics"})
     @patch("routes.metadata.is_valid_library_path", return_value=True)
@@ -662,7 +668,7 @@ class TestBatchForceMetadata:
         mock_gcd_available,
         mock_valid_library_path,
         mock_get_volume_details,
-        mock_get_metadata,
+        mock_get_issue_by_number,
         mock_add_xml,
         mock_rename,
         mock_update_index,
@@ -698,8 +704,11 @@ class TestBatchForceMetadata:
         assert resp.status_code == 200
         resp.get_data(as_text=True)
         assert mock_add_xml.called is True
-        mock_get_volume_details.assert_called_once_with("test-key", 4050)
-        mock_get_metadata.assert_called_once_with("test-key", 4050, "1", start_year=2016)
+        assert mock_get_volume_details.call_count == 2
+        mock_get_volume_details.assert_any_call("test-key", 4050)
+        mock_get_issue_by_number.assert_called_once_with("test-key", 4050, "1")
+        xml_bytes = mock_add_xml.call_args.args[1]
+        assert b"<Publisher>DC Comics</Publisher>" in xml_bytes
 
         cvinfo_text = cvinfo_path.read_text(encoding="utf-8")
         assert "4050-4050" in cvinfo_text

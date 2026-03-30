@@ -1433,8 +1433,21 @@ def batch_metadata():
                         if not (comicvine_available and cv_volume_id):
                             return False
                         try:
-                            metadata = comicvine.get_metadata_by_volume_id(comicvine_api_key, cv_volume_id, issue_number, start_year=cvinfo_start_year)
-                            if metadata:
+                            issue_data = comicvine.get_issue_by_number(
+                                comicvine_api_key,
+                                cv_volume_id,
+                                issue_number,
+                            )
+                            if issue_data:
+                                volume_data = _resolve_comicvine_volume_data(
+                                    comicvine_api_key,
+                                    cv_volume_id,
+                                    issue_data,
+                                    start_year=cvinfo_start_year,
+                                    cvinfo_path=cvinfo_path,
+                                )
+                                metadata = comicvine.map_to_comicinfo(issue_data, volume_data)
+                                metadata["_image_url"] = issue_data.get("image_url")
                                 source = 'ComicVine'
                                 app_logger.info(f"Found metadata from ComicVine for {filename}")
                                 return True

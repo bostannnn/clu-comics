@@ -188,3 +188,74 @@ class TestComicVineProviderToComicinfo:
         assert result["Number"] == "5"
         assert result["Publisher"] == "DC Comics"
         assert result["Year"] == 2020
+
+    @patch("models.comicvine.get_metadata_by_volume_id", return_value={
+        "Series": "Batman",
+        "Number": "5",
+        "Title": "Rebirth",
+        "Publisher": "DC Comics",
+        "Year": 2020,
+        "Volume": 2016,
+    })
+    def test_api_path_returns_mapped_metadata_directly(
+        self,
+        mock_get_metadata,
+        comicvine_creds,
+    ):
+        from models.providers.comicvine_provider import ComicVineProvider
+
+        p = ComicVineProvider(credentials=comicvine_creds)
+        issue = IssueResult(
+            provider=ProviderType.COMICVINE, id="1001", series_id="4050",
+            issue_number="5", title="Rebirth", cover_date="2020-06-15",
+            summary="Batman returns",
+        )
+        series = SearchResult(
+            provider=ProviderType.COMICVINE, id="4050", title="Batman",
+            year=2016, publisher="DC Comics",
+        )
+
+        result = p.to_comicinfo(issue, series)
+
+        assert result["Series"] == "Batman"
+        assert result["Number"] == "5"
+        assert result["Title"] == "Rebirth"
+        assert result["Publisher"] == "DC Comics"
+        assert result["Year"] == 2020
+        assert result["Volume"] == 2016
+        mock_get_metadata.assert_called_once()
+
+
+class TestComicVineProviderIssueMetadata:
+
+    @patch("models.comicvine.get_volume_details", return_value={"publisher_name": "DC Comics", "start_year": 2016})
+    @patch("models.comicvine.get_issue_by_number", return_value={
+        "id": 1001,
+        "name": "Rebirth",
+        "issue_number": "5",
+        "volume_name": "Batman",
+        "volume_id": 4050,
+        "publisher": None,
+        "year": 2020,
+        "month": 6,
+        "day": 15,
+        "description": "Batman returns",
+        "image_url": None,
+    })
+    def test_get_issue_metadata_uses_volume_publisher_when_issue_publisher_missing(
+        self,
+        mock_get_issue_by_number,
+        mock_get_volume_details,
+        comicvine_creds,
+    ):
+        from models.providers.comicvine_provider import ComicVineProvider
+
+        p = ComicVineProvider(credentials=comicvine_creds)
+        result = p.get_issue_metadata("4050", "5")
+
+        assert result["Publisher"] == "DC Comics"
+        assert result["Volume"] == 2016
+        mock_get_issue_by_number.assert_called_once()
+        assert mock_get_issue_by_number.call_args.args[1:] == (4050, "5", None)
+        mock_get_volume_details.assert_called_once()
+        assert mock_get_volume_details.call_args.args[1:] == (4050,)

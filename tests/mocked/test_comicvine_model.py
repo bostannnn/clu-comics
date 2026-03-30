@@ -233,6 +233,102 @@ class TestWriteCvinfoFields:
         }
 
 
+class TestAutoFetchMetadataForFolder:
+
+    @patch("time.sleep", return_value=None)
+    @patch("cbz_ops.rename.rename_comic_from_metadata", side_effect=lambda file_path, metadata: (file_path, False))
+    @patch("models.comicvine.add_comicinfo_to_archive", return_value=True)
+    @patch("core.comicinfo.read_comicinfo_from_zip", return_value={})
+    @patch("models.comicvine.get_volume_details", return_value={"publisher_name": "DC Comics", "start_year": 2016})
+    @patch("models.comicvine.get_issue_by_number", return_value={
+        "id": 1001,
+        "name": "Failsafe Part One",
+        "issue_number": "1",
+        "volume_name": "Batman",
+        "volume_id": 4050,
+        "publisher": None,
+        "year": 2022,
+        "month": 7,
+        "day": 5,
+        "description": "Fetched from ComicVine",
+        "image_url": None,
+    })
+    def test_uses_volume_publisher_when_issue_publisher_missing(
+        self,
+        mock_get_issue_by_number,
+        mock_get_volume_details,
+        mock_read_comicinfo,
+        mock_add_comicinfo,
+        mock_rename,
+        mock_sleep,
+        tmp_path,
+    ):
+        from models.comicvine import auto_fetch_metadata_for_folder
+
+        folder = tmp_path / "Batman"
+        folder.mkdir()
+        (folder / "cvinfo").write_text(
+            "https://comicvine.gamespot.com/volume/4050-4050/\n",
+            encoding="utf-8",
+        )
+        (folder / "Batman 001.cbz").write_bytes(b"placeholder")
+
+        result = auto_fetch_metadata_for_folder(str(folder), "fake-key")
+
+        assert result["processed"] == 1
+        mock_get_issue_by_number.assert_called_once_with("fake-key", 4050, "1")
+        mock_get_volume_details.assert_called_once_with("fake-key", 4050)
+        xml_bytes = mock_add_comicinfo.call_args.args[1]
+        assert b"<Publisher>DC Comics</Publisher>" in xml_bytes
+
+    @patch("time.sleep", return_value=None)
+    @patch("cbz_ops.rename.rename_comic_from_metadata", side_effect=lambda file_path, metadata: (file_path, False))
+    @patch("models.comicvine.add_comicinfo_to_archive", return_value=True)
+    @patch("core.comicinfo.read_comicinfo_from_zip", return_value={})
+    @patch("models.comicvine.get_volume_details", return_value={"publisher_name": "DC Comics", "start_year": 2016})
+    @patch("models.comicvine.get_issue_by_number", return_value={
+        "id": 1001,
+        "name": "Failsafe Part One",
+        "issue_number": "1",
+        "volume_name": "Batman",
+        "volume_id": 4050,
+        "publisher": None,
+        "year": 2022,
+        "month": 7,
+        "day": 5,
+        "description": "Fetched from ComicVine",
+        "image_url": None,
+    })
+    def test_repairs_stale_cvinfo_publisher(
+        self,
+        mock_get_issue_by_number,
+        mock_get_volume_details,
+        mock_read_comicinfo,
+        mock_add_comicinfo,
+        mock_rename,
+        mock_sleep,
+        tmp_path,
+    ):
+        from models.comicvine import auto_fetch_metadata_for_folder
+
+        folder = tmp_path / "Batman"
+        folder.mkdir()
+        cvinfo = folder / "cvinfo"
+        cvinfo.write_text(
+            "https://comicvine.gamespot.com/volume/4050-4050/\n"
+            "publisher_name: Wrong Publisher\n"
+            "start_year: 2020\n",
+            encoding="utf-8",
+        )
+        (folder / "Batman 001.cbz").write_bytes(b"placeholder")
+
+        result = auto_fetch_metadata_for_folder(str(folder), "fake-key")
+
+        assert result["processed"] == 1
+        assert "publisher_name: DC Comics" in cvinfo.read_text(encoding="utf-8")
+        assert "start_year: 2016" in cvinfo.read_text(encoding="utf-8")
+
+
 class TestFindCvinfoInFolder:
 
     def test_finds_cvinfo(self, tmp_path):

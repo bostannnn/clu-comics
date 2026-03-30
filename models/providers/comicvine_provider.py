@@ -245,13 +245,7 @@ class ComicVineProvider(BaseProvider):
                     start_year=series.year if series else None
                 )
                 if metadata:
-                    # Get volume data for mapping
-                    volume_data = {'id': issue.series_id}
-                    if series:
-                        volume_data['name'] = series.title
-                        volume_data['start_year'] = series.year
-                        volume_data['publisher_name'] = series.publisher
-                    return cv_module.map_to_comicinfo(metadata, volume_data, series.year if series else None)
+                    return metadata
 
             # Fallback: build from IssueResult
             comicinfo = {
