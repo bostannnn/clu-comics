@@ -5926,6 +5926,37 @@ def get_tracked_series_lookup():
         return set()
 
 
+def get_mapped_series_paths_lookup():
+    """
+    Get a lookup set of exact mapped folder paths for tracked series.
+
+    Returns:
+        Set of absolute mapped_path strings
+    """
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return set()
+
+        c = conn.cursor()
+        c.execute(
+            """
+            SELECT mapped_path
+            FROM series
+            WHERE mapped_path IS NOT NULL
+              AND mapped_path != ''
+        """
+        )
+        rows = c.fetchall()
+        conn.close()
+
+        return {row["mapped_path"] for row in rows if row["mapped_path"]}
+
+    except Exception as e:
+        app_logger.error(f"Failed to get mapped series path lookup: {e}")
+        return set()
+
+
 def remove_series_mapping(series_id):
     """
     Remove the mapping for a series (keeps series data, clears mapped_path).

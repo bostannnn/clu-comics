@@ -26,7 +26,7 @@ from helpers.library import get_library_roots, get_default_library, is_valid_lib
 from core.database import (
     get_directory_children, get_path_counts_batch, get_recent_files,
     invalidate_browse_cache, add_file_index_entry, delete_file_index_entry,
-    search_file_index, get_user_preference
+    search_file_index, get_user_preference, get_mapped_series_paths_lookup
 )
 
 collection_bp = Blueprint('collection', __name__)
@@ -221,6 +221,7 @@ def api_browse():
         app_logger.info(f"/api/browse request for path: {path}")
 
         directories, files = get_directory_children(path)
+        mapped_series_paths = get_mapped_series_paths_lookup()
 
         processed_directories = []
         for d in directories:
@@ -229,7 +230,8 @@ def api_browse():
                 'has_thumbnail': d.get('has_thumbnail', False),
                 'has_files': None,
                 'folder_count': None,
-                'file_count': None
+                'file_count': None,
+                'is_pull_list_mapped': d['path'] in mapped_series_paths,
             }
 
             if d.get('has_thumbnail'):

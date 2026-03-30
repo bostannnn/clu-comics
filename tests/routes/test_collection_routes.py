@@ -39,8 +39,9 @@ class TestToReadPage:
 
 class TestApiBrowse:
 
+    @patch("routes.collection.get_mapped_series_paths_lookup", return_value=set())
     @patch("routes.collection.get_directory_children")
-    def test_browse_root(self, mock_children, client, app, tmp_path):
+    def test_browse_root(self, mock_children, mock_mapped_paths, client, app, tmp_path):
         data_dir = str(tmp_path / "data")
         mock_children.return_value = ([], [])
 
@@ -52,16 +53,19 @@ class TestApiBrowse:
         assert "directories" in data
         assert "files" in data
 
+    @patch("routes.collection.get_mapped_series_paths_lookup")
     @patch("routes.collection.get_directory_children")
-    def test_browse_with_path(self, mock_children, client, tmp_path):
+    def test_browse_with_path(self, mock_children, mock_mapped_paths, client, tmp_path):
         path = str(tmp_path / "data")
         os.makedirs(path, exist_ok=True)
+        mapped_dir = os.path.join(path, "DC Comics")
         mock_children.return_value = (
-            [{"name": "DC Comics", "path": os.path.join(path, "DC Comics"),
+            [{"name": "DC Comics", "path": mapped_dir,
               "has_thumbnail": False}],
             [{"name": "comic.cbz", "path": os.path.join(path, "comic.cbz"),
               "size": 1000, "has_comicinfo": True}],
         )
+        mock_mapped_paths.return_value = {mapped_dir}
 
         with patch.dict("sys.modules", {"app": MagicMock(DATA_DIR=path)}):
             resp = client.get(f"/api/browse?path={path}")
@@ -70,10 +74,12 @@ class TestApiBrowse:
         data = resp.get_json()
         assert len(data["directories"]) == 1
         assert len(data["files"]) == 1
+        assert data["directories"][0]["is_pull_list_mapped"] is True
 
+    @patch("routes.collection.get_mapped_series_paths_lookup", return_value=set())
     @patch("routes.collection.get_directory_children",
            side_effect=Exception("DB error"))
-    def test_browse_error(self, mock_children, client, tmp_path):
+    def test_browse_error(self, mock_children, mock_mapped_paths, client, tmp_path):
         with patch.dict("sys.modules", {"app": MagicMock(DATA_DIR=str(tmp_path))}):
             resp = client.get("/api/browse")
         assert resp.status_code == 500

@@ -308,6 +308,7 @@ async function loadDirectory(path, preservePage = false, forceRefresh = false) {
                         hasFiles: dir.has_files || false,
                         folderCount: dir.folder_count || 0,
                         fileCount: dir.file_count || 0,
+                        isPullListMapped: dir.is_pull_list_mapped || false,
                         metadataPending: hasPendingMetadata,
                         thumbnailPending: hasPendingThumbnail
                     });
@@ -1430,6 +1431,13 @@ function renderGrid(items) {
                 // Use the default folder icon
                 icon.className = 'bi bi-folder-fill';
                 img.style.display = 'none';
+            }
+
+            if (item.isPullListMapped) {
+                const pullListBadge = clone.querySelector('.pull-list-badge');
+                if (pullListBadge) {
+                    pullListBadge.style.display = 'block';
+                }
             }
 
             // Handle click for folders
