@@ -47,6 +47,48 @@ def _as_text(val):
     return str(val)
 
 
+def _resolve_comicvine_volume_data(
+    api_key,
+    volume_id,
+    issue_data,
+    publisher_name=None,
+    start_year=None,
+    cvinfo_path=None,
+):
+    """Build canonical ComicVine volume context from cache plus authoritative API data."""
+    volume_data = {
+        'id': volume_id,
+        'name': issue_data.get('volume_name', ''),
+        'publisher_name': publisher_name or '',
+        'start_year': start_year,
+    }
+    if not api_key or not volume_id:
+        return volume_data
+
+    if cvinfo_path and os.path.exists(cvinfo_path):
+        cvinfo_fields = comicvine.read_cvinfo_fields(cvinfo_path)
+        if cvinfo_fields.get('publisher_name'):
+            volume_data['publisher_name'] = cvinfo_fields.get('publisher_name')
+        if cvinfo_fields.get('start_year'):
+            volume_data['start_year'] = cvinfo_fields.get('start_year')
+
+    volume_details = comicvine.get_volume_details(api_key, volume_id)
+    if volume_details.get('start_year'):
+        volume_data['start_year'] = volume_details.get('start_year')
+    if volume_details.get('publisher_name'):
+        volume_data['publisher_name'] = volume_details.get('publisher_name')
+
+    if cvinfo_path and os.path.exists(cvinfo_path):
+        if volume_details.get('start_year') or volume_details.get('publisher_name'):
+            comicvine.write_cvinfo_fields(
+                cvinfo_path,
+                volume_details.get('publisher_name'),
+                volume_details.get('start_year'),
+            )
+
+    return volume_data
+
+
 def generate_comicinfo_xml(issue_data, series_data=None):
     """
     Generate a ComicInfo.xml that ComicRack will actually read.
@@ -2872,16 +2914,19 @@ def _try_comicvine_single(cvinfo_path, series_name, issue_number, year):
             if cv_volume_id:
                 issue_data = comicvine.get_issue_by_number(api_key, cv_volume_id, issue_number, year)
                 if issue_data:
-                    volume_data = {
-                        'id': cv_volume_id,
-                        'name': issue_data.get('volume_name', ''),
-                        'start_year': issue_data.get('year'),
-                        'publisher_name': issue_data.get('publisher_name', '')
-                    }
-                    # Read start_year from cvinfo for Volume field
-                    cvinfo_fields = comicvine.read_cvinfo_fields(cvinfo_path)
-                    start_year = cvinfo_fields.get('start_year')
-                    metadata = comicvine.map_to_comicinfo(issue_data, volume_data, start_year=start_year)
+                    volume_data = _resolve_comicvine_volume_data(
+                        api_key,
+                        cv_volume_id,
+                        issue_data,
+                        publisher_name=issue_data.get('publisher_name', ''),
+                        cvinfo_path=cvinfo_path,
+                    )
+
+                    metadata = comicvine.map_to_comicinfo(
+                        issue_data,
+                        volume_data,
+                        start_year=volume_data.get('start_year'),
+                    )
                     img_url = issue_data.get('image_url')
                     if img_url and not isinstance(img_url, str):
                         img_url = str(img_url)
@@ -3202,16 +3247,19 @@ def search_metadata():
 
             if provider == 'comicvine':
                 volume_id = selected_match.get('volume_id')
+                selected_start_year = selected_match.get('start_year')
                 api_key = current_app.config.get("COMICVINE_API_KEY", "").strip()
                 if volume_id and api_key:
                     issue_data = comicvine.get_issue_by_number(api_key, volume_id, issue_number, year)
                     if issue_data:
-                        volume_data = {
-                            'id': volume_id,
-                            'name': issue_data.get('volume_name', ''),
-                            'start_year': issue_data.get('year'),
-                            'publisher_name': selected_match.get('publisher_name', '')
-                        }
+                        volume_data = _resolve_comicvine_volume_data(
+                            api_key,
+                            volume_id,
+                            issue_data,
+                            publisher_name=selected_match.get('publisher_name', ''),
+                            start_year=selected_start_year,
+                            cvinfo_path=cvinfo_path,
+                        )
                         metadata = comicvine.map_to_comicinfo(issue_data, volume_data)
                         img_url = issue_data.get('image_url')
                         if img_url and not isinstance(img_url, str):
@@ -3585,14 +3633,13 @@ def search_comicvine_metadata():
 
                 if issue_data:
                     app_logger.info(f"Found issue #{issue_number} using cvinfo volume ID")
-
-                    # Create minimal volume_data for mapping
-                    volume_data = {
-                        'id': cv_volume_id,
-                        'name': issue_data.get('volume_name', ''),
-                        'start_year': issue_data.get('year'),
-                        'publisher_name': issue_data.get('publisher_name', '')
-                    }
+                    volume_data = _resolve_comicvine_volume_data(
+                        api_key,
+                        cv_volume_id,
+                        issue_data,
+                        publisher_name=issue_data.get('publisher_name', ''),
+                        cvinfo_path=cvinfo_path,
+                    )
 
                     # Map to ComicInfo format
                     comicinfo_data = comicvine.map_to_comicinfo(issue_data, volume_data)
@@ -3608,7 +3655,7 @@ def search_comicvine_metadata():
                     # Auto-move file if enabled
                     new_file_path = None
                     try:
-                        new_file_path = comicvine.auto_move_file(file_path, volume_data, app.config)
+                        new_file_path = comicvine.auto_move_file(file_path, volume_data, current_app.config)
                     except Exception as move_error:
                         app_logger.error(f"Auto-move failed but metadata was added successfully: {str(move_error)}")
 
@@ -3767,7 +3814,7 @@ def search_comicvine_metadata():
         # Auto-move file if enabled
         new_file_path = None
         try:
-            new_file_path = comicvine.auto_move_file(file_path, selected_volume, app.config)
+            new_file_path = comicvine.auto_move_file(file_path, selected_volume, current_app.config)
         except Exception as move_error:
             app_logger.error(f"Auto-move failed but metadata was added successfully: {str(move_error)}")
             # Continue execution - metadata was added successfully even if move failed
@@ -3834,6 +3881,7 @@ def search_comicvine_metadata_with_selection():
         publisher_name = data.get('publisher_name')
         issue_number = data.get('issue_number')
         year = data.get('year')
+        start_year = data.get('start_year')
 
         app_logger.debug(f"DEBUG: search_comicvine_metadata_with_selection called - file={file_name}, volume_id={volume_id}, publisher={publisher_name}, issue={issue_number}")
 
@@ -3864,12 +3912,16 @@ def search_comicvine_metadata_with_selection():
 
         # Create volume_data dict with the volume ID and publisher for metadata
         # Also include name and start_year for auto-move functionality
-        volume_data = {
-            'id': volume_id,
-            'publisher_name': publisher_name,
-            'name': issue_data.get('volume_name'),  # Series name from issue data
-            'start_year': issue_data.get('year')  # Use issue year as fallback for start_year
-        }
+        folder_path = os.path.dirname(file_path)
+        cvinfo_path = comicvine.find_cvinfo_in_folder(folder_path)
+        volume_data = _resolve_comicvine_volume_data(
+            api_key,
+            volume_id,
+            issue_data,
+            publisher_name=publisher_name,
+            start_year=start_year,
+            cvinfo_path=cvinfo_path,
+        )
 
         # Map to ComicInfo format
         comicinfo_data = comicvine.map_to_comicinfo(issue_data, volume_data)
@@ -3885,7 +3937,7 @@ def search_comicvine_metadata_with_selection():
         # Auto-move file if enabled
         new_file_path = None
         try:
-            new_file_path = comicvine.auto_move_file(file_path, volume_data, app.config)
+            new_file_path = comicvine.auto_move_file(file_path, volume_data, current_app.config)
         except Exception as move_error:
             app_logger.error(f"Auto-move failed but metadata was added successfully: {str(move_error)}")
             # Continue execution - metadata was added successfully even if move failed

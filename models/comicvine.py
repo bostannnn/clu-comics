@@ -842,7 +842,7 @@ def read_cvinfo_fields(cvinfo_path: str) -> Dict[str, Any]:
 
 def write_cvinfo_fields(cvinfo_path: str, publisher_name: Optional[str], start_year: Optional[int]) -> bool:
     """
-    Append publisher_name and start_year to cvinfo file if not already present.
+    Write or update publisher_name and start_year in a cvinfo file.
 
     Args:
         cvinfo_path: Path to the cvinfo file
@@ -853,25 +853,52 @@ def write_cvinfo_fields(cvinfo_path: str, publisher_name: Optional[str], start_y
         True if successful, False otherwise
     """
     try:
-        # Read existing content
-        existing = read_cvinfo_fields(cvinfo_path)
+        try:
+            with open(cvinfo_path, 'r', encoding='utf-8') as f:
+                lines = f.read().splitlines()
+        except FileNotFoundError:
+            lines = []
 
-        # Determine what needs to be added
-        lines_to_add = []
-        if publisher_name and not existing['publisher_name']:
-            lines_to_add.append(f"publisher_name: {publisher_name}")
-        if start_year and not existing['start_year']:
-            lines_to_add.append(f"start_year: {start_year}")
+        updated_lines = []
+        publisher_written = False
+        start_year_written = False
 
-        if not lines_to_add:
-            return True  # Nothing to add
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith('publisher_name:'):
+                if publisher_name is None:
+                    if not publisher_written:
+                        updated_lines.append(line)
+                        publisher_written = True
+                elif not publisher_written:
+                    updated_lines.append(f"publisher_name: {publisher_name}")
+                    publisher_written = True
+                continue
 
-        # Append to file
-        with open(cvinfo_path, 'a', encoding='utf-8') as f:
-            for line in lines_to_add:
-                f.write(f"\n{line}")
+            if stripped.startswith('start_year:'):
+                if start_year is None:
+                    if not start_year_written:
+                        updated_lines.append(line)
+                        start_year_written = True
+                elif not start_year_written:
+                    updated_lines.append(f"start_year: {start_year}")
+                    start_year_written = True
+                continue
 
-        app_logger.debug(f"Added to cvinfo: {', '.join(lines_to_add)}")
+            updated_lines.append(line)
+
+        if publisher_name is not None and not publisher_written:
+            updated_lines.append(f"publisher_name: {publisher_name}")
+        if start_year is not None and not start_year_written:
+            updated_lines.append(f"start_year: {start_year}")
+
+        with open(cvinfo_path, 'w', encoding='utf-8') as f:
+            if updated_lines:
+                f.write("\n".join(updated_lines) + "\n")
+            else:
+                f.write("")
+
+        app_logger.debug(f"Updated cvinfo fields: publisher_name={publisher_name}, start_year={start_year}")
         return True
 
     except Exception as e:

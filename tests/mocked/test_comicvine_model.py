@@ -214,6 +214,25 @@ class TestParseCvinfoVolumeId:
         assert parse_cvinfo_volume_id(str(cvinfo)) is None
 
 
+class TestWriteCvinfoFields:
+
+    def test_updates_existing_stale_values(self, tmp_path):
+        from models.comicvine import write_cvinfo_fields, read_cvinfo_fields
+
+        cvinfo = tmp_path / "cvinfo"
+        cvinfo.write_text(
+            "https://comicvine.gamespot.com/batman/4050-12345/\n"
+            "publisher_name: Old Publisher\n"
+            "start_year: 2020\n"
+        )
+
+        assert write_cvinfo_fields(str(cvinfo), "DC Comics", 2016) is True
+        assert read_cvinfo_fields(str(cvinfo)) == {
+            "publisher_name": "DC Comics",
+            "start_year": 2016,
+        }
+
+
 class TestFindCvinfoInFolder:
 
     def test_finds_cvinfo(self, tmp_path):
