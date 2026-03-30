@@ -599,9 +599,9 @@
     });
   }
 
-  // ── ComicVine volume modal (batch/directory context) ──────────────────
+  // ── Provider series modal (batch/directory context) ───────────────────
 
-  function _showBatchCVVolumeModal(data, dirPath, dirName) {
+  function _showBatchSeriesSelectionModal(data, dirPath, dirName) {
     _removeGCDApiLangFilter();
     // Hide refine row for batch context
     var refineRow = document.getElementById('cvRefineSearchRow');
@@ -617,12 +617,13 @@
 
     var modalTitle = document.getElementById('comicVineVolumeModalLabel');
     if (modalTitle) {
-      modalTitle.textContent = 'Found ' + data.possible_matches.length + ' Volume(s) - Select Correct One';
+      var providerLabel = data.provider === 'metron' ? 'Metron' : 'ComicVine';
+      modalTitle.textContent = 'Select Correct Series (' + providerLabel + ') - ' + data.possible_matches.length + ' result(s)';
     }
 
-    // Store volumes and set click handler for batch context
+    // Store candidate matches and set click handler for batch context
     _cvVolumes = data.possible_matches.slice();
-    _cvClickHandler = function (volume) {
+    _cvClickHandler = function (match) {
       var volumeList = document.getElementById('cvVolumeList');
       volumeList.querySelectorAll('.list-group-item').forEach(function (item) {
         item.classList.remove('active');
@@ -634,7 +635,10 @@
       var modal = bootstrap.Modal.getInstance(document.getElementById('comicVineVolumeModal'));
       modal.hide();
 
-      CLU.fetchDirectoryMetadataWithVolume(dirPath, dirName, volume.id);
+      CLU.fetchDirectoryMetadataWithSelection(dirPath, dirName, {
+        provider: data.provider || 'comicvine',
+        id: match.id
+      }, data._batchOptions || null);
     };
 
     _wireCVSortAndFilter();
@@ -780,19 +784,29 @@
 
   // ── Public API: Directory batch metadata ──────────────────────────────
 
-  /**
-   * Fetch metadata for all files in a directory via SSE streaming.
-   * @param {string} dirPath   Full path to the directory
-   * @param {string} dirName   Display name of the directory
-   */
-  CLU.fetchDirectoryMetadata = function (dirPath, dirName) {
+  function _requestBatchMetadata(dirPath, dirName, options, selection) {
     var libraryId = _getLibraryId();
     var contract = _getContract();
     var progressToast = _buildProgressToast();
 
     var requestBody = { directory: dirPath };
+    if (selection && selection.provider === 'comicvine' && selection.id !== null && typeof selection.id !== 'undefined') {
+      requestBody.volume_id = selection.id;
+    }
+    if (selection && selection.provider === 'metron' && selection.id !== null && typeof selection.id !== 'undefined') {
+      requestBody.series_id = selection.id;
+    }
     if (libraryId) {
       requestBody.library_id = libraryId;
+    }
+    if (options && options.forceManualSelection) {
+      requestBody.force_manual_selection = true;
+    }
+    if (options && options.forceProvider) {
+      requestBody.force_provider = options.forceProvider;
+    }
+    if (options && options.overwriteExistingMetadata) {
+      requestBody.overwrite_existing_metadata = true;
     }
 
     fetch('/api/batch-metadata', {
@@ -806,7 +820,8 @@
           return response.json().then(function (data) {
             if (data.requires_selection) {
               _removeToast(progressToast);
-              _showBatchCVVolumeModal(data, dirPath, dirName);
+              data._batchOptions = options || null;
+              _showBatchSeriesSelectionModal(data, dirPath, dirName);
               return;
             }
             if (data.error) {
@@ -829,59 +844,50 @@
         _removeToast(progressToast);
         CLU.showToast('Metadata Error', 'Error fetching metadata: ' + error.message, 'error');
       });
+  }
+
+  /**
+   * Fetch metadata for all files in a directory via SSE streaming.
+   * @param {string} dirPath   Full path to the directory
+   * @param {string} dirName   Display name of the directory
+   */
+  CLU.fetchDirectoryMetadata = function (dirPath, dirName) {
+    _requestBatchMetadata(dirPath, dirName, null, null);
   };
 
-  // ── Public API: Directory batch with pre-selected volume ──────────────
+  CLU.forceFetchDirectoryMetadataViaComicVine = function (dirPath, dirName) {
+    _requestBatchMetadata(dirPath, dirName, {
+      forceManualSelection: true,
+      forceProvider: 'comicvine',
+      overwriteExistingMetadata: true
+    }, null);
+  };
+
+  CLU.forceFetchDirectoryMetadataViaMetron = function (dirPath, dirName) {
+    _requestBatchMetadata(dirPath, dirName, {
+      forceManualSelection: true,
+      forceProvider: 'metron',
+      overwriteExistingMetadata: true
+    }, null);
+  };
+
+  // ── Public API: Directory batch with pre-selected provider match ──────
 
   /**
    * Fetch metadata for all files in a directory with a pre-selected volume.
    * @param {string} dirPath
    * @param {string} dirName
-   * @param {string|number} volumeId
+   * @param {Object} selection  { provider, id }
    */
-  CLU.fetchDirectoryMetadataWithVolume = function (dirPath, dirName, volumeId) {
-    var libraryId = _getLibraryId();
-    var contract = _getContract();
-    var progressToast = _buildProgressToast();
+  CLU.fetchDirectoryMetadataWithSelection = function (dirPath, dirName, selection, options) {
+    _requestBatchMetadata(dirPath, dirName, options || null, selection || null);
+  };
 
-    var requestBody = { directory: dirPath, volume_id: volumeId };
-    if (libraryId) {
-      requestBody.library_id = libraryId;
-    }
-
-    fetch('/api/batch-metadata', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(requestBody)
-    })
-      .then(function (response) {
-        var contentType = response.headers.get('content-type');
-        if (contentType && contentType.indexOf('application/json') !== -1) {
-          return response.json().then(function (data) {
-            if (data.error) {
-              throw new Error(data.error);
-            }
-          });
-        }
-
-        return _processSSEStream(response, progressToast, function (result) {
-          var summary = _buildSummary(result);
-          var toastType = result.errors > 0 ? 'warning' : 'success';
-          CLU.showToast(
-            result.errors > 0 ? 'Metadata Complete (with errors)' : 'Metadata Complete',
-            summary.length > 0 ? summary : 'No changes needed',
-            toastType
-          );
-
-          if (typeof contract.onBatchComplete === 'function') {
-            contract.onBatchComplete(dirPath, result);
-          }
-        });
-      })
-      .catch(function (error) {
-        _removeToast(progressToast);
-        CLU.showToast('Metadata Error', error.message, 'error');
-      });
+  CLU.fetchDirectoryMetadataWithVolume = function (dirPath, dirName, volumeId, options) {
+    _requestBatchMetadata(dirPath, dirName, options || null, {
+      provider: 'comicvine',
+      id: volumeId
+    });
   };
 
 })();

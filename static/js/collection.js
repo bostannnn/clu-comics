@@ -12,7 +12,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const initialPath = window.INITIAL_PATH ||
         new URLSearchParams(window.location.search).get('path') ||
         '';
-    loadDirectory(initialPath);
+    loadCollectionLibraries().finally(() => loadDirectory(initialPath));
 
     // Load dashboard data if at root or library root level
     // Check if path is empty, '/', or a library root (e.g., '/data', '/manga')
@@ -73,6 +73,66 @@ let gridSearchRaw = '';   // Original input value for display
 
 // AbortController for in-flight metadata/thumbnail batch requests
 let batchAbortController = null;
+let collectionLibraries = [];
+let collectionProviderCache = {};
+let currentCollectionProviders = [];
+let currentCollectionLibraryId = null;
+
+async function loadCollectionLibraries() {
+    try {
+        const response = await fetch('/api/libraries');
+        const data = await response.json();
+        collectionLibraries = (data.libraries || data || []).filter(lib => lib.enabled || lib.enabled === undefined);
+    } catch (e) {
+        console.warn('Failed to load collection libraries:', e);
+        collectionLibraries = [];
+    }
+}
+
+function findCollectionLibraryForPath(path) {
+    if (!path) return null;
+    let bestMatch = null;
+    collectionLibraries.forEach((library) => {
+        if (path === library.path || path.startsWith(library.path + '/')) {
+            if (!bestMatch || library.path.length > bestMatch.path.length) {
+                bestMatch = library;
+            }
+        }
+    });
+    return bestMatch;
+}
+
+async function loadCurrentCollectionProviders(path) {
+    const library = findCollectionLibraryForPath(path || currentPath);
+    if (!library || !library.id) {
+        currentCollectionLibraryId = null;
+        currentCollectionProviders = [];
+        return;
+    }
+    currentCollectionLibraryId = library.id;
+    if (collectionProviderCache[library.id]) {
+        currentCollectionProviders = collectionProviderCache[library.id];
+        return;
+    }
+    try {
+        const response = await fetch(`/api/libraries/${library.id}/providers`);
+        const data = await response.json();
+        if (data.success && data.providers) {
+            currentCollectionProviders = data.providers
+                .filter(p => p.enabled)
+                .sort((a, b) => a.priority - b.priority);
+            collectionProviderCache[library.id] = currentCollectionProviders;
+            return;
+        }
+    } catch (e) {
+        console.warn('Failed to load collection providers:', e);
+    }
+    currentCollectionProviders = [];
+}
+
+function hasCollectionProvider(providerType) {
+    return currentCollectionProviders.some(p => p.provider_type === providerType);
+}
 
 /**
  * Handle search input changes
@@ -176,6 +236,7 @@ async function loadDirectory(path, preservePage = false, forceRefresh = false) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
         const data = await response.json();
+        await loadCurrentCollectionProviders(path);
 
         renderBreadcrumbs(data.current_path);
 
@@ -1238,12 +1299,20 @@ function renderGrid(items) {
                 // Replace menu items with folder-specific options
                 const dropdownMenu = actionsDropdown.querySelector('.dropdown-menu');
                 if (dropdownMenu) {
+                    const forceActionItems = [];
+                    if (hasCollectionProvider('comicvine')) {
+                        forceActionItems.push('<li><a class="dropdown-item folder-action-force-fetch-comicvine" href="#"><i class="bi bi-cloud-check"></i> Force Fetch via ComicVine</a></li>');
+                    }
+                    if (hasCollectionProvider('metron')) {
+                        forceActionItems.push('<li><a class="dropdown-item folder-action-force-fetch-metron" href="#"><i class="bi bi-cloud-check"></i> Force Fetch via Metron</a></li>');
+                    }
                     // If at root level, show Missing File Check, Scan Files, and Generate All Missing Thumbnails
                     if (isRootLevel) {
                         dropdownMenu.innerHTML = `
                             <li><a class="dropdown-item folder-action-gen-all-thumbs" href="#"><i class="bi bi-images"></i> Generate All Missing Thumbnails</a></li>
                             <li><a class="dropdown-item folder-action-scan" href="#"><i class="bi bi-arrow-clockwise"></i> Scan Files</a></li>
                             <li><a class="dropdown-item folder-action-fetch-metadata" href="#"><i class="bi bi-cloud-download"></i> Fetch All Metadata</a></li>
+                            ${forceActionItems.join('')}
                             <li><a class="dropdown-item folder-action-missing" href="#"><i class="bi bi-file-earmark-text"></i> Missing File Check</a></li>
                         `;
                     } else {
@@ -1252,6 +1321,7 @@ function renderGrid(items) {
                         <li><a class="dropdown-item folder-action-thumbnail" href="#"><i class="bi bi-image"></i> Generate Thumbnail</a></li>
                         <li><a class="dropdown-item folder-action-scan" href="#"><i class="bi bi-arrow-clockwise"></i> Scan Files</a></li>
                         <li><a class="dropdown-item folder-action-fetch-metadata" href="#"><i class="bi bi-cloud-download"></i> Fetch All Metadata</a></li>
+                        ${forceActionItems.join('')}
                         <li><a class="dropdown-item folder-action-missing" href="#"><i class="bi bi-file-earmark-text"></i> Missing File Check</a></li>
                         <li><a class="dropdown-item folder-action-update-xml" href="#"><i class="bi bi-filetype-xml"></i> Update XML</a></li>
                         <li><hr class="dropdown-divider"></li>
@@ -1316,6 +1386,24 @@ function renderGrid(items) {
                             e.preventDefault();
                             e.stopPropagation();
                             fetchDirMetadataCollection(item.path, item.name);
+                        };
+                    }
+
+                    const forceFetchComicVineAction = dropdownMenu.querySelector('.folder-action-force-fetch-comicvine');
+                    if (forceFetchComicVineAction) {
+                        forceFetchComicVineAction.onclick = (e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            fetchDirMetadataCollection(item.path, item.name, 'comicvine');
+                        };
+                    }
+
+                    const forceFetchMetronAction = dropdownMenu.querySelector('.folder-action-force-fetch-metron');
+                    if (forceFetchMetronAction) {
+                        forceFetchMetronAction.onclick = (e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            fetchDirMetadataCollection(item.path, item.name, 'metron');
                         };
                     }
 
@@ -2658,7 +2746,7 @@ function executeScript(scriptType, filePath) {
 
 function fetchMetadataCollection(filePath, fileName) {
     window._cluMetadata = {
-        getLibraryId: function () { return null; },
+        getLibraryId: function () { return currentCollectionLibraryId; },
         onMetadataFound: function () {
             refreshThumbnail(filePath);
             loadDirectory(currentPath, true);
@@ -2670,9 +2758,9 @@ function fetchMetadataCollection(filePath, fileName) {
     CLU.searchMetadata(filePath, fileName);
 }
 
-function fetchDirMetadataCollection(dirPath, dirName) {
+function fetchDirMetadataCollection(dirPath, dirName, forceProvider) {
     window._cluMetadata = {
-        getLibraryId: function () { return null; },
+        getLibraryId: function () { return currentCollectionLibraryId; },
         onMetadataFound: function () {
             loadDirectory(currentPath, true);
         },
@@ -2680,7 +2768,13 @@ function fetchDirMetadataCollection(dirPath, dirName) {
             loadDirectory(currentPath, true);
         }
     };
-    CLU.fetchDirectoryMetadata(dirPath, dirName);
+    if (forceProvider === 'comicvine') {
+        CLU.forceFetchDirectoryMetadataViaComicVine(dirPath, dirName);
+    } else if (forceProvider === 'metron') {
+        CLU.forceFetchDirectoryMetadataViaMetron(dirPath, dirName);
+    } else {
+        CLU.fetchDirectoryMetadata(dirPath, dirName);
+    }
 }
 
 // ============================================================================
@@ -4406,4 +4500,3 @@ function refreshCurrentView(preservePage = false, forceRefresh = false) {
  * Show a toast notification with title, message, and type
  * Contract setup wrapper for CLU streaming module
  */
-

@@ -14,6 +14,7 @@ let swSelectedFiles = new Set();
 let swLastSelectedIndex = -1;
 let swActiveFilter = null;
 let swReadIssuesSet = new Set();
+let swCurrentProviders = [];
 
 // Load read issues for source wall
 fetch('/api/issues-read-paths')
@@ -76,7 +77,34 @@ function selectLibrary(path, name, id) {
     swCurrentLibrary = { path, name, id };
     document.getElementById('swLibraryName').textContent = name;
     localStorage.setItem('sw_library', JSON.stringify({ path, name, id }));
-    loadPath(path);
+    loadSourceWallProviders(id).finally(() => loadPath(path));
+}
+
+function loadSourceWallProviders(libraryId) {
+    swCurrentProviders = [];
+    if (!libraryId) {
+        return Promise.resolve([]);
+    }
+    return fetch(`/api/libraries/${libraryId}/providers`)
+        .then(r => r.json())
+        .then(data => {
+            if (data.success && data.providers) {
+                swCurrentProviders = data.providers
+                    .filter(p => p.enabled)
+                    .sort((a, b) => a.priority - b.priority);
+                return swCurrentProviders;
+            }
+            return [];
+        })
+        .catch(err => {
+            console.warn('Failed to load source wall providers:', err);
+            swCurrentProviders = [];
+            return [];
+        });
+}
+
+function hasSourceWallProvider(providerType) {
+    return swCurrentProviders.some(p => p.provider_type === providerType);
 }
 
 // ── Path loading ──
@@ -312,6 +340,13 @@ function renderTable() {
         const tdActions = document.createElement('td');
         tdActions.className = 'sw-actions-cell';
         const dirDropdownId = 'swDirDrop' + dir.name.replace(/[^a-zA-Z0-9]/g, '_');
+        const forceActions = [];
+        if (hasSourceWallProvider('comicvine')) {
+            forceActions.push('<li><a class="dropdown-item" href="#" data-action="dir-force-metadata-comicvine"><i class="bi bi-cloud-check me-2"></i>Force Fetch via ComicVine</a></li>');
+        }
+        if (hasSourceWallProvider('metron')) {
+            forceActions.push('<li><a class="dropdown-item" href="#" data-action="dir-force-metadata-metron"><i class="bi bi-cloud-check me-2"></i>Force Fetch via Metron</a></li>');
+        }
         tdActions.innerHTML =
             '<div class="dropdown">' +
             '<button class="btn btn-sm btn-outline-secondary dropdown-toggle sw-action-btn" type="button"' +
@@ -319,6 +354,7 @@ function renderTable() {
             '<i class="bi bi-three-dots-vertical"></i></button>' +
             '<ul class="dropdown-menu dropdown-menu-end" aria-labelledby="' + dirDropdownId + '">' +
             '<li><a class="dropdown-item" href="#" data-action="dir-metadata"><i class="bi bi-cloud-download me-2"></i>Fetch All Metadata</a></li>' +
+            forceActions.join('') +
             '</ul></div>';
         tdActions.querySelector('.dropdown-toggle').addEventListener('click', (e) => {
             e.stopPropagation();
@@ -328,6 +364,22 @@ function renderTable() {
             e.stopPropagation();
             fetchDirMetadataSW(dir.path, dir.name);
         });
+        const forceComicVineAction = tdActions.querySelector('[data-action="dir-force-metadata-comicvine"]');
+        if (forceComicVineAction) {
+            forceComicVineAction.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                fetchDirMetadataSW(dir.path, dir.name, 'comicvine');
+            });
+        }
+        const forceMetronAction = tdActions.querySelector('[data-action="dir-force-metadata-metron"]');
+        if (forceMetronAction) {
+            forceMetronAction.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                fetchDirMetadataSW(dir.path, dir.name, 'metron');
+            });
+        }
         tr.appendChild(tdActions);
 
         // Read column (empty for directories)
@@ -1035,9 +1087,15 @@ function fetchMetadataSW(path, name) {
     CLU.searchMetadata(path, name);
 }
 
-function fetchDirMetadataSW(path, name) {
+function fetchDirMetadataSW(path, name, forceProvider) {
     setupMetadataContract();
-    CLU.fetchDirectoryMetadata(path, name);
+    if (forceProvider === 'comicvine') {
+        CLU.forceFetchDirectoryMetadataViaComicVine(path, name);
+    } else if (forceProvider === 'metron') {
+        CLU.forceFetchDirectoryMetadataViaMetron(path, name);
+    } else {
+        CLU.fetchDirectoryMetadata(path, name);
+    }
 }
 
 // ── Bulk Actions ──

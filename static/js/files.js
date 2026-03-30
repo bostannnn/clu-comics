@@ -197,7 +197,7 @@ function searchMetadataForFile(filePath, fileName, panel) {
 }
 
 // Set up metadata contract for directory batch and call CLU.fetchDirectoryMetadata
-function fetchDirectoryMetadataForPanel(dirPath, dirName, panel) {
+function fetchDirectoryMetadataForPanel(dirPath, dirName, panel, forceProvider) {
   window._cluMetadata = {
     getLibraryId: function () { return getLibraryIdForPanel(panel); },
     onMetadataFound: function (fp, data) {
@@ -205,7 +205,47 @@ function fetchDirectoryMetadataForPanel(dirPath, dirName, panel) {
     },
     onBatchComplete: function (dp) { refreshPanelForPath(dp); }
   };
-  CLU.fetchDirectoryMetadata(dirPath, dirName);
+  if (forceProvider === 'comicvine') {
+    CLU.forceFetchDirectoryMetadataViaComicVine(dirPath, dirName);
+  } else if (forceProvider === 'metron') {
+    CLU.forceFetchDirectoryMetadataViaMetron(dirPath, dirName);
+  } else {
+    CLU.fetchDirectoryMetadata(dirPath, dirName);
+  }
+}
+
+function getForceMetadataProvidersForPanel(panel) {
+  const providers = getProvidersForPanel(panel);
+  const libraryId = getLibraryIdForPanel(panel);
+  if (libraryId) {
+    return providers
+      .map(p => p.provider_type)
+      .filter(type => type === 'comicvine' || type === 'metron');
+  }
+
+  const fallback = [];
+  if (comicVineAvailable) fallback.push('comicvine');
+  if (metronAvailable) fallback.push('metron');
+  return fallback;
+}
+
+function appendForceMetadataMenuItems(dropdownMenu, fullPath, dirName, panel) {
+  const forceProviders = getForceMetadataProvidersForPanel(panel);
+  forceProviders.forEach((providerType) => {
+    const item = document.createElement("li");
+    const link = document.createElement("a");
+    const providerLabel = providerType === 'metron' ? 'Metron' : 'ComicVine';
+    link.className = "dropdown-item";
+    link.href = "#";
+    link.innerHTML = '<i class="bi bi-cloud-check me-2"></i>Force Fetch via ' + providerLabel;
+    link.onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      fetchDirectoryMetadataForPanel(fullPath, dirName, panel, providerType);
+    };
+    item.appendChild(link);
+    dropdownMenu.appendChild(item);
+  });
 }
 
 // Helper function to create drop target item
@@ -669,6 +709,8 @@ function createListItem(itemName, fullPath, type, panel, isDraggable) {
       };
       enhanceItem.appendChild(enhanceLink);
       dropdownMenu.appendChild(enhanceItem);
+
+      appendForceMetadataMenuItems(dropdownMenu, fullPath, fileData.name, panel);
 
       // Remove All XML option
       const removeXmlItem = document.createElement("li");

@@ -89,6 +89,58 @@ def _resolve_comicvine_volume_data(
     return volume_data
 
 
+def _extract_batch_series_name(directory, comic_files):
+    """Derive a likely series name for folder batch metadata."""
+    series_name = os.path.basename(directory)
+    series_name = re.sub(r'\s*\(\d{4}\).*$', '', series_name)
+    series_name = re.sub(r'\s*v\d+.*$', '', series_name)
+    series_name = re.sub(r'\s*-\s*complete.*$', '', series_name, flags=re.IGNORECASE)
+    series_name = series_name.strip()
+
+    if not series_name and comic_files:
+        filename = os.path.basename(comic_files[0])
+        series_name = os.path.splitext(filename)[0]
+        series_name = re.sub(r'\s*\(\d{4}\)', '', series_name)
+        series_name = re.sub(r'\s*#?\d{1,4}\s*$', '', series_name)
+        series_name = re.sub(r'\s*-\s*\d{1,4}\s*$', '', series_name)
+        series_name = re.sub(r'\s+Issue\s+\d+', '', series_name, flags=re.IGNORECASE)
+        series_name = series_name.strip()
+
+    return series_name
+
+
+def _write_selected_comicvine_cvinfo(cvinfo_path, api_key, volume_id):
+    """Overwrite folder cvinfo with the selected ComicVine volume and cached details."""
+    url = f"https://comicvine.gamespot.com/volume/4050-{volume_id}/"
+    with open(cvinfo_path, 'w', encoding='utf-8') as f:
+        f.write(url)
+
+    volume_details = comicvine.get_volume_details(api_key, volume_id)
+    if volume_details:
+        comicvine.write_cvinfo_fields(
+            cvinfo_path,
+            volume_details.get('publisher_name'),
+            volume_details.get('start_year'),
+        )
+    return volume_details
+
+
+def _write_selected_metron_cvinfo(cvinfo_path, metron_api, series_id):
+    """Overwrite folder cvinfo with the selected Metron series and any linked ComicVine context."""
+    series_details = metron.get_series_details(metron_api, series_id)
+    if not series_details:
+        return None
+
+    metron.create_cvinfo_file(
+        cvinfo_path,
+        cv_id=series_details.get('cv_id'),
+        series_id=series_id,
+        publisher_name=series_details.get('publisher_name'),
+        start_year=series_details.get('year_began'),
+    )
+    return series_details
+
+
 def generate_comicinfo_xml(issue_data, series_data=None):
     """
     Generate a ComicInfo.xml that ComicRack will actually read.
@@ -951,7 +1003,11 @@ def batch_metadata():
         data = request.get_json()
         directory = data.get('directory')
         selected_volume_id = data.get('volume_id')  # Optional: pre-selected ComicVine volume ID
+        selected_series_id = data.get('series_id')  # Optional: pre-selected Metron series ID
         library_id = data.get('library_id')  # Optional: library ID for provider lookup
+        force_manual_selection = bool(data.get('force_manual_selection'))
+        force_provider = (data.get('force_provider') or '').strip().lower()
+        overwrite_existing_metadata = bool(data.get('overwrite_existing_metadata'))
 
         if not directory:
             return jsonify({"error": "Missing directory parameter"}), 400
@@ -1028,7 +1084,9 @@ def batch_metadata():
 
         app_logger.info(f"Extracted year from filename/folder: {extracted_year}")
 
-        # Step 2: Check for cvinfo
+        series_name = _extract_batch_series_name(directory, comic_files)
+
+        # Step 2: Check for cvinfo / resolve folder series context
         cvinfo_path = os.path.join(directory, 'cvinfo')
         cv_volume_id = None
         series_id = None
@@ -1051,28 +1109,87 @@ def batch_metadata():
                     elif ptype in comic_providers_set:
                         break
 
-        if not os.path.exists(cvinfo_path):
-            # Extract series name from folder first
-            series_name = os.path.basename(directory)
-            series_name = re.sub(r'\s*\(\d{4}\).*$', '', series_name)  # Remove (1994) and everything after
-            series_name = re.sub(r'\s*v\d+.*$', '', series_name)  # Remove v1, v2 etc
-            series_name = re.sub(r'\s*-\s*complete.*$', '', series_name, flags=re.IGNORECASE)
-            series_name = series_name.strip()
+        if force_manual_selection:
+            if force_provider not in {'comicvine', 'metron'}:
+                return jsonify({"error": "Force Fetch Metadata requires a valid provider"}), 400
 
-            # If folder name didn't yield a series name, try extracting from first filename
-            if not series_name and comic_files:
-                filename = os.path.basename(comic_files[0])
-                # Remove extension
-                series_name = os.path.splitext(filename)[0]
-                # Remove year in parentheses: "(2005)"
-                series_name = re.sub(r'\s*\(\d{4}\)', '', series_name)
-                # Remove issue number patterns: "003", "#3", "Issue 3"
-                series_name = re.sub(r'\s*#?\d{1,4}\s*$', '', series_name)  # Trailing numbers
-                series_name = re.sub(r'\s*-\s*\d{1,4}\s*$', '', series_name)  # "- 003"
-                series_name = re.sub(r'\s+Issue\s+\d+', '', series_name, flags=re.IGNORECASE)
-                series_name = series_name.strip()
-                app_logger.info(f"Extracted series name from filename: '{series_name}'")
+            app_logger.info(
+                f"Force batch metadata enabled via {force_provider} for '{series_name}' (year: {extracted_year})"
+            )
 
+            if force_provider == 'comicvine':
+                if not comicvine_available:
+                    return jsonify({"error": "ComicVine is not enabled for this library"}), 400
+
+                if not selected_volume_id:
+                    volumes = comicvine.search_volumes(comicvine_api_key, series_name, extracted_year)
+                    if not volumes:
+                        return jsonify({"error": f"No ComicVine volumes found for '{series_name}'"}), 404
+
+                    return jsonify({
+                        "requires_selection": True,
+                        "directory": directory,
+                        "parsed_filename": {
+                            "series_name": series_name,
+                            "issue_number": str(len(comic_files)),
+                            "year": extracted_year,
+                        },
+                        "possible_matches": volumes,
+                        "provider": "comicvine",
+                    })
+
+                cv_volume_id = selected_volume_id
+                volume_details = _write_selected_comicvine_cvinfo(
+                    cvinfo_path,
+                    comicvine_api_key,
+                    cv_volume_id,
+                )
+                cvinfo_created = True
+                if volume_details:
+                    cvinfo_start_year = volume_details.get('start_year')
+            elif force_provider == 'metron':
+                if not (metron_available and metron_api):
+                    return jsonify({"error": "Metron is not enabled for this library"}), 400
+
+                if not selected_series_id:
+                    metron_matches = metron.search_series_candidates_by_name(
+                        metron_api,
+                        series_name,
+                        extracted_year,
+                    )
+                    if not metron_matches:
+                        return jsonify({"error": f"No Metron series found for '{series_name}'"}), 404
+
+                    return jsonify({
+                        "requires_selection": True,
+                        "directory": directory,
+                        "parsed_filename": {
+                            "series_name": series_name,
+                            "issue_number": str(len(comic_files)),
+                            "year": extracted_year,
+                        },
+                        "possible_matches": [{
+                            "id": match.get('id'),
+                            "name": match.get('name'),
+                            "publisher_name": match.get('publisher_name'),
+                            "start_year": match.get('year_began'),
+                            "cv_id": match.get('cv_id'),
+                        } for match in metron_matches],
+                        "provider": "metron",
+                    })
+
+                series_id = selected_series_id
+                series_details = _write_selected_metron_cvinfo(
+                    cvinfo_path,
+                    metron_api,
+                    series_id,
+                )
+                cvinfo_created = True
+                metron_id_added = True
+                if series_details:
+                    cv_volume_id = series_details.get('cv_id')
+                    cvinfo_start_year = series_details.get('year_began')
+        elif not os.path.exists(cvinfo_path):
             app_logger.info(f"No cvinfo found, searching for series: '{series_name}' (year: {extracted_year})")
 
             # Try Metron first if available (skip when manga providers have priority)
@@ -1130,18 +1247,15 @@ def batch_metadata():
 
                     # Create cvinfo with the selected/found volume
                     if cv_volume_id:
-                        url = f"https://comicvine.gamespot.com/volume/4050-{cv_volume_id}/"
-                        with open(cvinfo_path, 'w', encoding='utf-8') as f:
-                            f.write(url)
+                        volume_details = _write_selected_comicvine_cvinfo(
+                            cvinfo_path,
+                            comicvine_api_key,
+                            cv_volume_id,
+                        )
                         cvinfo_created = True
                         app_logger.info(f"Created cvinfo with ComicVine volume ID: {cv_volume_id}")
 
-                        # Fetch and save volume details
-                        volume_details = comicvine.get_volume_details(comicvine_api_key, cv_volume_id)
                         if volume_details:
-                            comicvine.write_cvinfo_fields(cvinfo_path,
-                                volume_details.get('publisher_name'),
-                                volume_details.get('start_year'))
                             cvinfo_start_year = volume_details.get('start_year')
                 except Exception as e:
                     app_logger.error(f"Error searching ComicVine: {e}")
@@ -1241,8 +1355,10 @@ def batch_metadata():
                         existing = read_comicinfo_from_zip(file_path)
                         existing_notes = existing.get('Notes', '').strip() if existing else ''
 
-                        # Skip if has metadata, unless it's just Amazon scraped data
-                        if existing_notes and 'Scraped metadata from Amazon' not in existing_notes:
+                        # Normal batch preserves files with existing metadata.
+                        if (not overwrite_existing_metadata and
+                                existing_notes and
+                                'Scraped metadata from Amazon' not in existing_notes):
                             app_logger.debug(f"Skipping {filename} - already has metadata")
                             result['skipped'] += 1
                             result['details'].append({'file': filename, 'status': 'skipped', 'reason': 'has metadata'})
@@ -1559,17 +1675,23 @@ def batch_metadata():
                     }
 
                     if library_id and library_providers:
-                        # Use library-configured priority order
-                        for provider_config in library_providers:
-                            if provider_config.get('enabled', True):
-                                try_fn = provider_try_fns.get(provider_config['provider_type'])
-                                if try_fn and try_fn():
-                                    break
+                        provider_order = [
+                            p['provider_type']
+                            for p in library_providers
+                            if p.get('enabled', True)
+                        ]
                     else:
-                        # Fallback for no library_id: try all available providers
-                        for name, try_fn in provider_try_fns.items():
-                            if try_fn():
-                                break
+                        provider_order = list(provider_try_fns.keys())
+
+                    if force_manual_selection and force_provider in provider_try_fns:
+                        provider_order = [force_provider] + [
+                            p for p in provider_order if p != force_provider
+                        ]
+
+                    for provider_name in provider_order:
+                        try_fn = provider_try_fns.get(provider_name)
+                        if try_fn and try_fn():
+                            break
 
                     if metadata:
                         # Generate and add ComicInfo.xml

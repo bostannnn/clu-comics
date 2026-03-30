@@ -127,6 +127,14 @@ def _make_cbz(path, with_comicinfo=True):
             zf.writestr("ComicInfo.xml", "<ComicInfo><Series>Test</Series></ComicInfo>")
 
 
+def _make_cbz_with_notes(path, notes):
+    """Helper to create a CBZ with an existing ComicInfo Notes value."""
+    xml = f"<ComicInfo><Series>Test</Series><Notes>{notes}</Notes></ComicInfo>"
+    with zipfile.ZipFile(path, 'w') as zf:
+        zf.writestr("page_001.png", b"fake image data")
+        zf.writestr("ComicInfo.xml", xml)
+
+
 class TestRemoveComicInfoHelper:
 
     @patch("core.database.set_has_comicinfo")
@@ -590,6 +598,272 @@ class TestComicVineVolumeYearHandling:
         mock_write_cvinfo.assert_called_once_with(
             "/data/Batman/cvinfo", "DC Comics", 2016
         )
+
+
+class TestBatchForceMetadata:
+
+    @patch("routes.metadata.comicvine.parse_cvinfo_volume_id")
+    @patch("routes.metadata.comicvine.search_volumes", return_value=[
+        {"id": 4050, "name": "Batman", "start_year": 2016, "publisher_name": "DC Comics"}
+    ])
+    @patch("routes.metadata.is_valid_library_path", return_value=True)
+    @patch("routes.metadata.gcd.is_mysql_available", return_value=False)
+    @patch("routes.metadata.metron.is_metron_configured", return_value=False)
+    def test_force_batch_ignores_existing_cvinfo_and_requires_manual_selection(
+        self,
+        mock_metron_configured,
+        mock_gcd_available,
+        mock_valid_library_path,
+        mock_search_volumes,
+        mock_parse_cvinfo,
+        client,
+        tmp_path,
+    ):
+        batch_dir = tmp_path / "data" / "Batman (2020)"
+        batch_dir.mkdir(parents=True)
+        (batch_dir / "cvinfo").write_text("https://comicvine.gamespot.com/volume/4050-9999/\n", encoding="utf-8")
+        _make_cbz(str(batch_dir / "Batman 001 (2020).cbz"), with_comicinfo=False)
+
+        client.application.config["COMICVINE_API_KEY"] = "test-key"
+
+        resp = client.post("/api/batch-metadata", json={
+            "directory": str(batch_dir),
+            "force_manual_selection": True,
+            "force_provider": "comicvine",
+            "overwrite_existing_metadata": True,
+        })
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["requires_selection"] is True
+        assert data["provider"] == "comicvine"
+        assert data["possible_matches"][0]["id"] == 4050
+        mock_search_volumes.assert_called_once_with("test-key", "Batman", 2020)
+        mock_parse_cvinfo.assert_not_called()
+
+    @patch("routes.metadata.time.sleep", return_value=None)
+    @patch("core.database.update_file_index_from_comicinfo")
+    @patch("cbz_ops.rename.rename_comic_from_metadata", side_effect=lambda file_path, metadata: (file_path, False))
+    @patch("routes.metadata.add_comicinfo_to_cbz")
+    @patch("routes.metadata.comicvine.get_metadata_by_volume_id", return_value={
+        "Series": "Batman",
+        "Number": "1",
+        "Volume": 2016,
+        "Year": 2020,
+        "Notes": "Fetched from ComicVine",
+    })
+    @patch("routes.metadata.comicvine.get_volume_details", return_value={"start_year": 2016, "publisher_name": "DC Comics"})
+    @patch("routes.metadata.is_valid_library_path", return_value=True)
+    @patch("routes.metadata.gcd.is_mysql_available", return_value=False)
+    @patch("routes.metadata.metron.is_metron_configured", return_value=False)
+    def test_force_batch_overwrites_existing_comicinfo_and_rewrites_cvinfo(
+        self,
+        mock_metron_configured,
+        mock_gcd_available,
+        mock_valid_library_path,
+        mock_get_volume_details,
+        mock_get_metadata,
+        mock_add_xml,
+        mock_rename,
+        mock_update_index,
+        mock_sleep,
+        client,
+        tmp_path,
+    ):
+        batch_dir = tmp_path / "data" / "Batman (2020)"
+        batch_dir.mkdir(parents=True)
+        cvinfo_path = batch_dir / "cvinfo"
+        cvinfo_path.write_text(
+            "https://comicvine.gamespot.com/volume/4050-9999/\n"
+            "publisher_name: Wrong Publisher\n"
+            "start_year: 2020\n"
+            "series_id: 9999\n",
+            encoding="utf-8",
+        )
+        _make_cbz_with_notes(
+            str(batch_dir / "Batman 001 (2020).cbz"),
+            "Hand-edited metadata",
+        )
+
+        client.application.config["COMICVINE_API_KEY"] = "test-key"
+
+        resp = client.post("/api/batch-metadata", json={
+            "directory": str(batch_dir),
+            "volume_id": 4050,
+            "force_manual_selection": True,
+            "force_provider": "comicvine",
+            "overwrite_existing_metadata": True,
+        })
+
+        assert resp.status_code == 200
+        resp.get_data(as_text=True)
+        assert mock_add_xml.called is True
+        mock_get_volume_details.assert_called_once_with("test-key", 4050)
+        mock_get_metadata.assert_called_once_with("test-key", 4050, "1", start_year=2016)
+
+        cvinfo_text = cvinfo_path.read_text(encoding="utf-8")
+        assert "4050-4050" in cvinfo_text
+        assert "publisher_name: DC Comics" in cvinfo_text
+        assert "start_year: 2016" in cvinfo_text
+        assert "series_id: 9999" not in cvinfo_text
+
+    @patch("routes.metadata.metron.search_series_candidates_by_name", return_value=[
+        {"id": 501, "name": "Batman", "cv_id": 4050, "publisher_name": "DC Comics", "year_began": 2016}
+    ])
+    @patch("routes.metadata.comicvine.parse_cvinfo_volume_id")
+    @patch("routes.metadata.is_valid_library_path", return_value=True)
+    @patch("routes.metadata.gcd.is_mysql_available", return_value=False)
+    @patch("routes.metadata.metron.get_flask_api", return_value=MagicMock())
+    @patch("routes.metadata.metron.is_metron_configured", return_value=True)
+    def test_force_batch_metron_ignores_existing_cvinfo_and_requires_manual_selection(
+        self,
+        mock_metron_configured,
+        mock_get_flask_api,
+        mock_gcd_available,
+        mock_valid_library_path,
+        mock_parse_cvinfo,
+        mock_search_candidates,
+        client,
+        tmp_path,
+    ):
+        batch_dir = tmp_path / "data" / "Batman (2020)"
+        batch_dir.mkdir(parents=True)
+        (batch_dir / "cvinfo").write_text("https://comicvine.gamespot.com/volume/4050-9999/\n", encoding="utf-8")
+        _make_cbz(str(batch_dir / "Batman 001 (2020).cbz"), with_comicinfo=False)
+
+        resp = client.post("/api/batch-metadata", json={
+            "directory": str(batch_dir),
+            "force_manual_selection": True,
+            "force_provider": "metron",
+            "overwrite_existing_metadata": True,
+        })
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["requires_selection"] is True
+        assert data["provider"] == "metron"
+        assert data["possible_matches"][0]["id"] == 501
+        mock_search_candidates.assert_called_once()
+        mock_parse_cvinfo.assert_not_called()
+
+    @patch("routes.metadata.time.sleep", return_value=None)
+    @patch("core.database.update_file_index_from_comicinfo")
+    @patch("cbz_ops.rename.rename_comic_from_metadata", side_effect=lambda file_path, metadata: (file_path, False))
+    @patch("routes.metadata.add_comicinfo_to_cbz")
+    @patch("routes.metadata.comicvine.get_metadata_by_volume_id")
+    @patch("routes.metadata.metron.map_to_comicinfo", return_value={
+        "Series": "Batman",
+        "Number": "1",
+        "Volume": 2016,
+        "Year": 2020,
+        "Notes": "Fetched from Metron",
+    })
+    @patch("routes.metadata.metron.get_issue_metadata", return_value={"id": 9001})
+    @patch("routes.metadata.metron.create_cvinfo_file")
+    @patch("routes.metadata.metron.get_series_details", return_value={
+        "id": 501,
+        "cv_id": 4050,
+        "publisher_name": "DC Comics",
+        "year_began": 2016,
+    })
+    @patch("routes.metadata.is_valid_library_path", return_value=True)
+    @patch("routes.metadata.gcd.is_mysql_available", return_value=False)
+    @patch("routes.metadata.metron.get_flask_api", return_value=MagicMock())
+    @patch("routes.metadata.metron.is_metron_configured", return_value=True)
+    @patch("core.database.get_library_providers", return_value=[
+        {"provider_type": "comicvine", "enabled": True, "priority": 0},
+        {"provider_type": "metron", "enabled": True, "priority": 1},
+    ])
+    def test_force_batch_metron_overrides_library_priority_and_rewrites_cvinfo(
+        self,
+        mock_library_providers,
+        mock_metron_configured,
+        mock_get_flask_api,
+        mock_gcd_available,
+        mock_valid_library_path,
+        mock_get_series_details,
+        mock_create_cvinfo,
+        mock_get_issue_metadata,
+        mock_map_to_comicinfo,
+        mock_get_cv_metadata,
+        mock_add_xml,
+        mock_rename,
+        mock_update_index,
+        mock_sleep,
+        client,
+        tmp_path,
+    ):
+        batch_dir = tmp_path / "data" / "Batman (2020)"
+        batch_dir.mkdir(parents=True)
+        _make_cbz_with_notes(
+            str(batch_dir / "Batman 001 (2020).cbz"),
+            "Hand-edited metadata",
+        )
+
+        resp = client.post("/api/batch-metadata", json={
+            "directory": str(batch_dir),
+            "series_id": 501,
+            "library_id": 123,
+            "force_manual_selection": True,
+            "force_provider": "metron",
+            "overwrite_existing_metadata": True,
+        })
+
+        assert resp.status_code == 200
+        resp.get_data(as_text=True)
+        mock_create_cvinfo.assert_called_once_with(
+            str(batch_dir / "cvinfo"),
+            cv_id=4050,
+            series_id=501,
+            publisher_name="DC Comics",
+            start_year=2016,
+        )
+        mock_get_issue_metadata.assert_called_once_with(mock_get_flask_api.return_value, 501, "1")
+        mock_map_to_comicinfo.assert_called_once_with({"id": 9001})
+        mock_add_xml.assert_called_once()
+        mock_get_cv_metadata.assert_not_called()
+
+    @patch("routes.metadata.time.sleep", return_value=None)
+    @patch("core.database.update_file_index_from_comicinfo")
+    @patch("cbz_ops.rename.rename_comic_from_metadata", side_effect=lambda file_path, metadata: (file_path, False))
+    @patch("routes.metadata.add_comicinfo_to_cbz")
+    @patch("routes.metadata.is_valid_library_path", return_value=True)
+    @patch("routes.metadata.gcd.is_mysql_available", return_value=False)
+    @patch("routes.metadata.metron.is_metron_configured", return_value=False)
+    def test_default_batch_still_skips_existing_meaningful_comicinfo(
+        self,
+        mock_metron_configured,
+        mock_gcd_available,
+        mock_valid_library_path,
+        mock_add_xml,
+        mock_rename,
+        mock_update_index,
+        mock_sleep,
+        client,
+        tmp_path,
+    ):
+        batch_dir = tmp_path / "data" / "Batman (2020)"
+        batch_dir.mkdir(parents=True)
+        (batch_dir / "cvinfo").write_text(
+            "https://comicvine.gamespot.com/volume/4050-4050/\n"
+            "publisher_name: DC Comics\n"
+            "start_year: 2016\n",
+            encoding="utf-8",
+        )
+        _make_cbz_with_notes(
+            str(batch_dir / "Batman 001 (2020).cbz"),
+            "Hand-edited metadata",
+        )
+
+        client.application.config["COMICVINE_API_KEY"] = "test-key"
+
+        resp = client.post("/api/batch-metadata", json={
+            "directory": str(batch_dir),
+        })
+
+        assert resp.status_code == 200
+        resp.get_data(as_text=True)
+        assert mock_add_xml.called is False
 
 
 class TestBatchMetadataRenameUpdatesIndex:

@@ -783,6 +783,58 @@ def search_series_by_name(
     return _api_call(_call, f"searching for series '{series_name}'")
 
 
+def search_series_candidates_by_name(
+    api, series_name: str, year: Optional[int] = None
+) -> List[Dict[str, Any]]:
+    """
+    Search Metron for candidate series matches, optionally ranked by year.
+
+    Args:
+        api: Mokkari API client
+        series_name: Series name to search for
+        year: Optional year to rank results by year_began proximity
+
+    Returns:
+        List of dicts with id, name, cv_id, publisher_name, year_began
+    """
+    if not api or not series_name:
+        return []
+
+    def _call():
+        app_logger.info(
+            f"Searching Metron candidates for series: '{series_name}' (year: {year})"
+        )
+        results = api.series_list({"name": series_name})
+        if not results:
+            app_logger.info(f"No Metron series found for '{series_name}'")
+            return []
+
+        series_list = list(results)
+        app_logger.info(f"Found {len(series_list)} Metron series candidate matches")
+
+        if year and len(series_list) > 1:
+
+            def year_distance(s):
+                s_year = getattr(s, "year_began", None)
+                return abs(s_year - year) if s_year is not None else 9999
+
+            series_list = sorted(series_list, key=year_distance)
+
+        candidates = []
+        for series in series_list:
+            publisher = getattr(series, "publisher", None)
+            candidates.append({
+                "id": getattr(series, "id", None),
+                "name": getattr(series, "name", "") or getattr(series, "display_name", ""),
+                "cv_id": getattr(series, "cv_id", None),
+                "publisher_name": getattr(publisher, "name", None) if publisher else None,
+                "year_began": getattr(series, "year_began", None),
+            })
+        return candidates
+
+    return _api_call(_call, f"searching candidates for series '{series_name}'", default=[]) or []
+
+
 def get_series_details(api, series_id: int) -> Optional[Dict[str, Any]]:
     """
     Get full details for a Metron series including cv_id, publisher, year_began.
