@@ -2788,6 +2788,8 @@ function updateRenameButtonVisibility(panel) {
     let renameButton = renameRow.querySelector('.rename-files-btn');
     let replaceButton = renameRow.querySelector('.replace-text-btn');
     let seriesRenameButton = renameRow.querySelector('.series-rename-btn');
+    let forceComicVineButton = renameRow.querySelector('.force-metadata-comicvine-btn');
+    let forceMetronButton = renameRow.querySelector('.force-metadata-metron-btn');
 
     if (hasFiles) {
       // Create or update the rename text button
@@ -2846,11 +2848,59 @@ function updateRenameButtonVisibility(panel) {
         console.log('Series rename button clicked, path from data:', pathFromData, 'panel:', panelFromData);
         openRenameFilesModal(pathFromData, panelFromData);
       };
+
+      const forceProviders = getForceMetadataProvidersForPanel(panel);
+
+      if (forceProviders.includes('comicvine')) {
+        if (!forceComicVineButton) {
+          forceComicVineButton = document.createElement('button');
+          forceComicVineButton.className = 'btn btn-outline-primary btn-sm force-metadata-comicvine-btn me-2';
+          forceComicVineButton.innerHTML = '<i class="bi bi-cloud-check me-2"></i>Force ComicVine';
+          forceComicVineButton.title = 'Force match all files in this directory via ComicVine';
+          renameRow.appendChild(forceComicVineButton);
+        }
+        forceComicVineButton.style.display = '';
+        forceComicVineButton.dataset.currentPath = currentPath;
+        forceComicVineButton.dataset.currentPanel = panel;
+        forceComicVineButton.onclick = function (e) {
+          e.preventDefault();
+          const pathFromData = this.dataset.currentPath;
+          const panelFromData = this.dataset.currentPanel;
+          const dirName = pathFromData.split('/').filter(Boolean).pop() || pathFromData;
+          fetchDirectoryMetadataForPanel(pathFromData, dirName, panelFromData, 'comicvine');
+        };
+      } else if (forceComicVineButton) {
+        forceComicVineButton.style.display = 'none';
+      }
+
+      if (forceProviders.includes('metron')) {
+        if (!forceMetronButton) {
+          forceMetronButton = document.createElement('button');
+          forceMetronButton.className = 'btn btn-outline-info btn-sm force-metadata-metron-btn me-2';
+          forceMetronButton.innerHTML = '<i class="bi bi-cloud-check me-2"></i>Force Metron';
+          forceMetronButton.title = 'Force match all files in this directory via Metron';
+          renameRow.appendChild(forceMetronButton);
+        }
+        forceMetronButton.style.display = '';
+        forceMetronButton.dataset.currentPath = currentPath;
+        forceMetronButton.dataset.currentPanel = panel;
+        forceMetronButton.onclick = function (e) {
+          e.preventDefault();
+          const pathFromData = this.dataset.currentPath;
+          const panelFromData = this.dataset.currentPanel;
+          const dirName = pathFromData.split('/').filter(Boolean).pop() || pathFromData;
+          fetchDirectoryMetadataForPanel(pathFromData, dirName, panelFromData, 'metron');
+        };
+      } else if (forceMetronButton) {
+        forceMetronButton.style.display = 'none';
+      }
     } else {
       // Hide file-related buttons when no files
       if (renameButton) renameButton.style.display = 'none';
       if (replaceButton) replaceButton.style.display = 'none';
       if (seriesRenameButton) seriesRenameButton.style.display = 'none';
+      if (forceComicVineButton) forceComicVineButton.style.display = 'none';
+      if (forceMetronButton) forceMetronButton.style.display = 'none';
     }
 
     // Create or update the Add CVINFO button (always visible for non-root folders)

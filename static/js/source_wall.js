@@ -107,12 +107,68 @@ function hasSourceWallProvider(providerType) {
     return swCurrentProviders.some(p => p.provider_type === providerType);
 }
 
+function renderCurrentFolderActions() {
+    const actionBar = document.getElementById('swFolderActions');
+    if (!actionBar) return;
+
+    actionBar.innerHTML = '';
+
+    if (!swCurrentLibrary || !swCurrentPath || swCurrentPath === swCurrentLibrary.path || swFiles.length === 0) {
+        actionBar.classList.add('d-none');
+        return;
+    }
+
+    const title = document.createElement('span');
+    title.className = 'text-muted small align-self-center me-1';
+    title.textContent = 'Current folder:';
+    actionBar.appendChild(title);
+
+    if (hasSourceWallProvider('comicvine')) {
+        const comicVineButton = document.createElement('button');
+        comicVineButton.className = 'btn btn-outline-primary btn-sm';
+        comicVineButton.innerHTML = '<i class="bi bi-cloud-check me-1"></i>Force ComicVine';
+        comicVineButton.title = 'Force match all files in the current folder via ComicVine';
+        comicVineButton.addEventListener('click', () => {
+            fetchDirMetadataSW(swCurrentPath, getCurrentFolderName(), 'comicvine');
+        });
+        actionBar.appendChild(comicVineButton);
+    }
+
+    if (hasSourceWallProvider('metron')) {
+        const metronButton = document.createElement('button');
+        metronButton.className = 'btn btn-outline-info btn-sm';
+        metronButton.innerHTML = '<i class="bi bi-cloud-check me-1"></i>Force Metron';
+        metronButton.title = 'Force match all files in the current folder via Metron';
+        metronButton.addEventListener('click', () => {
+            fetchDirMetadataSW(swCurrentPath, getCurrentFolderName(), 'metron');
+        });
+        actionBar.appendChild(metronButton);
+    }
+
+    if (actionBar.children.length === 1) {
+        actionBar.classList.add('d-none');
+        return;
+    }
+
+    actionBar.classList.remove('d-none');
+    actionBar.classList.add('d-flex');
+}
+
+function getCurrentFolderName() {
+    if (!swCurrentPath) return '';
+    const parts = swCurrentPath.split('/').filter(Boolean);
+    return parts.length > 0 ? parts[parts.length - 1] : swCurrentPath;
+}
+
 // ── Path loading ──
 
 function loadPath(path) {
     swCurrentPath = path;
+    swDirectories = [];
+    swFiles = [];
     swSelectedFiles.clear();
     updateBulkBar();
+    renderCurrentFolderActions();
 
     document.getElementById('swTable').style.display = 'none';
     document.getElementById('swEmptyState').style.display = 'none';
@@ -137,11 +193,13 @@ function loadPath(path) {
             }));
 
             renderBreadcrumb();
+            renderCurrentFolderActions();
             renderFilterBar();
             renderTable();
         })
         .catch(err => {
             document.getElementById('swLoadingState').style.display = 'none';
+            renderCurrentFolderActions();
             CLU.showError('Error loading files');
             console.error(err);
         });
