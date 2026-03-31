@@ -65,6 +65,39 @@
     #source-directory-filter,
     #destination-directory-filter {
         max-width: 100%;
+        align-items: flex-start;
+        row-gap: var(--clu-space-2);
+    }
+
+    #source-directory-filter .clu-alpha-filter,
+    #destination-directory-filter .clu-alpha-filter {
+        flex: 1 1 100%;
+        max-width: 100%;
+    }
+
+    #source-directory-filter .clu-search-row,
+    #destination-directory-filter .clu-search-row {
+        flex: 0 1 20rem;
+        min-width: 16rem;
+    }
+
+    #source-directory-filter .clu-action-row,
+    #destination-directory-filter .clu-action-row {
+        margin-left: 0;
+        justify-content: flex-start;
+        flex: 0 1 auto;
+    }
+
+    @media (max-width: 1199.98px) {
+        #source-directory-filter .clu-search-row,
+        #destination-directory-filter .clu-search-row {
+            flex: 1 1 18rem;
+        }
+
+        #source-directory-filter .clu-action-row,
+        #destination-directory-filter .clu-action-row {
+            width: auto;
+        }
     }
 
     #destination-list,
