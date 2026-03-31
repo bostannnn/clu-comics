@@ -633,6 +633,62 @@ def custom_rename():
         return jsonify({"error": str(e)}), 500
 
 
+@files_bp.route('/apply-rename-pattern', methods=['POST'])
+def apply_rename_pattern():
+    """Apply the saved custom rename pattern to a single file using local data only."""
+    data = request.get_json() or {}
+    file_path = data.get('path')
+
+    if not file_path:
+        return jsonify({"error": "Missing file path"}), 400
+
+    if not os.path.exists(file_path):
+        return jsonify({"error": "Source file does not exist"}), 404
+
+    if not os.path.isfile(file_path):
+        return jsonify({"error": "Path is not a file"}), 400
+
+    if is_critical_path(file_path):
+        app_logger.error(f"Attempted to apply rename pattern to critical path: {file_path}")
+        return jsonify({"error": get_critical_path_error_message(file_path, "rename")}), 403
+
+    try:
+        from cbz_ops.rename import rename_file_using_custom_pattern
+
+        new_path, was_renamed = rename_file_using_custom_pattern(file_path)
+
+        if was_renamed:
+            from app import update_index_on_move
+
+            update_index_on_move(file_path, new_path)
+            return jsonify({
+                "success": True,
+                "renamed": True,
+                "old_path": file_path,
+                "new_path": new_path,
+                "new_name": os.path.basename(new_path),
+                "message": "File renamed successfully"
+            })
+
+        return jsonify({
+            "success": True,
+            "renamed": False,
+            "old_path": file_path,
+            "new_path": new_path,
+            "new_name": os.path.basename(new_path),
+            "message": "File already matches the custom rename pattern"
+        })
+    except ValueError as e:
+        app_logger.warning(f"Refused custom pattern rename for {file_path}: {e}")
+        return jsonify({"error": str(e)}), 400
+    except ImportError as e:
+        app_logger.error(f"Failed to import rename module: {e}")
+        return jsonify({"error": "Rename module not available"}), 500
+    except Exception as e:
+        app_logger.error(f"Error applying custom rename pattern to {file_path}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 # =============================================================================
 # Crop
 # =============================================================================

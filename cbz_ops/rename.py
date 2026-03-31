@@ -960,6 +960,97 @@ def apply_custom_pattern(values, pattern):
     return result
 
 
+def _sanitize_pattern_value(value):
+    """Sanitize a metadata value before using it in a filename pattern."""
+    value = str(value or "")
+    value = value.replace(":", " -")
+    value = re.sub(r'[<>"/\\|?*]', "", value)
+    value = re.sub(r"[\x00-\x1f]", "", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value.strip(". ")
+
+
+def _extract_local_pattern_values(file_path, custom_pattern):
+    """Build rename-pattern values from local file data.
+
+    Preference order:
+    1. ComicInfo.xml for Series/Number/Year/Title/Volume.
+    2. Filename parsing using the current custom pattern and built-in patterns.
+    """
+    filename = os.path.basename(file_path)
+    comicinfo = {}
+
+    if file_path.lower().endswith((".cbz", ".zip")):
+        try:
+            from core.comicinfo import read_comicinfo_from_zip
+
+            comicinfo = read_comicinfo_from_zip(file_path) or {}
+        except Exception as exc:
+            app_logger.debug(f"Failed to read ComicInfo.xml from {file_path}: {exc}")
+
+    parsed = parse_comic_filename(filename, custom_pattern=custom_pattern or None)
+    values = {
+        "series_name": _sanitize_pattern_value(comicinfo.get("Series", "")),
+        "volume_number": _sanitize_pattern_value(comicinfo.get("Volume", "")),
+        "year": str(comicinfo.get("Year", "") or "").strip(),
+        "issue_number": str(comicinfo.get("Number", "") or "").strip(),
+        "issue_title": _sanitize_pattern_value(comicinfo.get("Title", "")),
+    }
+
+    if parsed:
+        if not values["series_name"]:
+            values["series_name"] = _sanitize_pattern_value(parsed.get("series_name", ""))
+        if not values["volume_number"]:
+            values["volume_number"] = _sanitize_pattern_value(parsed.get("volume_number", ""))
+        if not values["year"]:
+            values["year"] = str(parsed.get("year", "") or "")
+        if not values["issue_number"]:
+            values["issue_number"] = str(parsed.get("issue_number", "") or "").strip()
+
+    if values["series_name"] and values["issue_number"]:
+        values["issue_number"] = _pad_issue_number(values["issue_number"])
+        return values
+
+    return None
+
+
+def rename_file_using_custom_pattern(file_path):
+    """Apply the saved custom rename pattern to a single file using local data only.
+
+    Uses ComicInfo.xml first, then falls back to filename parsing. Returns
+    (new_path, was_renamed). Raises ValueError for expected user-facing failures.
+    """
+    if is_hidden(file_path):
+        raise ValueError("Hidden files cannot be renamed.")
+
+    custom_enabled, custom_pattern = load_custom_rename_config()
+    if not custom_enabled or not custom_pattern:
+        raise ValueError("Custom rename pattern is not enabled.")
+
+    directory, filename = os.path.split(file_path)
+    values = _extract_local_pattern_values(file_path, custom_pattern)
+    if not values:
+        raise ValueError(
+            "No usable local metadata found. Add ComicInfo.xml Series/Number or use a filename that matches your rename rules."
+        )
+
+    new_stem = apply_custom_pattern(values, custom_pattern)
+    if not new_stem:
+        raise ValueError("Could not apply the custom rename pattern to this file.")
+
+    new_name = clean_final_filename(new_stem + os.path.splitext(filename)[1])
+    if not new_name:
+        raise ValueError("Custom rename pattern produced an empty filename.")
+
+    if new_name == filename:
+        return file_path, False
+
+    new_path = get_unique_filepath(os.path.join(directory, new_name))
+    app_logger.info(f"Renaming with custom pattern:\n  {file_path}\n  --> {new_path}\n")
+    os.rename(file_path, new_path)
+    return new_path, True
+
+
 def rename_comic_from_metadata(file_path, metadata):
     """
     Auto-rename a comic file based on fetched metadata using the custom rename pattern.

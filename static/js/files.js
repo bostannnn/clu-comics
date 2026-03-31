@@ -51,6 +51,7 @@ let sourceLibraryId = null;
 let destLibraryId = null;
 let sourceLibraryProviders = [];
 let destLibraryProviders = [];
+const filesUiConfig = window.CLU_FILES_CONFIG || {};
 
 // Global variable to store current folder path for XML update
 // Global variable to store current file path for editing
@@ -855,6 +856,21 @@ function createListItem(itemName, fullPath, type, panel, isDraggable) {
       };
       editItem.appendChild(editLink);
       dropdownMenu.appendChild(editItem);
+
+      if (filesUiConfig.enableCustomRename) {
+        const applyRenamePatternItem = document.createElement("li");
+        const applyRenamePatternLink = document.createElement("a");
+        applyRenamePatternLink.className = "dropdown-item";
+        applyRenamePatternLink.href = "#";
+        applyRenamePatternLink.textContent = "Apply Rename Pattern";
+        applyRenamePatternLink.onclick = (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          applyRenamePatternToFile(fullPath, panel);
+        };
+        applyRenamePatternItem.appendChild(applyRenamePatternLink);
+        dropdownMenu.appendChild(applyRenamePatternItem);
+      }
 
       // Rebuild option
       const rebuildItem = document.createElement("li");
@@ -6047,6 +6063,61 @@ function renameFileAfterMetadata(filePath, oldName, newName) {
       }
       console.error('Rename error:', error);
       CLU.showToast('Rename Error', error.message, 'error');
+    });
+}
+
+function applyRenamePatternToFile(filePath, panel) {
+  const loadingToast = document.createElement('div');
+  loadingToast.className = 'toast show position-fixed top-0 end-0 m-3';
+  loadingToast.style.zIndex = '1200';
+  loadingToast.innerHTML = `
+    <div class="toast-header bg-primary text-white">
+      <strong class="me-auto">Applying Rename Pattern</strong>
+    </div>
+    <div class="toast-body">
+      <div class="d-flex align-items-center">
+        <div class="spinner-border spinner-border-sm me-2" role="status">
+          <span class="visually-hidden">Loading...</span>
+        </div>
+        Renaming file...
+      </div>
+    </div>
+  `;
+  document.body.appendChild(loadingToast);
+
+  fetch('/apply-rename-pattern', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ path: filePath })
+  })
+    .then(response => response.json().then(data => ({ ok: response.ok, data })))
+    .then(({ ok, data }) => {
+      if (document.body.contains(loadingToast)) {
+        document.body.removeChild(loadingToast);
+      }
+
+      if (!ok) {
+        throw new Error(data.error || 'Failed to apply rename pattern');
+      }
+
+      if (data.renamed) {
+        updateRenamedFileInDOM(filePath, data.new_path, data.new_name);
+        CLU.showToast('File Renamed', `Successfully renamed to: ${data.new_name}`, 'success');
+        refreshPanelForPath(data.new_path || filePath);
+        return;
+      }
+
+      CLU.showToast('No Rename Needed', data.message || 'File already matches the custom rename pattern.', 'info');
+    })
+    .catch(error => {
+      if (document.body.contains(loadingToast)) {
+        document.body.removeChild(loadingToast);
+      }
+      console.error('Apply rename pattern error:', error);
+      CLU.showToast('Rename Error', error.message, 'error');
+      refreshPanelForPath(filePath);
     });
 }
 

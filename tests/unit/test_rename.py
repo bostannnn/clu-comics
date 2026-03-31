@@ -585,6 +585,92 @@ class TestRenameComicFromMetadata:
         assert os.path.exists(result_path)
 
 
+class TestRenameFileUsingCustomPattern:
+
+    @patch("cbz_ops.rename.load_custom_rename_config", return_value=(True, "{series_name} {issue_number} ({year})"))
+    @patch("cbz_ops.rename.get_unique_filepath", side_effect=lambda path: path)
+    @patch("core.comicinfo.read_comicinfo_from_zip")
+    def test_prefers_comicinfo_metadata(self, mock_read_comicinfo, mock_unique, mock_config, tmp_path):
+        from cbz_ops.rename import rename_file_using_custom_pattern
+
+        comic = tmp_path / "messy.cbz"
+        comic.write_bytes(b"fake")
+        mock_read_comicinfo.return_value = {
+            "Series": "Manual Series",
+            "Number": "7",
+            "Year": "2024",
+            "Title": "Manual Title",
+        }
+
+        new_path, was_renamed = rename_file_using_custom_pattern(str(comic))
+
+        assert was_renamed is True
+        assert os.path.basename(new_path) == "Manual Series 007 (2024).cbz"
+        assert os.path.exists(new_path)
+
+    @patch("cbz_ops.rename.load_custom_rename_config", return_value=(True, "{series_name} {issue_number} ({year})"))
+    @patch("cbz_ops.rename.get_unique_filepath", side_effect=lambda path: path)
+    @patch("core.comicinfo.read_comicinfo_from_zip", return_value={})
+    def test_falls_back_to_filename_parsing(self, mock_read_comicinfo, mock_unique, mock_config, tmp_path):
+        from cbz_ops.rename import rename_file_using_custom_pattern
+
+        comic = tmp_path / "Series #7 (2024).cbz"
+        comic.write_bytes(b"fake")
+
+        new_path, was_renamed = rename_file_using_custom_pattern(str(comic))
+
+        assert was_renamed is True
+        assert os.path.basename(new_path) == "Series 007 (2024).cbz"
+        assert os.path.exists(new_path)
+
+    @patch("cbz_ops.rename.load_custom_rename_config", return_value=(True, "{series_name} {issue_number} ({year})"))
+    @patch("cbz_ops.rename.get_unique_filepath", side_effect=lambda path: path)
+    @patch("core.comicinfo.read_comicinfo_from_zip")
+    @patch("cbz_ops.rename.parse_comic_filename")
+    def test_merges_partial_comicinfo_with_filename_parsing(self, mock_parse_filename, mock_read_comicinfo, mock_unique, mock_config, tmp_path):
+        from cbz_ops.rename import rename_file_using_custom_pattern
+
+        comic = tmp_path / "unknown.cbz"
+        comic.write_bytes(b"fake")
+        mock_read_comicinfo.return_value = {
+            "Series": "Manual Series",
+            "Year": "2024",
+        }
+        mock_parse_filename.return_value = {
+            "series_name": "",
+            "issue_number": "7",
+            "year": None,
+            "volume_number": "",
+        }
+
+        new_path, was_renamed = rename_file_using_custom_pattern(str(comic))
+
+        assert was_renamed is True
+        assert os.path.basename(new_path) == "Manual Series 007 (2024).cbz"
+        assert os.path.exists(new_path)
+
+    @patch("cbz_ops.rename.load_custom_rename_config", return_value=(True, "{series_name} {issue_number} ({year})"))
+    @patch("core.comicinfo.read_comicinfo_from_zip", return_value={})
+    def test_raises_without_local_metadata(self, mock_read_comicinfo, mock_config, tmp_path):
+        from cbz_ops.rename import rename_file_using_custom_pattern
+
+        comic = tmp_path / "unknown.cbz"
+        comic.write_bytes(b"fake")
+
+        with pytest.raises(ValueError, match="No usable local metadata found"):
+            rename_file_using_custom_pattern(str(comic))
+
+    @patch("cbz_ops.rename.load_custom_rename_config", return_value=(False, ""))
+    def test_raises_when_custom_pattern_disabled(self, mock_config, tmp_path):
+        from cbz_ops.rename import rename_file_using_custom_pattern
+
+        comic = tmp_path / "Series 001.cbz"
+        comic.write_bytes(b"fake")
+
+        with pytest.raises(ValueError, match="Custom rename pattern is not enabled"):
+            rename_file_using_custom_pattern(str(comic))
+
+
 # ===== reverse_parse_pattern =====
 
 class TestReverseParsePattern:
