@@ -15,6 +15,7 @@ let swLastSelectedIndex = -1;
 let swActiveFilter = null;
 let swReadIssuesSet = new Set();
 let swCurrentProviders = [];
+const swActionsConfig = window.CLU_ACTIONS_CONFIG || {};
 
 // Load read issues for source wall
 fetch('/api/issues-read-paths')
@@ -398,46 +399,24 @@ function renderTable() {
         const tdActions = document.createElement('td');
         tdActions.className = 'sw-actions-cell';
         const dirDropdownId = 'swDirDrop' + dir.name.replace(/[^a-zA-Z0-9]/g, '_');
-        const forceActions = [];
-        if (hasSourceWallProvider('comicvine')) {
-            forceActions.push('<li><a class="dropdown-item" href="#" data-action="dir-force-metadata-comicvine"><i class="bi bi-cloud-check me-2"></i>Force Fetch via ComicVine</a></li>');
-        }
-        if (hasSourceWallProvider('metron')) {
-            forceActions.push('<li><a class="dropdown-item" href="#" data-action="dir-force-metadata-metron"><i class="bi bi-cloud-check me-2"></i>Force Fetch via Metron</a></li>');
-        }
         tdActions.innerHTML =
             '<div class="dropdown">' +
             '<button class="btn btn-sm btn-outline-secondary dropdown-toggle sw-action-btn" type="button"' +
             ' id="' + dirDropdownId + '" data-bs-toggle="dropdown" aria-expanded="false">' +
             '<i class="bi bi-three-dots-vertical"></i></button>' +
-            '<ul class="dropdown-menu dropdown-menu-end" aria-labelledby="' + dirDropdownId + '">' +
-            '<li><a class="dropdown-item" href="#" data-action="dir-metadata"><i class="bi bi-cloud-download me-2"></i>Fetch All Metadata</a></li>' +
-            forceActions.join('') +
-            '</ul></div>';
+            '<ul class="dropdown-menu dropdown-menu-end" aria-labelledby="' + dirDropdownId + '"></ul></div>';
         tdActions.querySelector('.dropdown-toggle').addEventListener('click', (e) => {
             e.stopPropagation();
         });
-        tdActions.querySelector('[data-action="dir-metadata"]').addEventListener('click', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            fetchDirMetadataSW(dir.path, dir.name);
+        CLU.populateFolderActionMenu(tdActions.querySelector('.dropdown-menu'), {
+            onFetchAllMetadata: function () { fetchDirMetadataSW(dir.path, dir.name); },
+            onForceComicVine: hasSourceWallProvider('comicvine')
+                ? function () { fetchDirMetadataSW(dir.path, dir.name, 'comicvine'); }
+                : null,
+            onForceMetron: hasSourceWallProvider('metron')
+                ? function () { fetchDirMetadataSW(dir.path, dir.name, 'metron'); }
+                : null
         });
-        const forceComicVineAction = tdActions.querySelector('[data-action="dir-force-metadata-comicvine"]');
-        if (forceComicVineAction) {
-            forceComicVineAction.addEventListener('click', (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                fetchDirMetadataSW(dir.path, dir.name, 'comicvine');
-            });
-        }
-        const forceMetronAction = tdActions.querySelector('[data-action="dir-force-metadata-metron"]');
-        if (forceMetronAction) {
-            forceMetronAction.addEventListener('click', (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                fetchDirMetadataSW(dir.path, dir.name, 'metron');
-            });
-        }
         tr.appendChild(tdActions);
 
         // Read column (empty for directories)
@@ -480,37 +459,49 @@ function renderTable() {
             '<button class="btn btn-sm btn-outline-secondary dropdown-toggle sw-action-btn" type="button"' +
             ' id="' + dropdownId + '" data-bs-toggle="dropdown" aria-expanded="false">' +
             '<i class="bi bi-three-dots-vertical"></i></button>' +
-            '<ul class="dropdown-menu dropdown-menu-end" aria-labelledby="' + dropdownId + '">' +
-            '<li><a class="dropdown-item" href="#" data-action="crop"><i class="bi bi-scissors me-2"></i>Crop Cover</a></li>' +
-            '<li><a class="dropdown-item" href="#" data-action="remove"><i class="bi bi-file-minus me-2"></i>Remove 1st Image</a></li>' +
-            '<li><a class="dropdown-item" href="#" data-action="edit"><i class="bi bi-pencil-square me-2"></i>Edit Pages</a></li>' +
-            '<li><a class="dropdown-item" href="#" data-action="rebuild"><i class="bi bi-arrow-repeat me-2"></i>Rebuild</a></li>' +
-            '<li><a class="dropdown-item" href="#" data-action="enhance"><i class="bi bi-stars me-2"></i>Enhance</a></li>' +
-            '<li><a class="dropdown-item" href="#" data-action="add"><i class="bi bi-file-plus me-2"></i>Add Blank to End</a></li>' +
-            '<li><hr class="dropdown-divider"></li>' +
-            '<li><a class="dropdown-item" href="#" data-action="metadata"><i class="bi bi-cloud-download me-2"></i>Fetch Metadata</a></li>' +
-            '<li><a class="dropdown-item' + (swReadIssuesSet.has(file.path) ? '' : ' d-none') + '" href="#" data-action="mark-unread"><i class="bi bi-book me-2"></i>Mark as Unread</a></li>' +
-            '<li><a class="dropdown-item' + (swReadIssuesSet.has(file.path) ? '' : ' d-none') + '" href="#" data-action="hide-history"><i class="bi bi-eye-slash me-2"></i>Hide from History</a></li>' +
-            '<li><hr class="dropdown-divider"></li>' +
-            '<li><a class="dropdown-item" href="#" data-action="info"><i class="bi bi-info-circle me-2"></i>Info</a></li>' +
-            '<li><a class="dropdown-item" href="#" data-action="add-to-list"><i class="bi bi-journal-plus me-2"></i>Add to Reading List</a></li>' +
-            '<li><hr class="dropdown-divider"></li>' +
-            '<li><a class="dropdown-item text-danger" href="#" data-action="delete"><i class="bi bi-trash me-2"></i>Delete</a></li>' +
-            '</ul></div>';
-        tdActions.querySelectorAll('[data-action]').forEach(a => {
-            a.addEventListener('click', (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                const action = a.dataset.action;
-                if (action === 'info') showFileInfo(file.path, file.name);
-                else if (action === 'edit') openEditFile(file.path);
-                else if (action === 'delete') deleteFileSW(file.path, file.name);
-                else if (action === 'metadata') fetchMetadataSW(file.path, file.name);
-                else if (action === 'mark-unread') markIssueAsUnreadSW(file.path);
-                else if (action === 'hide-history') hideFromHistorySW(file.path);
-                else if (action === 'add-to-list') openAddToReadingListModal(file.path);
-                else streamingOpSW(action, file.path);
-            });
+            '<ul class="dropdown-menu dropdown-menu-end" aria-labelledby="' + dropdownId + '"></ul></div>';
+        CLU.populateIssueActionMenu(tdActions.querySelector('.dropdown-menu'), {
+            onCropCover: function () { streamingOpSW('crop', file.path); },
+            onRemoveFirstImage: function () { streamingOpSW('remove', file.path); },
+            onEditFile: function () { openEditFile(file.path); },
+            onApplyRenamePattern: swActionsConfig.enableCustomRename
+                ? function () { applyRenamePatternSW(file.path); }
+                : null,
+            onApplyFolderRenamePattern: (
+                swActionsConfig.enableCustomRename &&
+                swActionsConfig.hasCustomMovePattern &&
+                swCurrentLibrary &&
+                file.path.startsWith(swCurrentLibrary.path + '/')
+            ) ? function () { applyFolderRenamePatternSW(file.path); } : null,
+            onRebuild: function () { streamingOpSW('single_file', file.path); },
+            onEnhance: function () { streamingOpSW('enhance_single', file.path); },
+            extraFileOps: [{
+                label: 'Add Blank to End',
+                icon: 'bi bi-file-plus',
+                onClick: function () { streamingOpSW('add', file.path); },
+                className: 'dropdown-item'
+            }],
+            onFetchMetadata: function () { fetchMetadataSW(file.path, file.name); },
+            onForceComicVine: hasSourceWallProvider('comicvine')
+                ? function () { fetchMetadataSW(file.path, file.name, 'comicvine'); }
+                : null,
+            onForceMetron: hasSourceWallProvider('metron')
+                ? function () { fetchMetadataSW(file.path, file.name, 'metron'); }
+                : null,
+            extraPostReadingActions: [{
+                label: 'Info',
+                icon: 'bi bi-info-circle',
+                onClick: function () { showFileInfo(file.path, file.name); },
+                className: 'dropdown-item'
+            }],
+            onMarkUnread: swReadIssuesSet.has(file.path)
+                ? function () { markIssueAsUnreadSW(file.path); }
+                : null,
+            onHideFromHistory: swReadIssuesSet.has(file.path)
+                ? function () { hideFromHistorySW(file.path); }
+                : null,
+            onAddToReadingList: function () { openAddToReadingListModal(file.path); },
+            onDelete: function () { deleteFileSW(file.path, file.name); }
         });
         tr.appendChild(tdActions);
 
@@ -1143,8 +1134,12 @@ function streamingOpSW(scriptType, path) {
     CLU.executeStreamingOp(scriptType, path);
 }
 
-function fetchMetadataSW(path, name) {
+function fetchMetadataSW(path, name, forceProvider) {
     setupMetadataContract();
+    if (forceProvider) {
+        CLU.forceSearchMetadata(path, name, forceProvider);
+        return;
+    }
     CLU.searchMetadata(path, name);
 }
 
@@ -1157,6 +1152,32 @@ function fetchDirMetadataSW(path, name, forceProvider) {
     } else {
         CLU.fetchDirectoryMetadata(path, name);
     }
+}
+
+function applyRenamePatternSW(path) {
+    CLU.applyRenamePatternToFile(path, {
+        onSuccess: function () {
+            loadPath(swCurrentPath);
+        },
+        onError: function (error) {
+            console.error('Apply rename pattern error:', error);
+            CLU.showToast('Rename Error', error.message, 'error');
+            loadPath(swCurrentPath);
+        }
+    });
+}
+
+function applyFolderRenamePatternSW(path) {
+    CLU.applyFolderRenamePatternToFile(path, {
+        onSuccess: function () {
+            loadPath(swCurrentPath);
+        },
+        onError: function (error) {
+            console.error('Apply folder + rename pattern error:', error);
+            CLU.showToast('Move Error', error.message, 'error');
+            loadPath(swCurrentPath);
+        }
+    });
 }
 
 // ── Bulk Actions ──

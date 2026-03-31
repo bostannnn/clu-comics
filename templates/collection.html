@@ -217,29 +217,7 @@
                     aria-expanded="false">
                     <i class="bi bi-three-dots-vertical"></i>
                 </button>
-                <ul class="dropdown-menu dropdown-menu-end shadow">
-                    <li><a class="dropdown-item action-crop" href="#">Crop Cover</a></li>
-                    <li><a class="dropdown-item action-remove-first" href="#">Remove 1st Image</a></li>
-                    <li><a class="dropdown-item action-edit" href="#">Edit File</a></li>
-                    <li><a class="dropdown-item action-rebuild" href="#">Rebuild</a></li>
-                    <li><a class="dropdown-item action-enhance" href="#">Enhance</a></li>
-                    <li><a class="dropdown-item action-metadata" href="#"><i class="bi bi-cloud-download"></i> Fetch Metadata</a></li>
-                    <li><a class="dropdown-item action-set-read-date" href="#">
-                            <i class="bi bi-calendar-check"></i> <span class="set-read-date-text">Set Read Date</span>
-                        </a></li>
-                    <li><a class="dropdown-item action-mark-unread" href="#" style="display: none;">
-                            <i class="bi bi-book"></i> Mark as Unread
-                        </a></li>
-                    <li><a class="dropdown-item action-hide-history" href="#" style="display: none;">
-                            <i class="bi bi-eye-slash"></i> Hide from History
-                        </a></li>
-                    <li><a class="dropdown-item action-add-to-list" href="#"><i class="bi bi-journal-plus me-2"></i>Add to Reading List</a></li>
-                    <li>
-                        <hr class="dropdown-divider">
-                    </li>
-                    <li><a class="dropdown-item action-delete text-danger" href="#"><i class="bi bi-trash"></i>
-                            Delete</a></li>
-                </ul>
+                <ul class="dropdown-menu dropdown-menu-end shadow"></ul>
             </div>
         </div>
     </div>
@@ -547,6 +525,13 @@
 <script src="{{ url_for('static', filename='js/clu-delete.js') }}?v={{ range(1, 10000) | random }}"></script>
 <script src="{{ url_for('static', filename='js/reader.js') }}?v={{ range(1, 10000) | random }}"></script>
 <script src="{{ url_for('static', filename='js/reading_list_picker.js') }}?v={{ range(1, 10000) | random }}"></script>
+<script src="{{ url_for('static', filename='js/clu-action-menus.js') }}?v={{ range(1, 10000) | random }}"></script>
+<script>
+    window.CLU_ACTIONS_CONFIG = {
+        enableCustomRename: {{ 'true' if config.get('ENABLE_CUSTOM_RENAME', False) else 'false' }},
+        hasCustomMovePattern: {{ 'true' if config.get('CUSTOM_MOVE_PATTERN', '').strip() else 'false' }}
+    };
+</script>
 <script src="{{ url_for('static', filename='js/collection.js') }}?v={{ range(1, 10000) | random }}"></script>
 <script>
     document.addEventListener('DOMContentLoaded', () => {

@@ -637,7 +637,12 @@
 <script src="{{ url_for('static', filename='js/clu-update-xml.js') }}?v={{ range(1000, 9999) | random }}"></script>
 <script src="{{ url_for('static', filename='js/clu-delete.js') }}?v={{ range(1000, 9999) | random }}"></script>
 <script src="{{ url_for('static', filename='js/reading_list_picker.js') }}?v={{ range(1000, 9999) | random }}"></script>
+<script src="{{ url_for('static', filename='js/clu-action-menus.js') }}?v={{ range(1000, 9999) | random }}"></script>
 <script>
+  window.CLU_ACTIONS_CONFIG = {
+    enableCustomRename: {{ 'true' if config.get('ENABLE_CUSTOM_RENAME', False) else 'false' }},
+    hasCustomMovePattern: {{ 'true' if config.get('CUSTOM_MOVE_PATTERN', '').strip() else 'false' }}
+  };
   window.CLU_FILES_CONFIG = {
     enableCustomRename: {{ 'true' if config.get('ENABLE_CUSTOM_RENAME', False) else 'false' }},
     hasCustomMovePattern: {{ 'true' if config.get('CUSTOM_MOVE_PATTERN', '').strip() else 'false' }},

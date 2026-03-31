@@ -220,5 +220,12 @@
 <script src="{{ url_for('static', filename='js/clu-delete.js') }}?v={{ range(1, 10000) | random }}"></script>
 <script src="{{ url_for('static', filename='js/reader.js') }}?v={{ range(1, 10000) | random }}"></script>
 <script src="{{ url_for('static', filename='js/reading_list_picker.js') }}?v={{ range(1, 10000) | random }}"></script>
+<script src="{{ url_for('static', filename='js/clu-action-menus.js') }}?v={{ range(1, 10000) | random }}"></script>
+<script>
+    window.CLU_ACTIONS_CONFIG = {
+        enableCustomRename: {{ 'true' if config.get('ENABLE_CUSTOM_RENAME', False) else 'false' }},
+        hasCustomMovePattern: {{ 'true' if config.get('CUSTOM_MOVE_PATTERN', '').strip() else 'false' }}
+    };
+</script>
 <script src="{{ url_for('static', filename='js/source_wall.js') }}?v={{ range(1, 10000) | random }}"></script>
 {% endblock %}

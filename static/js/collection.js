@@ -77,6 +77,7 @@ let collectionLibraries = [];
 let collectionProviderCache = {};
 let currentCollectionProviders = [];
 let currentCollectionLibraryId = null;
+const collectionActionsConfig = window.CLU_ACTIONS_CONFIG || {};
 
 async function loadCollectionLibraries() {
     try {
@@ -132,6 +133,10 @@ async function loadCurrentCollectionProviders(path) {
 
 function hasCollectionProvider(providerType) {
     return currentCollectionProviders.some(p => p.provider_type === providerType);
+}
+
+function isCollectionPathInLibrary(path) {
+    return Boolean(findCollectionLibraryForPath(path));
 }
 
 /**
@@ -1300,123 +1305,29 @@ function renderGrid(items) {
                 // Replace menu items with folder-specific options
                 const dropdownMenu = actionsDropdown.querySelector('.dropdown-menu');
                 if (dropdownMenu) {
-                    const forceActionItems = [];
-                    if (hasCollectionProvider('comicvine')) {
-                        forceActionItems.push('<li><a class="dropdown-item folder-action-force-fetch-comicvine" href="#"><i class="bi bi-cloud-check"></i> Force Fetch via ComicVine</a></li>');
-                    }
-                    if (hasCollectionProvider('metron')) {
-                        forceActionItems.push('<li><a class="dropdown-item folder-action-force-fetch-metron" href="#"><i class="bi bi-cloud-check"></i> Force Fetch via Metron</a></li>');
-                    }
-                    // If at root level, show Missing File Check, Scan Files, and Generate All Missing Thumbnails
-                    if (isRootLevel) {
-                        dropdownMenu.innerHTML = `
-                            <li><a class="dropdown-item folder-action-gen-all-thumbs" href="#"><i class="bi bi-images"></i> Generate All Missing Thumbnails</a></li>
-                            <li><a class="dropdown-item folder-action-scan" href="#"><i class="bi bi-arrow-clockwise"></i> Scan Files</a></li>
-                            <li><a class="dropdown-item folder-action-fetch-metadata" href="#"><i class="bi bi-cloud-download"></i> Fetch All Metadata</a></li>
-                            ${forceActionItems.join('')}
-                            <li><a class="dropdown-item folder-action-missing" href="#"><i class="bi bi-file-earmark-text"></i> Missing File Check</a></li>
-                        `;
-                    } else {
-                        // For folders with files, show full menu
-                        dropdownMenu.innerHTML = `
-                        <li><a class="dropdown-item folder-action-thumbnail" href="#"><i class="bi bi-image"></i> Generate Thumbnail</a></li>
-                        <li><a class="dropdown-item folder-action-scan" href="#"><i class="bi bi-arrow-clockwise"></i> Scan Files</a></li>
-                        <li><a class="dropdown-item folder-action-fetch-metadata" href="#"><i class="bi bi-cloud-download"></i> Fetch All Metadata</a></li>
-                        ${forceActionItems.join('')}
-                        <li><a class="dropdown-item folder-action-missing" href="#"><i class="bi bi-file-earmark-text"></i> Missing File Check</a></li>
-                        <li><a class="dropdown-item folder-action-update-xml" href="#"><i class="bi bi-filetype-xml"></i> Update XML</a></li>
-                        <li><hr class="dropdown-divider"></li>
-                        <li><a class="dropdown-item folder-action-delete text-danger" href="#"><i class="bi bi-trash"></i> Delete</a></li>
-                        `;
-
-                        // Bind Generate Thumbnail action
-                        const thumbnailAction = dropdownMenu.querySelector('.folder-action-thumbnail');
-                        if (thumbnailAction) {
-                            thumbnailAction.onclick = (e) => {
-                                e.preventDefault();
-                                e.stopPropagation();
-                                generateFolderThumbnail(item.path, item.name);
-                            };
-                        }
-
-                        // Bind Delete action
-                        const deleteAction = dropdownMenu.querySelector('.folder-action-delete');
-                        if (deleteAction) {
-                            deleteAction.onclick = (e) => {
-                                e.preventDefault();
-                                e.stopPropagation();
-                                showDeleteConfirmation(item);
-                            };
-                        }
-
-                        // Bind Update XML action
-                        const updateXmlAction = dropdownMenu.querySelector('.folder-action-update-xml');
-                        if (updateXmlAction) {
-                            updateXmlAction.onclick = (e) => {
-                                e.preventDefault();
-                                e.stopPropagation();
-                                CLU.openUpdateXmlModal(item.path, item.name);
-                            };
-                        }
-                    }
-
-                    // Bind Missing File Check action (available for both root and folders with files)
-                    const missingAction = dropdownMenu.querySelector('.folder-action-missing');
-                    if (missingAction) {
-                        missingAction.onclick = (e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            checkMissingFiles(item.path, item.name);
-                        };
-                    }
-
-                    // Bind Scan Files action (only for root level directories)
-                    const scanAction = dropdownMenu.querySelector('.folder-action-scan');
-                    if (scanAction) {
-                        scanAction.onclick = (e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            scanDirectory(item.path, item.name);
-                        };
-                    }
-
-                    // Bind Fetch All Metadata action
-                    const fetchMetaAction = dropdownMenu.querySelector('.folder-action-fetch-metadata');
-                    if (fetchMetaAction) {
-                        fetchMetaAction.onclick = (e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            fetchDirMetadataCollection(item.path, item.name);
-                        };
-                    }
-
-                    const forceFetchComicVineAction = dropdownMenu.querySelector('.folder-action-force-fetch-comicvine');
-                    if (forceFetchComicVineAction) {
-                        forceFetchComicVineAction.onclick = (e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            fetchDirMetadataCollection(item.path, item.name, 'comicvine');
-                        };
-                    }
-
-                    const forceFetchMetronAction = dropdownMenu.querySelector('.folder-action-force-fetch-metron');
-                    if (forceFetchMetronAction) {
-                        forceFetchMetronAction.onclick = (e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            fetchDirMetadataCollection(item.path, item.name, 'metron');
-                        };
-                    }
-
-                    // Bind Generate All Missing Thumbnails action (only for root level directories)
-                    const genAllThumbsAction = dropdownMenu.querySelector('.folder-action-gen-all-thumbs');
-                    if (genAllThumbsAction) {
-                        genAllThumbsAction.onclick = (e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            generateAllMissingThumbnails(item.path, item.name);
-                        };
-                    }
+                    CLU.populateFolderActionMenu(dropdownMenu, {
+                        onGenerateThumbnail: !isRootLevel
+                            ? function () { generateFolderThumbnail(item.path, item.name); }
+                            : null,
+                        onGenerateAllMissingThumbnails: isRootLevel
+                            ? function () { generateAllMissingThumbnails(item.path, item.name); }
+                            : null,
+                        onFetchAllMetadata: function () { fetchDirMetadataCollection(item.path, item.name); },
+                        onForceComicVine: hasCollectionProvider('comicvine')
+                            ? function () { fetchDirMetadataCollection(item.path, item.name, 'comicvine'); }
+                            : null,
+                        onForceMetron: hasCollectionProvider('metron')
+                            ? function () { fetchDirMetadataCollection(item.path, item.name, 'metron'); }
+                            : null,
+                        onScanFiles: function () { scanDirectory(item.path, item.name); },
+                        onMissingFileCheck: function () { checkMissingFiles(item.path, item.name); },
+                        onUpdateXml: !isRootLevel
+                            ? function () { CLU.openUpdateXmlModal(item.path, item.name); }
+                            : null,
+                        onDelete: !isRootLevel
+                            ? function () { showDeleteConfirmation(item); }
+                            : null
+                    });
                 }
             }
 
@@ -1523,42 +1434,38 @@ function renderGrid(items) {
                     }
                 };
 
-                // Update "Set Read Date" text and read-only menu items based on read status
-                const setReadDateText = actionsDropdown.querySelector('.set-read-date-text');
                 const isRead = readIssuesSet.has(item.path);
-                if (setReadDateText) {
-                    setReadDateText.textContent = isRead ? 'Update Read Date' : 'Set Read Date';
+                const dropdownMenu = actionsDropdown.querySelector('.dropdown-menu');
+                if (dropdownMenu) {
+                    CLU.populateIssueActionMenu(dropdownMenu, {
+                        onCropCover: function () { executeScript('crop', item.path); },
+                        onRemoveFirstImage: function () { executeScript('remove', item.path); },
+                        onEditFile: function () { initEditMode(item.path); },
+                        onApplyRenamePattern: collectionActionsConfig.enableCustomRename
+                            ? function () { applyRenamePatternCollection(item.path); }
+                            : null,
+                        onApplyFolderRenamePattern: (
+                            collectionActionsConfig.enableCustomRename &&
+                            collectionActionsConfig.hasCustomMovePattern &&
+                            isCollectionPathInLibrary(item.path)
+                        ) ? function () { applyFolderRenamePatternCollection(item.path); } : null,
+                        onRebuild: function () { executeScript('single_file', item.path); },
+                        onEnhance: function () { executeScript('enhance_single', item.path); },
+                        onFetchMetadata: function () { fetchMetadataCollection(item.path, item.name); },
+                        onForceComicVine: hasCollectionProvider('comicvine')
+                            ? function () { fetchMetadataCollection(item.path, item.name, 'comicvine'); }
+                            : null,
+                        onForceMetron: hasCollectionProvider('metron')
+                            ? function () { fetchMetadataCollection(item.path, item.name, 'metron'); }
+                            : null,
+                        readDateLabel: isRead ? 'Update Read Date' : 'Set Read Date',
+                        onSetReadDate: function () { openSetReadDateModal(item.path, isRead); },
+                        onMarkUnread: isRead ? function () { markIssueAsUnread(item.path); } : null,
+                        onHideFromHistory: isRead ? function () { hideFromHistory(item.path); } : null,
+                        onAddToReadingList: function () { openAddToReadingListModal(item.path); },
+                        onDelete: function () { showDeleteConfirmation(item); }
+                    });
                 }
-                const markUnreadEl = actionsDropdown.querySelector('.action-mark-unread');
-                if (markUnreadEl) markUnreadEl.style.display = isRead ? '' : 'none';
-                const hideHistoryEl = actionsDropdown.querySelector('.action-hide-history');
-                if (hideHistoryEl) hideHistoryEl.style.display = isRead ? '' : 'none';
-
-                // Bind actions
-                const actions = {
-                    '.action-crop': () => executeScript('crop', item.path),
-                    '.action-remove-first': () => executeScript('remove', item.path),
-                    '.action-edit': () => initEditMode(item.path),
-                    '.action-rebuild': () => executeScript('single_file', item.path),
-                    '.action-enhance': () => executeScript('enhance_single', item.path),
-                    '.action-metadata': () => fetchMetadataCollection(item.path, item.name),
-                    '.action-set-read-date': () => openSetReadDateModal(item.path, readIssuesSet.has(item.path)),
-                    '.action-mark-unread': () => markIssueAsUnread(item.path),
-                    '.action-hide-history': () => hideFromHistory(item.path),
-                    '.action-add-to-list': () => openAddToReadingListModal(item.path),
-                    '.action-delete': () => showDeleteConfirmation(item)
-                };
-
-                Object.entries(actions).forEach(([selector, handler]) => {
-                    const el = actionsDropdown.querySelector(selector);
-                    if (el) {
-                        el.onclick = (e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            handler();
-                        };
-                    }
-                });
             }
 
             if (item.hasThumbnail) {
@@ -2752,7 +2659,7 @@ function executeScript(scriptType, filePath) {
     CLU.executeStreamingOp(scriptType, filePath);
 }
 
-function fetchMetadataCollection(filePath, fileName) {
+function fetchMetadataCollection(filePath, fileName, forceProvider) {
     window._cluMetadata = {
         getLibraryId: function () { return currentCollectionLibraryId; },
         onMetadataFound: function () {
@@ -2763,6 +2670,10 @@ function fetchMetadataCollection(filePath, fileName) {
             loadDirectory(currentPath, true);
         }
     };
+    if (forceProvider) {
+        CLU.forceSearchMetadata(filePath, fileName, forceProvider);
+        return;
+    }
     CLU.searchMetadata(filePath, fileName);
 }
 
@@ -2783,6 +2694,32 @@ function fetchDirMetadataCollection(dirPath, dirName, forceProvider) {
     } else {
         CLU.fetchDirectoryMetadata(dirPath, dirName);
     }
+}
+
+function applyRenamePatternCollection(filePath) {
+    CLU.applyRenamePatternToFile(filePath, {
+        onSuccess: function () {
+            loadDirectory(currentPath, true);
+        },
+        onError: function (error) {
+            console.error('Apply rename pattern error:', error);
+            CLU.showToast('Rename Error', error.message, 'error');
+            loadDirectory(currentPath, true);
+        }
+    });
+}
+
+function applyFolderRenamePatternCollection(filePath) {
+    CLU.applyFolderRenamePatternToFile(filePath, {
+        onSuccess: function () {
+            loadDirectory(currentPath, true);
+        },
+        onError: function (error) {
+            console.error('Apply folder + rename pattern error:', error);
+            CLU.showToast('Move Error', error.message, 'error');
+            loadDirectory(currentPath, true);
+        }
+    });
 }
 
 // ============================================================================

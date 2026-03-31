@@ -191,7 +191,8 @@ function refreshPanelForPath(filePath) {
 }
 
 // Set up metadata contract for files page and call CLU.searchMetadata
-function searchMetadataForFile(filePath, fileName, panel) {
+function searchMetadataForFile(filePath, fileName, panel, options) {
+  options = options || {};
   window._cluMetadata = {
     getLibraryId: function () { return getLibraryIdForPanel(panel); },
     onMetadataFound: function (fp, data) {
@@ -206,7 +207,11 @@ function searchMetadataForFile(filePath, fileName, panel) {
     },
     onBatchComplete: function (dp) { refreshPanelForPath(dp); }
   };
-  CLU.searchMetadata(filePath, fileName);
+  if (options.forceProvider) {
+    CLU.forceSearchMetadata(filePath, fileName, options.forceProvider);
+    return;
+  }
+  CLU.searchMetadata(filePath, fileName, options.searchTerm || undefined);
 }
 
 // Set up metadata contract for directory batch and call CLU.fetchDirectoryMetadata
@@ -638,106 +643,22 @@ function createListItem(itemName, fullPath, type, panel, isDraggable) {
 
       const dropdownMenu = document.createElement("ul");
       dropdownMenu.className = "dropdown-menu";
-
-      // Convert CBR-->CBZ option
-      const convertItem = document.createElement("li");
-      const convertLink = document.createElement("a");
-      convertLink.className = "dropdown-item";
-      convertLink.href = "#";
-      convertLink.innerHTML = '<i class="bi bi-arrow-repeat me-2"></i>Convert CBR→CBZ';
-      convertLink.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        executeScriptOnDirectory('convert', fullPath, panel);
-      };
-      convertItem.appendChild(convertLink);
-      dropdownMenu.appendChild(convertItem);
-
-      // Rebuild All Files option
-      const rebuildItem = document.createElement("li");
-      const rebuildLink = document.createElement("a");
-      rebuildLink.className = "dropdown-item";
-      rebuildLink.href = "#";
-      rebuildLink.innerHTML = '<i class="bi bi-hammer me-2"></i>Rebuild All Files';
-      rebuildLink.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        executeScriptOnDirectory('rebuild', fullPath, panel);
-      };
-      rebuildItem.appendChild(rebuildLink);
-      dropdownMenu.appendChild(rebuildItem);
-
-      // PDFs-->CBZ option
-      const pdfItem = document.createElement("li");
-      const pdfLink = document.createElement("a");
-      pdfLink.className = "dropdown-item";
-      pdfLink.href = "#";
-      pdfLink.innerHTML = '<i class="bi bi-file-earmark-pdf me-2"></i>PDFs→CBZ';
-      pdfLink.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        executeScriptOnDirectory('pdf', fullPath, panel);
-      };
-      pdfItem.appendChild(pdfLink);
-      dropdownMenu.appendChild(pdfItem);
-
-      // Missing File Check option
-      const missingItem = document.createElement("li");
-      const missingLink = document.createElement("a");
-      missingLink.className = "dropdown-item";
-      missingLink.href = "#";
-      missingLink.innerHTML = '<i class="bi bi-search me-2"></i>Missing File Check';
-      missingLink.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        executeScriptOnDirectory('missing', fullPath, panel);
-      };
-      missingItem.appendChild(missingLink);
-      dropdownMenu.appendChild(missingItem);
-
-      // Update XML option
-      const updateXmlItem = document.createElement("li");
-      const updateXmlLink = document.createElement("a");
-      updateXmlLink.className = "dropdown-item";
-      updateXmlLink.href = "#";
-      updateXmlLink.innerHTML = '<i class="bi bi-code-slash me-2"></i>Update XML';
-      updateXmlLink.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        CLU.openUpdateXmlModal(fullPath, fileData.name);
-      };
-      updateXmlItem.appendChild(updateXmlLink);
-      dropdownMenu.appendChild(updateXmlItem);
-
-      // Enhance Images option
-      const enhanceItem = document.createElement("li");
-      const enhanceLink = document.createElement("a");
-      enhanceLink.className = "dropdown-item";
-      enhanceLink.href = "#";
-      enhanceLink.innerHTML = '<i class="bi bi-stars me-2"></i>Enhance Images';
-      enhanceLink.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        executeScriptOnDirectory('enhance_dir', fullPath, panel);
-      };
-      enhanceItem.appendChild(enhanceLink);
-      dropdownMenu.appendChild(enhanceItem);
-
-      appendForceMetadataMenuItems(dropdownMenu, fullPath, fileData.name, panel);
-
-      // Remove All XML option
-      const removeXmlItem = document.createElement("li");
-      const removeXmlLink = document.createElement("a");
-      removeXmlLink.className = "dropdown-item text-danger";
-      removeXmlLink.href = "#";
-      removeXmlLink.innerHTML = '<i class="bi bi-eraser me-2"></i>Remove All XML';
-      removeXmlLink.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        bulkRemoveXmlFromDirectory(fullPath, panel);
-      };
-      removeXmlItem.appendChild(removeXmlLink);
-      dropdownMenu.appendChild(removeXmlItem);
+      CLU.populateFolderActionMenu(dropdownMenu, {
+        onConvertCbrToCbz: function () { executeScriptOnDirectory('convert', fullPath, panel); },
+        onRebuildAllFiles: function () { executeScriptOnDirectory('rebuild', fullPath, panel); },
+        onConvertPdfToCbz: function () { executeScriptOnDirectory('pdf', fullPath, panel); },
+        onEnhanceImages: function () { executeScriptOnDirectory('enhance_dir', fullPath, panel); },
+        onFetchAllMetadata: function () { fetchDirectoryMetadataForPanel(fullPath, fileData.name, panel); },
+        onForceComicVine: hasProvider(panel, 'comicvine')
+          ? function () { fetchDirectoryMetadataForPanel(fullPath, fileData.name, panel, 'comicvine'); }
+          : null,
+        onForceMetron: hasProvider(panel, 'metron')
+          ? function () { fetchDirectoryMetadataForPanel(fullPath, fileData.name, panel, 'metron'); }
+          : null,
+        onMissingFileCheck: function () { executeScriptOnDirectory('missing', fullPath, panel); },
+        onUpdateXml: function () { CLU.openUpdateXmlModal(fullPath, fileData.name); },
+        onRemoveAllXml: function () { bulkRemoveXmlFromDirectory(fullPath, panel); }
+      });
 
       dropdownContainer.appendChild(dropdownBtn);
       dropdownContainer.appendChild(dropdownMenu);
@@ -826,143 +747,38 @@ function createListItem(itemName, fullPath, type, panel, isDraggable) {
 
       const dropdownMenu = document.createElement("ul");
       dropdownMenu.className = "dropdown-menu dropdown-menu-end shadow";
-
-      // Crop Cover option
-      const cropItem = document.createElement("li");
-      const cropLink = document.createElement("a");
-      cropLink.className = "dropdown-item";
-      cropLink.href = "#";
-      cropLink.textContent = "Crop Cover";
-      cropLink.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        executeScriptOnFile('crop', fullPath, panel);
-      };
-      cropItem.appendChild(cropLink);
-      dropdownMenu.appendChild(cropItem);
-
-      // Remove 1st Image option
-      const removeFirstItem = document.createElement("li");
-      const removeFirstLink = document.createElement("a");
-      removeFirstLink.className = "dropdown-item";
-      removeFirstLink.href = "#";
-      removeFirstLink.textContent = "Remove 1st Image";
-      removeFirstLink.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        executeScriptOnFile('remove', fullPath, panel);
-      };
-      removeFirstItem.appendChild(removeFirstLink);
-      dropdownMenu.appendChild(removeFirstItem);
-
-      // Edit File option
-      const editItem = document.createElement("li");
-      const editLink = document.createElement("a");
-      editLink.className = "dropdown-item";
-      editLink.href = "#";
-      editLink.textContent = "Edit File";
-      editLink.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        openEditModal(fullPath);
-      };
-      editItem.appendChild(editLink);
-      dropdownMenu.appendChild(editItem);
-
-      if (filesUiConfig.enableCustomRename) {
-        const applyRenamePatternItem = document.createElement("li");
-        const applyRenamePatternLink = document.createElement("a");
-        applyRenamePatternLink.className = "dropdown-item";
-        applyRenamePatternLink.href = "#";
-        applyRenamePatternLink.textContent = "Apply Rename Pattern";
-        applyRenamePatternLink.onclick = (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          applyRenamePatternToFile(fullPath, panel);
-        };
-        applyRenamePatternItem.appendChild(applyRenamePatternLink);
-        dropdownMenu.appendChild(applyRenamePatternItem);
-      }
-
-      if (
-        filesUiConfig.enableCustomRename &&
-        filesUiConfig.hasCustomMovePattern &&
-        isPathInConfiguredLibrary(fullPath)
-      ) {
-        const applyFolderRenamePatternItem = document.createElement("li");
-        const applyFolderRenamePatternLink = document.createElement("a");
-        applyFolderRenamePatternLink.className = "dropdown-item";
-        applyFolderRenamePatternLink.href = "#";
-        applyFolderRenamePatternLink.textContent = "Apply Folder + Rename Pattern";
-        applyFolderRenamePatternLink.onclick = (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          applyFolderRenamePatternToFile(fullPath, panel);
-        };
-        applyFolderRenamePatternItem.appendChild(applyFolderRenamePatternLink);
-        dropdownMenu.appendChild(applyFolderRenamePatternItem);
-      }
-
-      // Rebuild option
-      const rebuildItem = document.createElement("li");
-      const rebuildLink = document.createElement("a");
-      rebuildLink.className = "dropdown-item";
-      rebuildLink.href = "#";
-      rebuildLink.textContent = "Rebuild";
-      rebuildLink.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        executeScriptOnFile('single_file', fullPath, panel);
-      };
-      rebuildItem.appendChild(rebuildLink);
-      dropdownMenu.appendChild(rebuildItem);
-
-      // Enhance option
-      const enhanceItem = document.createElement("li");
-      const enhanceLink = document.createElement("a");
-      enhanceLink.className = "dropdown-item";
-      enhanceLink.href = "#";
-      enhanceLink.textContent = "Enhance";
-      enhanceLink.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        executeScriptOnFile('enhance_single', fullPath, panel);
-      };
-      enhanceItem.appendChild(enhanceLink);
-      dropdownMenu.appendChild(enhanceItem);
-
-      // Add Blank to End option
-      const addBlankItem = document.createElement("li");
-      const addBlankLink = document.createElement("a");
-      addBlankLink.className = "dropdown-item";
-      addBlankLink.href = "#";
-      addBlankLink.textContent = "Add Blank to End";
-      addBlankLink.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        executeScriptOnFile('add', fullPath, panel);
-      };
-      addBlankItem.appendChild(addBlankLink);
-      dropdownMenu.appendChild(addBlankItem);
-
-      // Divider
-      const dividerItem = document.createElement("li");
-      dividerItem.innerHTML = '<hr class="dropdown-divider">';
-      dropdownMenu.appendChild(dividerItem);
-
-      // Add to Reading List option
-      const addToListItem = document.createElement("li");
-      const addToListLink = document.createElement("a");
-      addToListLink.className = "dropdown-item";
-      addToListLink.href = "#";
-      addToListLink.innerHTML = '<i class="bi bi-journal-plus me-2"></i>Add to Reading List';
-      addToListLink.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        openAddToReadingListModal(fullPath);
-      };
-      addToListItem.appendChild(addToListLink);
-      dropdownMenu.appendChild(addToListItem);
+      CLU.populateIssueActionMenu(dropdownMenu, {
+        onCropCover: function () { executeScriptOnFile('crop', fullPath, panel); },
+        onRemoveFirstImage: function () { executeScriptOnFile('remove', fullPath, panel); },
+        onEditFile: function () { openEditModal(fullPath); },
+        onApplyRenamePattern: filesUiConfig.enableCustomRename
+          ? function () { applyRenamePatternToFile(fullPath, panel); }
+          : null,
+        onApplyFolderRenamePattern: (
+          filesUiConfig.enableCustomRename &&
+          filesUiConfig.hasCustomMovePattern &&
+          isPathInConfiguredLibrary(fullPath)
+        ) ? function () { applyFolderRenamePatternToFile(fullPath, panel); } : null,
+        onRebuild: function () { executeScriptOnFile('single_file', fullPath, panel); },
+        onEnhance: function () { executeScriptOnFile('enhance_single', fullPath, panel); },
+        extraFileOps: [{
+          label: 'Add Blank to End',
+          icon: 'bi bi-file-plus',
+          onClick: function () { executeScriptOnFile('add', fullPath, panel); },
+          className: 'dropdown-item'
+        }],
+        onFetchMetadata: hasAnyProvider
+          ? function () { searchMetadataForFile(fullPath, fileData.name, panel); }
+          : null,
+        onForceComicVine: hasProvider(panel, 'comicvine')
+          ? function () { searchMetadataForFile(fullPath, fileData.name, panel, { forceProvider: 'comicvine' }); }
+          : null,
+        onForceMetron: hasProvider(panel, 'metron')
+          ? function () { searchMetadataForFile(fullPath, fileData.name, panel, { forceProvider: 'metron' }); }
+          : null,
+        onAddToReadingList: function () { openAddToReadingListModal(fullPath); },
+        onDelete: function () { showDeletePrompt(fullPath, fileData.name, panel); }
+      });
 
       dropdownContainer.appendChild(dropdownBtn);
       dropdownContainer.appendChild(dropdownMenu);
@@ -1682,116 +1498,102 @@ function loadRecentFiles(panel) {
           iconContainer.setAttribute('role', 'group');
           iconContainer.setAttribute('aria-label', 'File actions');
 
-          // Add CBZ info button
-          const infoBtn = document.createElement('button');
-          infoBtn.className = 'btn btn-sm btn-outline-info';
-          infoBtn.innerHTML = '<i class="bi bi-eye"></i>';
-          infoBtn.title = 'CBZ Information';
-          infoBtn.setAttribute('type', 'button');
-          infoBtn.onclick = function (e) {
-            e.stopPropagation();
-            // Get the directory path
-            const directoryPath = file.file_path.substring(0, file.file_path.lastIndexOf('/'));
-            // For recent files, we don't have the full directory listing, so pass empty array
-            showCBZInfo(file.file_path, file.file_name, directoryPath, []);
-          };
-          iconContainer.appendChild(infoBtn);
-
-          // Use source panel's providers for recent files (or fall back to legacy)
-          const providers = sourceLibraryProviders || [];
+          const providers = getProvidersForPanel(panel);
           const hasGCD = providers.some(p => p.provider_type === 'gcd');
           const hasAnyProvider = providers.length > 0;
 
-          // Add cascade metadata button (if providers configured)
-          if (hasAnyProvider) {
-            const metadataBtn = document.createElement('button');
-            metadataBtn.className = 'btn btn-sm btn-outline-success';
-            metadataBtn.innerHTML = '<i class="bi bi-cloud-download"></i>';
-            metadataBtn.title = 'Fetch Metadata (search providers by priority)';
-            metadataBtn.setAttribute('type', 'button');
-            metadataBtn.onclick = function (e) {
-              e.stopPropagation();
-              searchMetadataForFile(file.file_path, file.file_name, 'source');
-            };
-            iconContainer.appendChild(metadataBtn);
-          }
+          const dropdownContainer = document.createElement('div');
+          dropdownContainer.className = 'dropdown d-inline-block';
 
-          // Add GCD-specific button (if GCD is available)
-          if (hasGCD) {
-            const gcdBtn = document.createElement('button');
-            gcdBtn.className = 'btn btn-sm btn-outline-info';
-            gcdBtn.innerHTML = '<i class="bi bi-database-down"></i>';
-            gcdBtn.title = 'Search GCD Database Only';
-            gcdBtn.setAttribute('type', 'button');
-            gcdBtn.onclick = function (e) {
-              e.stopPropagation();
-              searchGCDMetadata(file.file_path, file.file_name);
-            };
-            iconContainer.appendChild(gcdBtn);
-          }
+          const dropdownBtn = document.createElement('button');
+          dropdownBtn.className = 'btn btn-sm btn-outline-secondary';
+          dropdownBtn.setAttribute('type', 'button');
+          dropdownBtn.setAttribute('data-bs-toggle', 'dropdown');
+          dropdownBtn.setAttribute('aria-expanded', 'false');
+          dropdownBtn.innerHTML = '<i class="bi bi-three-dots-vertical"></i>';
+          dropdownBtn.title = 'More options';
+          dropdownBtn.onclick = function (e) { e.stopPropagation(); };
 
-          // Fallback to legacy buttons if no providers configured
-          if (!hasAnyProvider) {
-            if (typeof gcdMysqlAvailable !== 'undefined' && gcdMysqlAvailable) {
-              const gcdBtn = document.createElement('button');
-              gcdBtn.className = 'btn btn-sm btn-outline-success';
-              gcdBtn.innerHTML = '<i class="bi bi-cloud-download"></i>';
-              gcdBtn.title = 'Search GCD for Metadata (legacy)';
-              gcdBtn.setAttribute('type', 'button');
-              gcdBtn.onclick = function (e) {
-                e.stopPropagation();
-                searchGCDMetadata(file.file_path, file.file_name);
-              };
-              iconContainer.appendChild(gcdBtn);
-            }
-          }
+          const dropdownMenu = document.createElement('ul');
+          dropdownMenu.className = 'dropdown-menu dropdown-menu-end shadow';
+          CLU.populateIssueActionMenu(dropdownMenu, {
+            onCropCover: function () { executeScriptOnFile('crop', file.file_path, panel); },
+            onRemoveFirstImage: function () { executeScriptOnFile('remove', file.file_path, panel); },
+            onEditFile: function () {
+              const nameDiv = leftContainer.querySelector('.fw-medium');
+              const oldPath = file.file_path;
 
-          // Add edit filename button
-          const pencilBtn = document.createElement('button');
-          pencilBtn.className = 'btn btn-sm btn-outline-secondary';
-          pencilBtn.innerHTML = '<i class="bi bi-pencil"></i>';
-          pencilBtn.title = 'Edit filename';
-          pencilBtn.setAttribute('type', 'button');
-          pencilBtn.addEventListener('click', function (e) {
-            e.stopPropagation();
-            const nameDiv = leftContainer.querySelector('.fw-medium');
-            const oldPath = file.file_path;
+              const input = document.createElement('input');
+              input.type = 'text';
+              input.className = 'form-control form-control-sm edit-input';
+              input.value = file.file_name;
+              input.addEventListener('click', ev => ev.stopPropagation());
 
-            const input = document.createElement('input');
-            input.type = 'text';
-            input.className = 'form-control form-control-sm edit-input';
-            input.value = file.file_name;
-            input.addEventListener('click', ev => ev.stopPropagation());
+              input.addEventListener('keypress', ev => {
+                if (ev.key === 'Enter') {
+                  const newName = input.value.trim();
+                  if (!newName) return alert('Filename cannot be empty.');
+                  renameItem(oldPath, newName, panel);
+                }
+              });
 
-            input.addEventListener('keypress', ev => {
-              if (ev.key === 'Enter') {
-                const newName = input.value.trim();
-                if (!newName) return alert('Filename cannot be empty.');
-                renameItem(oldPath, newName, panel);
-              }
-            });
+              input.addEventListener('blur', () => {
+                nameDiv.innerHTML = CLU.escapeHtml(file.file_name);
+              });
 
-            input.addEventListener('blur', () => {
-              nameDiv.innerHTML = CLU.escapeHtml(file.file_name);
-            });
-
-            nameDiv.innerHTML = '';
-            nameDiv.appendChild(input);
-            input.focus();
+              nameDiv.innerHTML = '';
+              nameDiv.appendChild(input);
+              input.focus();
+            },
+            onApplyRenamePattern: filesUiConfig.enableCustomRename
+              ? function () { applyRenamePatternToFile(file.file_path, panel); }
+              : null,
+            onApplyFolderRenamePattern: (
+              filesUiConfig.enableCustomRename &&
+              filesUiConfig.hasCustomMovePattern &&
+              isPathInConfiguredLibrary(file.file_path)
+            ) ? function () { applyFolderRenamePatternToFile(file.file_path, panel); } : null,
+            onRebuild: function () { executeScriptOnFile('single_file', file.file_path, panel); },
+            onEnhance: function () { executeScriptOnFile('enhance_single', file.file_path, panel); },
+            extraFileOps: [{
+              label: 'Add Blank to End',
+              icon: 'bi bi-file-plus',
+              onClick: function () { executeScriptOnFile('add', file.file_path, panel); },
+              className: 'dropdown-item'
+            }],
+            onFetchMetadata: hasAnyProvider
+              ? function () { searchMetadataForFile(file.file_path, file.file_name, panel); }
+              : null,
+            onForceComicVine: hasProvider(panel, 'comicvine')
+              ? function () { searchMetadataForFile(file.file_path, file.file_name, panel, { forceProvider: 'comicvine' }); }
+              : null,
+            onForceMetron: hasProvider(panel, 'metron')
+              ? function () { searchMetadataForFile(file.file_path, file.file_name, panel, { forceProvider: 'metron' }); }
+              : null,
+            extraMetadataActions: hasGCD || (!hasAnyProvider && typeof gcdMysqlAvailable !== 'undefined' && gcdMysqlAvailable)
+              ? [{
+                  label: hasGCD ? 'Search GCD Database Only' : 'Search GCD for Metadata',
+                  icon: 'bi bi-database-down',
+                  onClick: function () { searchGCDMetadata(file.file_path, file.file_name); },
+                  className: 'dropdown-item'
+                }]
+              : null,
+            extraPostReadingActions: [{
+              label: 'Info',
+              icon: 'bi bi-info-circle',
+              onClick: function () {
+                const directoryPath = file.file_path.substring(0, file.file_path.lastIndexOf('/'));
+                showCBZInfo(file.file_path, file.file_name, directoryPath, []);
+              },
+              className: 'dropdown-item'
+            }],
+            onAddToReadingList: function () { openAddToReadingListModal(file.file_path); },
+            onDelete: function () { showDeletePrompt(file.file_path, file.file_name, panel); }
           });
-          iconContainer.appendChild(pencilBtn);
 
-          // Add delete button
-          const trashBtn = document.createElement('button');
-          trashBtn.className = 'btn btn-sm btn-outline-danger';
-          trashBtn.innerHTML = '<i class="bi bi-trash"></i>';
-          trashBtn.title = 'Delete file';
-          trashBtn.setAttribute('type', 'button');
-          trashBtn.onclick = function (e) {
-            e.stopPropagation();
-            showDeletePrompt(file.file_path, file.file_name, panel);
-          };
-          iconContainer.appendChild(trashBtn);
+          dropdownContainer.appendChild(dropdownBtn);
+          dropdownContainer.appendChild(dropdownMenu);
+          iconContainer.appendChild(dropdownContainer);
 
           // Append containers to fileItem
           fileItem.appendChild(leftContainer);
@@ -2004,32 +1806,42 @@ function loadTrash(panel) {
         iconContainer.className = 'btn-group';
         iconContainer.setAttribute('role', 'group');
 
-        // CBZ info button (files only)
-        if (!item.is_dir) {
-          const infoBtn = document.createElement('button');
-          infoBtn.className = 'btn btn-sm btn-outline-info';
-          infoBtn.innerHTML = '<i class="bi bi-eye"></i>';
-          infoBtn.title = 'CBZ Information';
-          infoBtn.setAttribute('type', 'button');
-          infoBtn.onclick = function (e) {
-            e.stopPropagation();
-            const dirPath = item.path.substring(0, item.path.lastIndexOf('/'));
-            showCBZInfo(item.path, item.name, dirPath, []);
-          };
-          iconContainer.appendChild(infoBtn);
+        const dropdownContainer = document.createElement('div');
+        dropdownContainer.className = 'dropdown d-inline-block';
+
+        const dropdownBtn = document.createElement('button');
+        dropdownBtn.className = 'btn btn-sm btn-outline-secondary';
+        dropdownBtn.setAttribute('type', 'button');
+        dropdownBtn.setAttribute('data-bs-toggle', 'dropdown');
+        dropdownBtn.setAttribute('aria-expanded', 'false');
+        dropdownBtn.innerHTML = '<i class="bi bi-three-dots-vertical"></i>';
+        dropdownBtn.title = 'More options';
+        dropdownBtn.onclick = function (e) { e.stopPropagation(); };
+
+        const dropdownMenu = document.createElement('ul');
+        dropdownMenu.className = 'dropdown-menu dropdown-menu-end shadow';
+        if (item.is_dir) {
+          CLU.populateFolderActionMenu(dropdownMenu, {
+            onDelete: function () { permanentlyDeleteTrashItem(item.name, dropdownBtn); }
+          });
+        } else {
+          CLU.populateIssueActionMenu(dropdownMenu, {
+            extraPostReadingActions: [{
+              label: 'Info',
+              icon: 'bi bi-info-circle',
+              onClick: function () {
+                const dirPath = item.path.substring(0, item.path.lastIndexOf('/'));
+                showCBZInfo(item.path, item.name, dirPath, []);
+              },
+              className: 'dropdown-item'
+            }],
+            onDelete: function () { permanentlyDeleteTrashItem(item.name, dropdownBtn); }
+          });
         }
 
-        // Permanently delete button
-        const permDeleteBtn = document.createElement('button');
-        permDeleteBtn.className = 'btn btn-sm btn-outline-danger';
-        permDeleteBtn.innerHTML = '<i class="bi bi-x-lg"></i>';
-        permDeleteBtn.title = 'Permanently delete';
-        permDeleteBtn.setAttribute('type', 'button');
-        permDeleteBtn.onclick = function (e) {
-          e.stopPropagation();
-          permanentlyDeleteTrashItem(item.name, permDeleteBtn);
-        };
-        iconContainer.appendChild(permDeleteBtn);
+        dropdownContainer.appendChild(dropdownBtn);
+        dropdownContainer.appendChild(dropdownMenu);
+        iconContainer.appendChild(dropdownContainer);
 
         fileItem.appendChild(leftContainer);
         fileItem.appendChild(iconContainer);
@@ -6131,117 +5943,33 @@ function renameFileAfterMetadata(filePath, oldName, newName) {
 }
 
 function applyRenamePatternToFile(filePath, panel) {
-  const loadingToast = document.createElement('div');
-  loadingToast.className = 'toast show position-fixed top-0 end-0 m-3';
-  loadingToast.style.zIndex = '1200';
-  loadingToast.innerHTML = `
-    <div class="toast-header bg-primary text-white">
-      <strong class="me-auto">Applying Rename Pattern</strong>
-    </div>
-    <div class="toast-body">
-      <div class="d-flex align-items-center">
-        <div class="spinner-border spinner-border-sm me-2" role="status">
-          <span class="visually-hidden">Loading...</span>
-        </div>
-        Renaming file...
-      </div>
-    </div>
-  `;
-  document.body.appendChild(loadingToast);
-
-  fetch('/apply-rename-pattern', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ path: filePath })
-  })
-    .then(response => response.json().then(data => ({ ok: response.ok, data })))
-    .then(({ ok, data }) => {
-      if (document.body.contains(loadingToast)) {
-        document.body.removeChild(loadingToast);
-      }
-
-      if (!ok) {
-        throw new Error(data.error || 'Failed to apply rename pattern');
-      }
-
+  CLU.applyRenamePatternToFile(filePath, {
+    onSuccess: function (data) {
       if (data.renamed) {
         updateRenamedFileInDOM(filePath, data.new_path, data.new_name);
-        CLU.showToast('File Renamed', `Successfully renamed to: ${data.new_name}`, 'success');
-        refreshPanelForPath(data.new_path || filePath);
-        return;
       }
-
-      CLU.showToast('No Rename Needed', data.message || 'File already matches the custom rename pattern.', 'info');
-    })
-    .catch(error => {
-      if (document.body.contains(loadingToast)) {
-        document.body.removeChild(loadingToast);
-      }
+      refreshPanelForPath(data.new_path || filePath);
+    },
+    onError: function (error) {
       console.error('Apply rename pattern error:', error);
       CLU.showToast('Rename Error', error.message, 'error');
       refreshPanelForPath(filePath);
-    });
+    }
+  });
 }
 
 function applyFolderRenamePatternToFile(filePath, panel) {
-  const loadingToast = document.createElement('div');
-  loadingToast.className = 'toast show position-fixed top-0 end-0 m-3';
-  loadingToast.style.zIndex = '1200';
-  loadingToast.innerHTML = `
-    <div class="toast-header bg-primary text-white">
-      <strong class="me-auto">Applying Folder + Rename Pattern</strong>
-    </div>
-    <div class="toast-body">
-      <div class="d-flex align-items-center">
-        <div class="spinner-border spinner-border-sm me-2" role="status">
-          <span class="visually-hidden">Loading...</span>
-        </div>
-        Moving and renaming file...
-      </div>
-    </div>
-  `;
-  document.body.appendChild(loadingToast);
-
-  fetch('/apply-folder-rename-pattern', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
+  CLU.applyFolderRenamePatternToFile(filePath, {
+    onSuccess: function (data) {
+      refreshPanelForPath(filePath);
+      refreshPanelForPath(data.new_path || filePath);
     },
-    body: JSON.stringify({ path: filePath })
-  })
-    .then(response => response.json().then(data => ({ ok: response.ok, data })))
-    .then(({ ok, data }) => {
-      if (document.body.contains(loadingToast)) {
-        document.body.removeChild(loadingToast);
-      }
-
-      if (!ok) {
-        throw new Error(data.error || 'Failed to apply folder and rename pattern');
-      }
-
-      if (data.updated) {
-        CLU.showToast('File Moved', `Successfully moved and renamed to: ${data.new_name}`, 'success');
-        refreshPanelForPath(filePath);
-        refreshPanelForPath(data.new_path || filePath);
-        return;
-      }
-
-      CLU.showToast(
-        'No Move Needed',
-        data.message || 'File already matches the custom folder and rename patterns.',
-        'info'
-      );
-    })
-    .catch(error => {
-      if (document.body.contains(loadingToast)) {
-        document.body.removeChild(loadingToast);
-      }
+    onError: function (error) {
       console.error('Apply folder + rename pattern error:', error);
       CLU.showToast('Move Error', error.message, 'error');
       refreshPanelForPath(filePath);
-    });
+    }
+  });
 }
 
 function updateRenamedFileInDOM(oldPath, newPath, newName) {

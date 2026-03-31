@@ -669,6 +669,58 @@ class TestSearchMetadataParsedFilename:
         data = resp.get_json()
         assert data["parsed_filename"]["series_name"] == "Dark Knight"
 
+    @patch("routes.metadata._try_comicvine_single", return_value=(None, None, None, None))
+    @patch("routes.metadata._try_metron_single")
+    @patch("models.comicvine.find_cvinfo_in_folder", return_value=None)
+    @patch("core.database.get_library_providers", return_value=[
+        {"provider_type": "metron", "enabled": True},
+        {"provider_type": "comicvine", "enabled": True},
+    ])
+    @patch("core.database.set_has_comicinfo")
+    def test_force_provider_uses_only_requested_single_provider(
+        self,
+        mock_set,
+        mock_providers,
+        mock_cvinfo,
+        mock_try_metron,
+        mock_try_comicvine,
+        client,
+    ):
+        resp = client.post('/api/search-metadata', json={
+            'file_path': '/data/Batman 001 (2020).cbz',
+            'file_name': 'Batman 001 (2020).cbz',
+            'library_id': 1,
+            'force_provider': 'comicvine',
+        })
+
+        assert resp.status_code == 404
+        mock_try_comicvine.assert_called_once()
+        mock_try_metron.assert_not_called()
+
+    @patch("models.comicvine.find_cvinfo_in_folder", return_value=None)
+    @patch("core.database.get_library_providers", return_value=[
+        {"provider_type": "metron", "enabled": True},
+    ])
+    @patch("core.database.set_has_comicinfo")
+    def test_force_provider_rejects_provider_not_enabled_for_library(
+        self,
+        mock_set,
+        mock_providers,
+        mock_cvinfo,
+        client,
+    ):
+        resp = client.post('/api/search-metadata', json={
+            'file_path': '/data/Batman 001 (2020).cbz',
+            'file_name': 'Batman 001 (2020).cbz',
+            'library_id': 1,
+            'force_provider': 'comicvine',
+        })
+
+        assert resp.status_code == 400
+        data = resp.get_json()
+        assert data["success"] is False
+        assert "not enabled for this library" in data["error"]
+
 
 class TestComicVineVolumeYearHandling:
 

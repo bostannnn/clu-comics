@@ -655,9 +655,18 @@
    * @param {string} filePath  Full path to the CBZ file
    * @param {string} fileName  Display name of the file
    */
-  CLU.searchMetadata = function (filePath, fileName, searchTerm) {
+  CLU.searchMetadata = function (filePath, fileName, searchTermOrOptions) {
     var libraryId = _getLibraryId();
     var contract = _getContract();
+    var searchTerm = null;
+    var forceProvider = null;
+
+    if (typeof searchTermOrOptions === 'string') {
+      searchTerm = searchTermOrOptions;
+    } else if (searchTermOrOptions && typeof searchTermOrOptions === 'object') {
+      searchTerm = searchTermOrOptions.searchTerm || null;
+      forceProvider = searchTermOrOptions.forceProvider || null;
+    }
 
     CLU.showToast('Searching Metadata', 'Searching metadata for \'' + fileName + '\'...', 'info');
 
@@ -667,6 +676,9 @@
     }
     if (searchTerm) {
       requestBody.search_term = searchTerm;
+    }
+    if (forceProvider) {
+      requestBody.force_provider = forceProvider;
     }
 
     fetch('/api/search-metadata', {
@@ -728,6 +740,10 @@
           contract.onMetadataError(filePath, error.message);
         }
       });
+  };
+
+  CLU.forceSearchMetadata = function (filePath, fileName, forceProvider) {
+    return CLU.searchMetadata(filePath, fileName, { forceProvider: forceProvider });
   };
 
   // ── Public API: Single-file with user selection ───────────────────────

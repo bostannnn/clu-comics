@@ -3499,6 +3499,7 @@ def search_metadata():
         selected_match = data.get('selected_match')
         search_term_override = data.get('search_term')
         gcd_api_start_year = data.get('gcd_api_start_year')  # User-provided series start year for GCD API
+        force_provider = (data.get('force_provider') or '').strip().lower()
 
         if not file_path or not file_name:
             return jsonify({"success": False, "error": "Missing file_path or file_name"}), 400
@@ -3530,6 +3531,9 @@ def search_metadata():
         if search_term_override:
             series_name = search_term_override.strip()
             app_logger.info(f"[search-metadata] Using manual search term override: '{series_name}'")
+
+        if force_provider and force_provider not in {'comicvine', 'metron'}:
+            return jsonify({"success": False, "error": "Force metadata requires ComicVine or Metron"}), 400
 
         # Check for cvinfo file in parent folder
         folder_path = os.path.dirname(file_path)
@@ -3661,6 +3665,14 @@ def search_metadata():
                     provider_order.append('gcd_api')
             except Exception:
                 pass
+
+        if force_provider:
+            if force_provider not in provider_order:
+                return jsonify({
+                    "success": False,
+                    "error": f"{force_provider.title()} is not enabled for this library"
+                }), 400
+            provider_order = [force_provider]
 
         app_logger.info(f"[search-metadata] Provider order: {provider_order}")
 
