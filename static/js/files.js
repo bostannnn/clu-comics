@@ -1130,6 +1130,7 @@ function updateFilterBar(panel, directories) {
   if (!outerContainer) return;
   const btnGroup = outerContainer.querySelector('.btn-group');
   if (!btnGroup) return;
+  const alphaRow = outerContainer.querySelector('.files-filter-row');
 
   // Handle undefined or null directories - provide empty array as fallback
   if (!directories) {
@@ -1152,6 +1153,13 @@ function updateFilterBar(panel, directories) {
     }
   });
 
+  const filterBucketCount = availableLetters.size + (hasNonAlpha ? 1 : 0);
+  const showAlphaFilter = filterBucketCount > 1;
+
+  if (!showAlphaFilter) {
+    currentFilter[panel] = 'all';
+  }
+
   let buttonsHtml = '';
   buttonsHtml += `<button type="button" class="btn btn-outline-secondary ${currentFilter[panel] === 'all' ? 'active' : ''}" onclick="filterDirectories('all', '${panel}')">All</button>`;
 
@@ -1166,6 +1174,11 @@ function updateFilterBar(panel, directories) {
     }
   }
   btnGroup.innerHTML = buttonsHtml;
+
+  if (alphaRow) {
+    alphaRow.style.display = showAlphaFilter ? 'flex' : 'none';
+  }
+
   // Directory search box logic (show for large directory lists on both panels)
   const searchRow = document.getElementById(panel + '-directory-search-row');
   if (searchRow) {
