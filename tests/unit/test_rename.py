@@ -2,6 +2,7 @@
 import os
 import pytest
 from unittest.mock import patch, MagicMock
+from core.config import config
 
 
 # ---------------------------------------------------------------------------
@@ -669,6 +670,106 @@ class TestRenameFileUsingCustomPattern:
 
         with pytest.raises(ValueError, match="Custom rename pattern is not enabled"):
             rename_file_using_custom_pattern(str(comic))
+
+
+class TestMoveAndRenameFileUsingCustomPatterns:
+
+    @patch("cbz_ops.rename.load_custom_rename_config", return_value=(True, "{series_name} {issue_number} ({year})"))
+    @patch("cbz_ops.rename.get_unique_filepath", side_effect=lambda path: path)
+    @patch("helpers.library.get_library_for_path")
+    @patch("core.comicinfo.read_comicinfo_from_zip")
+    def test_moves_into_pattern_folder(self, mock_read_comicinfo, mock_get_library, mock_unique, mock_config, tmp_path):
+        from cbz_ops.rename import move_and_rename_file_using_custom_patterns
+
+        library_root = tmp_path / "library"
+        issue_dir = library_root / "incoming"
+        issue_dir.mkdir(parents=True)
+        comic = issue_dir / "messy.cbz"
+        comic.write_bytes(b"fake")
+
+        mock_get_library.return_value = {"path": str(library_root)}
+        mock_read_comicinfo.return_value = {
+            "Series": "Manual Series",
+            "Number": "7",
+            "Year": "2024",
+            "Publisher": "Image",
+        }
+
+        with patch.object(config, "get", return_value="{publisher}/{series_name} ({start_year})"):
+            new_path, was_updated = move_and_rename_file_using_custom_patterns(str(comic))
+
+        assert was_updated is True
+        assert os.path.basename(new_path) == "Manual Series 007 (2024).cbz"
+        assert str(new_path).startswith(str(library_root))
+        assert "Image" in str(new_path)
+        assert "Manual Series" in str(new_path)
+        assert "Manual Series (2024)" not in str(new_path)
+        assert os.path.exists(new_path)
+
+    @patch("cbz_ops.rename.load_custom_rename_config", return_value=(True, "{series_name} {issue_number} ({year})"))
+    @patch("cbz_ops.rename.get_unique_filepath", side_effect=lambda path: path)
+    @patch("helpers.library.get_library_for_path")
+    @patch("models.comicvine.read_cvinfo_fields")
+    @patch("models.comicvine.find_cvinfo_in_folder")
+    @patch("core.comicinfo.read_comicinfo_from_zip")
+    def test_uses_cvinfo_for_folder_fields(
+        self,
+        mock_read_comicinfo,
+        mock_find_cvinfo,
+        mock_read_cvinfo,
+        mock_get_library,
+        mock_unique,
+        mock_config,
+        tmp_path,
+    ):
+        from cbz_ops.rename import move_and_rename_file_using_custom_patterns
+
+        library_root = tmp_path / "library"
+        issue_dir = library_root / "incoming"
+        issue_dir.mkdir(parents=True)
+        comic = issue_dir / "Series #7 (2024).cbz"
+        comic.write_bytes(b"fake")
+
+        mock_get_library.return_value = {"path": str(library_root)}
+        mock_find_cvinfo.return_value = str(issue_dir / "cvinfo")
+        mock_read_cvinfo.return_value = {
+            "publisher_name": "Fantagraphics",
+            "start_year": 2022,
+        }
+        mock_read_comicinfo.return_value = {
+            "Series": "The Complete Crepax",
+            "Number": "1",
+            "Year": "2024",
+        }
+
+        with patch.object(config, "get", return_value="{publisher}/{series_name} ({start_year})"):
+            new_path, was_updated = move_and_rename_file_using_custom_patterns(str(comic))
+
+        assert was_updated is True
+        assert "Fantagraphics" in str(new_path)
+        assert "The Complete Crepax (2022)" in str(new_path)
+        assert os.path.exists(new_path)
+
+    @patch("cbz_ops.rename.load_custom_rename_config", return_value=(True, "{series_name} {issue_number} ({year})"))
+    def test_raises_when_move_pattern_missing(self, mock_config, tmp_path):
+        from cbz_ops.rename import move_and_rename_file_using_custom_patterns
+
+        comic = tmp_path / "Series 001.cbz"
+        comic.write_bytes(b"fake")
+
+        with patch.object(config, "get", return_value=""):
+            with pytest.raises(ValueError, match="Custom folder pattern is not configured"):
+                move_and_rename_file_using_custom_patterns(str(comic))
+
+    @patch("cbz_ops.rename.load_custom_rename_config", return_value=(False, ""))
+    def test_raises_when_custom_pattern_disabled(self, mock_config, tmp_path):
+        from cbz_ops.rename import move_and_rename_file_using_custom_patterns
+
+        comic = tmp_path / "Series 001.cbz"
+        comic.write_bytes(b"fake")
+
+        with pytest.raises(ValueError, match="Custom rename pattern is not enabled"):
+            move_and_rename_file_using_custom_patterns(str(comic))
 
 
 # ===== reverse_parse_pattern =====

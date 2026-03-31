@@ -970,6 +970,12 @@ def _sanitize_pattern_value(value):
     return value.strip(". ")
 
 
+def _normalize_year_value(value):
+    """Return a 4-digit year string or an empty string."""
+    value = str(value or "").strip()
+    return value if re.fullmatch(r"\d{4}", value) else ""
+
+
 def _extract_local_pattern_values(file_path, custom_pattern):
     """Build rename-pattern values from local file data.
 
@@ -995,7 +1001,28 @@ def _extract_local_pattern_values(file_path, custom_pattern):
         "year": str(comicinfo.get("Year", "") or "").strip(),
         "issue_number": str(comicinfo.get("Number", "") or "").strip(),
         "issue_title": _sanitize_pattern_value(comicinfo.get("Title", "")),
+        "publisher": _sanitize_pattern_value(comicinfo.get("Publisher", "")),
+        "start_year": "",
     }
+
+    try:
+        from models.comicvine import find_cvinfo_in_folder, read_cvinfo_fields
+
+        cvinfo_path = find_cvinfo_in_folder(os.path.dirname(file_path))
+        if cvinfo_path:
+            cvinfo_fields = read_cvinfo_fields(cvinfo_path) or {}
+            cvinfo_publisher = _sanitize_pattern_value(
+                cvinfo_fields.get("publisher_name", "")
+            )
+            cvinfo_start_year = _normalize_year_value(
+                cvinfo_fields.get("start_year", "")
+            )
+            if cvinfo_publisher:
+                values["publisher"] = cvinfo_publisher
+            if cvinfo_start_year:
+                values["start_year"] = cvinfo_start_year
+    except Exception as exc:
+        app_logger.debug(f"Failed to read local cvinfo for {file_path}: {exc}")
 
     if parsed:
         if not values["series_name"]:
@@ -1012,6 +1039,35 @@ def _extract_local_pattern_values(file_path, custom_pattern):
         return values
 
     return None
+
+
+def apply_custom_move_pattern(values, pattern):
+    """Build sanitized folder segments from the saved move pattern."""
+    if not pattern:
+        return []
+
+    result = pattern
+    replacements = {
+        "{publisher}": values.get("publisher", ""),
+        "{series_name}": values.get("series_name", ""),
+        "{volume_number}": values.get("volume_number", ""),
+        "{start_year}": values.get("start_year", ""),
+        "{issue_number}": values.get("issue_number", ""),
+    }
+
+    for token, value in replacements.items():
+        result = result.replace(token, _sanitize_pattern_value(value))
+
+    segments = []
+    for raw_segment in result.replace("\\", "/").split("/"):
+        cleaned = re.sub(r"\s+", " ", raw_segment or "").strip()
+        cleaned = re.sub(r"\s*\(\s*\)", "", cleaned).strip()
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        cleaned = cleaned.strip(". ")
+        if cleaned:
+            segments.append(cleaned)
+
+    return segments
 
 
 def rename_file_using_custom_pattern(file_path):
@@ -1047,6 +1103,61 @@ def rename_file_using_custom_pattern(file_path):
 
     new_path = get_unique_filepath(os.path.join(directory, new_name))
     app_logger.info(f"Renaming with custom pattern:\n  {file_path}\n  --> {new_path}\n")
+    os.rename(file_path, new_path)
+    return new_path, True
+
+
+def move_and_rename_file_using_custom_patterns(file_path):
+    """Move a file into its pattern-based folder and rename it using local data only."""
+    if is_hidden(file_path):
+        raise ValueError("Hidden files cannot be moved or renamed.")
+
+    custom_enabled, custom_pattern = load_custom_rename_config()
+    if not custom_enabled or not custom_pattern:
+        raise ValueError("Custom rename pattern is not enabled.")
+
+    move_pattern = config.get("SETTINGS", "CUSTOM_MOVE_PATTERN", fallback="").strip()
+    if not move_pattern:
+        raise ValueError("Custom folder pattern is not configured.")
+
+    from helpers.library import get_library_for_path
+
+    library = get_library_for_path(file_path)
+    if not library or not library.get("path"):
+        raise ValueError("File is not inside a configured library.")
+
+    _, filename = os.path.split(file_path)
+    values = _extract_local_pattern_values(file_path, custom_pattern)
+    if not values:
+        raise ValueError(
+            "No usable local metadata found. Add ComicInfo.xml Series/Number or use a filename that matches your rename rules."
+        )
+
+    new_stem = apply_custom_pattern(values, custom_pattern)
+    if not new_stem:
+        raise ValueError("Could not apply the custom rename pattern to this file.")
+
+    folder_segments = apply_custom_move_pattern(values, move_pattern)
+    if not folder_segments:
+        raise ValueError("Custom folder pattern produced an empty target folder.")
+
+    new_name = clean_final_filename(new_stem + os.path.splitext(filename)[1])
+    if not new_name:
+        raise ValueError("Custom rename pattern produced an empty filename.")
+
+    target_dir = os.path.join(library["path"], *folder_segments)
+    target_path = os.path.join(target_dir, new_name)
+
+    if os.path.normpath(target_path) == os.path.normpath(file_path):
+        return file_path, False
+
+    os.makedirs(target_dir, exist_ok=True)
+    new_path = get_unique_filepath(target_path)
+    app_logger.info(
+        "Moving and renaming with custom patterns:\n  %s\n  --> %s\n",
+        file_path,
+        new_path,
+    )
     os.rename(file_path, new_path)
     return new_path, True
 

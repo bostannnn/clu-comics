@@ -639,7 +639,9 @@
 <script src="{{ url_for('static', filename='js/reading_list_picker.js') }}?v={{ range(1000, 9999) | random }}"></script>
 <script>
   window.CLU_FILES_CONFIG = {
-    enableCustomRename: {{ 'true' if config.get('ENABLE_CUSTOM_RENAME', False) else 'false' }}
+    enableCustomRename: {{ 'true' if config.get('ENABLE_CUSTOM_RENAME', False) else 'false' }},
+    hasCustomMovePattern: {{ 'true' if config.get('CUSTOM_MOVE_PATTERN', '').strip() else 'false' }},
+    libraryRoots: []
   };
 </script>
 <script src="{{ url_for('static', filename='js/files.js') }}?v={{ range(1000, 9999) | random }}&t=202502"></script>
@@ -653,6 +655,7 @@ async function loadLibraryDropdowns() {
         const data = await response.json();
 
         if (data.success && data.libraries && data.libraries.length > 0) {
+            window.CLU_FILES_CONFIG.libraryRoots = data.libraries.map(lib => lib.path);
             populateLibraryMenu('sourceLibraryMenu', 'source', data.libraries);
             populateLibraryMenu('destLibraryMenu', 'destination', data.libraries);
 

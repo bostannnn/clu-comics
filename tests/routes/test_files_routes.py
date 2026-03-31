@@ -196,6 +196,69 @@ class TestApplyRenamePattern:
         assert "No usable local metadata found" in resp.get_json()["error"]
 
 
+class TestApplyFolderRenamePattern:
+
+    def test_missing_path(self, client):
+        resp = client.post("/apply-folder-rename-pattern", json={})
+        assert resp.status_code == 400
+
+    def test_source_not_exists(self, client):
+        resp = client.post("/apply-folder-rename-pattern", json={"path": "/nonexistent.cbz"})
+        assert resp.status_code == 404
+
+    @patch("routes.files.is_critical_path", return_value=False)
+    @patch("cbz_ops.rename.move_and_rename_file_using_custom_patterns")
+    def test_success(self, mock_move_and_rename, mock_crit, client, tmp_path):
+        old = tmp_path / "old.cbz"
+        old.write_bytes(b"data")
+        new = tmp_path / "Publisher" / "Series (2024)" / "Series 007 (2024).cbz"
+        mock_move_and_rename.return_value = (str(new), True)
+
+        mock_app = MagicMock()
+        with patch.dict("sys.modules", {"app": mock_app}):
+            resp = client.post("/apply-folder-rename-pattern", json={"path": str(old)})
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["success"] is True
+        assert data["updated"] is True
+        assert data["new_path"] == str(new)
+        assert data["new_name"] == "Series 007 (2024).cbz"
+
+    @patch("routes.files.is_critical_path", return_value=False)
+    @patch("cbz_ops.rename.move_and_rename_file_using_custom_patterns")
+    def test_no_change_needed(self, mock_move_and_rename, mock_crit, client, tmp_path):
+        old = tmp_path / "already.cbz"
+        old.write_bytes(b"data")
+        mock_move_and_rename.return_value = (str(old), False)
+
+        mock_app = MagicMock()
+        with patch.dict("sys.modules", {"app": mock_app}):
+            resp = client.post("/apply-folder-rename-pattern", json={"path": str(old)})
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["success"] is True
+        assert data["updated"] is False
+        assert "already matches" in data["message"]
+
+    @patch("routes.files.is_critical_path", return_value=False)
+    @patch(
+        "cbz_ops.rename.move_and_rename_file_using_custom_patterns",
+        side_effect=ValueError("Custom folder pattern is not configured."),
+    )
+    def test_validation_error(self, mock_move_and_rename, mock_crit, client, tmp_path):
+        old = tmp_path / "unknown.cbz"
+        old.write_bytes(b"data")
+
+        mock_app = MagicMock()
+        with patch.dict("sys.modules", {"app": mock_app}):
+            resp = client.post("/apply-folder-rename-pattern", json={"path": str(old)})
+
+        assert resp.status_code == 400
+        assert "Custom folder pattern is not configured." in resp.get_json()["error"]
+
+
 class TestDelete:
 
     @patch("routes.files.is_critical_path", return_value=False)
