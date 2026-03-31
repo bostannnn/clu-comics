@@ -736,7 +736,7 @@ function createListItem(itemName, fullPath, type, panel, isDraggable) {
 
   if (fileData.name !== "Parent") {
     let pencil = document.createElement("button");
-    pencil.className = "btn btn-sm btn-outline-dark";
+    pencil.className = "btn btn-sm btn-outline-secondary";
     pencil.innerHTML = '<i class="bi bi-pencil"></i>';
     pencil.title = "Edit filename";
     pencil.setAttribute("type", "button");
@@ -1717,7 +1717,7 @@ function loadRecentFiles(panel) {
 
           // Add edit filename button
           const pencilBtn = document.createElement('button');
-          pencilBtn.className = 'btn btn-sm btn-outline-dark';
+          pencilBtn.className = 'btn btn-sm btn-outline-secondary';
           pencilBtn.innerHTML = '<i class="bi bi-pencil"></i>';
           pencilBtn.title = 'Edit filename';
           pencilBtn.setAttribute('type', 'button');
