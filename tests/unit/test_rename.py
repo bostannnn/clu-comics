@@ -751,6 +751,43 @@ class TestMoveAndRenameFileUsingCustomPatterns:
         assert os.path.exists(new_path)
 
     @patch("cbz_ops.rename.load_custom_rename_config", return_value=(True, "{series_name} {issue_number} ({year})"))
+    @patch("cbz_ops.rename.get_unique_filepath", side_effect=lambda path: path)
+    @patch("helpers.library.get_library_for_path")
+    @patch("core.comicinfo.read_comicinfo_from_zip")
+    def test_uses_volume_as_start_year_when_year_like(
+        self,
+        mock_read_comicinfo,
+        mock_get_library,
+        mock_unique,
+        mock_config,
+        tmp_path,
+    ):
+        from cbz_ops.rename import move_and_rename_file_using_custom_patterns
+
+        library_root = tmp_path / "library"
+        issue_dir = library_root / "incoming"
+        issue_dir.mkdir(parents=True)
+        comic = issue_dir / "book.cbz"
+        comic.write_bytes(b"fake")
+
+        mock_get_library.return_value = {"path": str(library_root)}
+        mock_read_comicinfo.return_value = {
+            "Series": "Blood of the Virgin",
+            "Number": "1",
+            "Year": "2023",
+            "Volume": "2023",
+            "Publisher": "Pantheon Books",
+        }
+
+        with patch.object(config, "get", return_value="{publisher}/{series_name} ({start_year})"):
+            new_path, was_updated = move_and_rename_file_using_custom_patterns(str(comic))
+
+        assert was_updated is True
+        assert "Pantheon Books" in str(new_path)
+        assert "Blood of the Virgin (2023)" in str(new_path)
+        assert os.path.exists(new_path)
+
+    @patch("cbz_ops.rename.load_custom_rename_config", return_value=(True, "{series_name} {issue_number} ({year})"))
     def test_raises_when_move_pattern_missing(self, mock_config, tmp_path):
         from cbz_ops.rename import move_and_rename_file_using_custom_patterns
 

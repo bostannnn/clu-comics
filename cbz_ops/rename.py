@@ -1002,7 +1002,7 @@ def _extract_local_pattern_values(file_path, custom_pattern):
         "issue_number": str(comicinfo.get("Number", "") or "").strip(),
         "issue_title": _sanitize_pattern_value(comicinfo.get("Title", "")),
         "publisher": _sanitize_pattern_value(comicinfo.get("Publisher", "")),
-        "start_year": "",
+        "start_year": _normalize_year_value(comicinfo.get("Volume", "")),
     }
 
     try:
