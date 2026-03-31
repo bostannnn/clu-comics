@@ -43,7 +43,13 @@
     }
 
     .grid-filter-buttons {
-        grid-template-columns: repeat(auto-fill, minmax(50px, 1fr));
+        grid-template-columns: repeat(auto-fill, minmax(36px, 1fr));
+    }
+
+    .grid-filter-buttons .btn {
+        padding: 0.2rem 0.35rem;
+        font-size: 0.8rem;
+        line-height: 1.1;
     }
 
     #destination-list,

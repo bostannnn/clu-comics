@@ -1150,11 +1150,20 @@ function updateFilterBar(panel, directories) {
     }
   }
   btnGroup.innerHTML = buttonsHtml;
-  // --- SEARCH BOX LOGIC (destination only, >25 dirs) ---
-  if (panel === 'destination') {
-    const searchRow = document.getElementById('destination-directory-search-row');
+  // Directory search box logic (show for large directory lists on both panels)
+  const searchRow = document.getElementById(panel + '-directory-search-row');
+  if (searchRow) {
     if (directories.length > 25) {
-      searchRow.innerHTML = `<input type="text" id="destination-directory-search" class="form-control mb-2" placeholder="Type to filter directories..." oninput="onDestinationDirectorySearch(this.value)">`;
+      const inputId = panel + '-directory-search';
+      const currentValue = directorySearchTerms[panel] || '';
+      searchRow.innerHTML = `<input type="text" id="${inputId}" class="form-control mb-2" placeholder="Type to filter directories...">`;
+      const searchInput = document.getElementById(inputId);
+      if (searchInput) {
+        searchInput.value = currentValue;
+        searchInput.oninput = function () {
+          onDirectorySearch(this.value, panel);
+        };
+      }
     } else {
       searchRow.innerHTML = '';
     }
@@ -1199,11 +1208,13 @@ function restoreFilterIfValid(panel, path, directories) {
   }
 }
 
-// --- SEARCH STATE FOR DESTINATION PANEL ---
-let destinationSearchTerm = '';
-function onDestinationDirectorySearch(val) {
-  destinationSearchTerm = val.trim().toLowerCase();
-  if (destinationDirectoriesData) {
+// Directory search state per panel
+let directorySearchTerms = { source: '', destination: '' };
+function onDirectorySearch(val, panel) {
+  directorySearchTerms[panel] = val.trim().toLowerCase();
+  if (panel === 'source' && sourceDirectoriesData) {
+    renderDirectoryListing(sourceDirectoriesData, 'source');
+  } else if (panel === 'destination' && destinationDirectoriesData) {
     renderDirectoryListing(destinationDirectoriesData, 'destination');
   }
 }
@@ -1284,6 +1295,9 @@ function loadDirectories(path, panel) {
         resetFileTracking(panel, data.current_path);
         updateBreadcrumb('source', data.current_path);
         sourceDirectoriesData = data;
+        directorySearchTerms.source = '';
+        const sourceSearchInput = document.getElementById('source-directory-search');
+        if (sourceSearchInput) sourceSearchInput.value = '';
         updateFilterBar('source', data.directories);
 
         // Restore filter if previously set for this path
@@ -1299,7 +1313,7 @@ function loadDirectories(path, panel) {
         updateBreadcrumb('destination', data.current_path);
         destinationDirectoriesData = data;
         // Reset search filter and input on navigation
-        destinationSearchTerm = '';
+        directorySearchTerms.destination = '';
         const searchInput = document.getElementById('destination-directory-search');
         if (searchInput) searchInput.value = '';
         updateFilterBar('destination', data.directories);
@@ -1345,11 +1359,10 @@ function renderDirectoryListing(data, panel) {
 
   let filter = currentFilter[panel];
   let directoriesToShow = data.directories.filter(dir => {
-    // --- SEARCH FILTER FOR DESTINATION PANEL ---
-    if (panel === 'destination' && destinationSearchTerm) {
-      if (!dir.toLowerCase().includes(destinationSearchTerm)) return false;
+    // Directory search filter
+    if (directorySearchTerms[panel]) {
+      if (!dir.toLowerCase().includes(directorySearchTerms[panel])) return false;
     }
-    // --- END SEARCH FILTER ---
     if (filter === 'all') return true;
     if (filter === '#') return !/^[A-Za-z]/.test(dir.charAt(0));
     return dir.charAt(0).toUpperCase() === filter;
