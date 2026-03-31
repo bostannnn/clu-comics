@@ -1206,6 +1206,8 @@
                             <select class="form-select" id="bootstrapTheme" name="bootstrapTheme">
                                 <option value="default" {% if bootstrapTheme=='default' %}selected{% endif %}>Default
                                     (Bootstrap)</option>
+                                <option value="bootstrap-dark" {% if bootstrapTheme=='bootstrap-dark' %}selected{% endif %}>Bootstrap Dark
+                                    (Standard)</option>
                                 <option value="brite" {% if bootstrapTheme=='brite' %}selected{% endif %}>Brite
                                 </option>
                                 <option value="cerulean" {% if bootstrapTheme=='cerulean' %}selected{% endif %}>Cerulean
@@ -1254,17 +1256,19 @@
                             </select>
                             <small class="form-text text-muted">
                                 Select a theme to change the look and feel of the application. Dark themes are marked.
+                                <code>Bootstrap Dark</code> uses Bootstrap's built-in dark color mode instead of a
+                                Bootswatch skin.
                             </small>
                         </div>
                         <div class="col-md-6">
                             <label class="form-label">Theme Preview:</label>
                             <div class="border rounded p-2 text-center">
                                 <img id="themePreviewImg"
-                                    src="https://bootswatch.com/{{ bootstrapTheme|default('default') }}/thumbnail.png"
+                                    src="{% if bootstrapTheme in ['default', 'bootstrap-dark'] %}/static/images/default.png{% else %}https://bootswatch.com/{{ bootstrapTheme|default('default') }}/thumbnail.png{% endif %}"
                                     alt="Theme preview" class="img-fluid rounded" style="max-height: 200px;"
                                     onerror="this.src='/static/images/default.png'">
                                 <div class="mt-2">
-                                    <strong id="themePreviewName">{{ bootstrapTheme|default('default')|title }}</strong>
+                                    <strong id="themePreviewName">{% if bootstrapTheme == 'bootstrap-dark' %}Bootstrap Dark{% else %}{{ bootstrapTheme|default('default')|replace('-', ' ')|title }}{% endif %}</strong>
                                     <br><small class="text-muted">Save settings to apply this theme.</small>
                                 </div>
                             </div>
@@ -2885,7 +2889,9 @@
         const themeName = themeSelect.options[themeSelect.selectedIndex].text;
 
         // Update thumbnail image
-        previewImg.src = `https://bootswatch.com/${theme}/thumbnail.png`;
+        previewImg.src = (theme === 'default' || theme === 'bootstrap-dark')
+            ? '/static/images/default.png'
+            : `https://bootswatch.com/${theme}/thumbnail.png`;
 
         // Update theme name (remove "(Dark)" suffix for display)
         previewName.textContent = themeName.replace(' (Dark)', '');
