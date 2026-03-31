@@ -9,37 +9,38 @@
 
 {% block content %}
 <div class="container-fluid px-4 py-3">
-  <div class="d-flex align-items-center justify-content-between mb-3">
-    <h2 class="text-primary-emphasis mb-0">Source Wall</h2>
-    <div class="d-flex align-items-center gap-2">
-      <!-- Library Dropdown -->
-      <div class="dropdown">
-        <button class="btn btn-outline-primary dropdown-toggle" type="button"
-                id="swLibraryDropdown" data-bs-toggle="dropdown" aria-expanded="false">
-          <i class="bi bi-folder2-open me-1"></i><span id="swLibraryName">Library</span>
+  <div class="clu-panel-header mb-3">
+    <div class="clu-panel-toolbar">
+      <h2 class="text-primary-emphasis mb-0">Source Wall</h2>
+      <div class="clu-toolbar clu-panel-toolbar-main">
+        <!-- Library Dropdown -->
+        <div class="dropdown">
+          <button class="btn btn-outline-primary dropdown-toggle" type="button"
+                  id="swLibraryDropdown" data-bs-toggle="dropdown" aria-expanded="false">
+            <i class="bi bi-folder2-open me-1"></i><span id="swLibraryName">Library</span>
+          </button>
+          <ul class="dropdown-menu" id="swLibraryMenu">
+            <!-- Populated by JavaScript -->
+          </ul>
+        </div>
+        <!-- Column Selector -->
+        <button class="btn btn-outline-secondary" onclick="openColumnSelector()" title="Configure Columns">
+          <i class="bi bi-layout-three-columns"></i> <span id="swColumnName">Configure Columns</span>
         </button>
-        <ul class="dropdown-menu" id="swLibraryMenu">
-          <!-- Populated by JavaScript -->
-        </ul>
       </div>
-      <!-- Column Selector -->
-      <button class="btn btn-outline-secondary" onclick="openColumnSelector()" title="Configure Columns">
-        <i class="bi bi-layout-three-columns"></i> <span id="swColumnName">Configure Columns</span>
-      </button>
     </div>
-  </div>
 
-  <!-- Breadcrumb -->
-  <nav aria-label="breadcrumb" class="mb-3">
-    <ol id="swBreadcrumb" class="breadcrumb sw-breadcrumb px-3 py-2 rounded-3 mb-0 shadow-sm">
-      <li class="breadcrumb-item active"><i class="bi bi-info-circle me-1"></i>Select a library</li>
-    </ol>
-  </nav>
-  <div id="swFolderActions" class="d-none flex-wrap gap-2 mb-3"></div>
+    <nav aria-label="breadcrumb">
+      <ol id="swBreadcrumb" class="breadcrumb clu-inline-breadcrumb sw-breadcrumb px-3 py-2 rounded-3 mb-0 shadow-sm">
+        <li class="breadcrumb-item active"><i class="bi bi-info-circle me-1"></i>Select a library</li>
+      </ol>
+    </nav>
+  </div>
+  <div id="swFolderActions" class="clu-toolbar d-none mb-3"></div>
 
   <!-- Directory Filter Bar -->
   <div id="swFilterBar" class="clu-filter-bar mb-3" style="display: none;">
-    <div id="swFilterButtons" class="sw-filter-buttons clu-alpha-filter"></div>
+    <div id="swFilterButtons" class="clu-alpha-filter"></div>
     <div id="swSearchRow" class="clu-search-row" style="display: none;">
       <input type="text" id="swDirSearch" class="form-control form-control-sm"
              placeholder="Filter directories..." oninput="filterDirectoriesSW()">

@@ -5,9 +5,11 @@
     background-color: var(--bs-tertiary-bg, var(--bs-gray-200));
     color: var(--bs-body-color);
 }
+
 .sw-breadcrumb .breadcrumb-item a {
     color: var(--bs-link-color);
 }
+
 .sw-breadcrumb .breadcrumb-item.active {
     color: var(--bs-body-color);
 }
@@ -209,12 +211,6 @@
     font-style: italic;
     cursor: default;
     pointer-events: none;
-}
-
-/* Filter bar reuse */
-.sw-filter-buttons {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(42px, 1fr));
 }
 
 /* Selected row highlight */

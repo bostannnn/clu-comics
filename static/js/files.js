@@ -1156,7 +1156,7 @@ function updateFilterBar(panel, directories) {
     if (directories.length > 25) {
       const inputId = panel + '-directory-search';
       const currentValue = directorySearchTerms[panel] || '';
-      searchRow.innerHTML = `<input type="text" id="${inputId}" class="form-control mb-2" placeholder="Type to filter directories...">`;
+      searchRow.innerHTML = `<input type="text" id="${inputId}" class="form-control" placeholder="Filter directories...">`;
       const searchInput = document.getElementById(inputId);
       if (searchInput) {
         searchInput.value = currentValue;
@@ -2783,6 +2783,75 @@ function resetFileTracking(panel, currentPath) {
   updateRenameButtonVisibility(panel);
 }
 
+function ensureDirectoryActionContainers(renameRow, panel) {
+  let primaryContainer = renameRow.querySelector('.clu-action-primary');
+  if (!primaryContainer) {
+    primaryContainer = document.createElement('div');
+    primaryContainer.className = 'clu-action-primary';
+    renameRow.appendChild(primaryContainer);
+  }
+
+  let overflowWrap = renameRow.querySelector('.clu-action-overflow');
+  if (!overflowWrap) {
+    overflowWrap = document.createElement('div');
+    overflowWrap.className = 'dropdown clu-action-overflow';
+
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'btn btn-outline-secondary btn-sm dropdown-toggle';
+    toggle.dataset.bsToggle = 'dropdown';
+    toggle.dataset.bsAutoClose = 'outside';
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.id = panel + '-directory-actions-more';
+    toggle.innerHTML = '<i class="bi bi-three-dots me-1"></i>More';
+    overflowWrap.appendChild(toggle);
+
+    const menu = document.createElement('div');
+    menu.className = 'dropdown-menu dropdown-menu-end';
+    menu.setAttribute('aria-labelledby', toggle.id);
+    overflowWrap.appendChild(menu);
+
+    renameRow.appendChild(overflowWrap);
+  }
+
+  return {
+    primary: primaryContainer,
+    overflow: overflowWrap,
+    overflowMenu: overflowWrap.querySelector('.dropdown-menu')
+  };
+}
+
+function placeDirectoryAction(button, container) {
+  if (button.parentElement !== container) {
+    container.appendChild(button);
+  }
+}
+
+function refreshDirectoryOverflowVisibility(renameRow) {
+  const overflowWrap = renameRow.querySelector('.clu-action-overflow');
+  const overflowMenu = overflowWrap ? overflowWrap.querySelector('.dropdown-menu') : null;
+  if (!overflowWrap || !overflowMenu) {
+    return;
+  }
+
+  const hasVisibleOverflowActions = Array.from(overflowMenu.children).some((child) => child.style.display !== 'none');
+  overflowWrap.classList.toggle('show-actions', hasVisibleOverflowActions);
+}
+
+function shouldCompactDirectoryActions() {
+  return window.matchMedia('(max-width: 1399.98px)').matches;
+}
+
+function refreshVisibleDirectoryActionLayouts() {
+  ['source', 'destination'].forEach((panel) => {
+    const renameRowId = panel === 'source' ? 'source-directory-rename-row' : 'destination-directory-rename-row';
+    const renameRow = document.getElementById(renameRowId);
+    if (renameRow && renameRow.style.display !== 'none') {
+      updateRenameButtonVisibility(panel);
+    }
+  });
+}
+
 // Function to update rename button visibility and functionality
 function updateRenameButtonVisibility(panel) {
   const renameRowId = panel === 'source' ? 'source-directory-rename-row' : 'destination-directory-rename-row';
@@ -2804,6 +2873,8 @@ function updateRenameButtonVisibility(panel) {
   // Show row if we're not at root level (Add CVINFO works for empty folders too)
   if (isNotRoot) {
     console.log('Showing rename row:', panel, 'files=', fileTracking[panel].fileCount, 'path=', currentPath);
+    const actionContainers = ensureDirectoryActionContainers(renameRow, panel);
+    const compactActions = shouldCompactDirectoryActions();
 
     // File-related buttons (only show when there are files)
     let renameButton = renameRow.querySelector('.rename-files-btn');
@@ -2816,18 +2887,20 @@ function updateRenameButtonVisibility(panel) {
       // Create or update the rename text button
       if (!renameButton) {
         renameButton = document.createElement('button');
-        renameButton.className = 'btn btn-outline-primary btn-sm rename-files-btn me-2';
-        renameButton.innerHTML = '<i class="bi bi-input-cursor-text me-2"></i>Remove Text';
+        renameButton.type = 'button';
+        renameButton.className = 'dropdown-item rename-files-btn';
+        renameButton.innerHTML = '<i class="bi bi-input-cursor-text"></i><span>Remove Text</span>';
         renameButton.title = 'Remove text from all filenames in this directory';
-        renameRow.appendChild(renameButton);
+        placeDirectoryAction(renameButton, actionContainers.overflowMenu);
       }
       renameButton.style.display = '';
+      placeDirectoryAction(renameButton, actionContainers.overflowMenu);
       renameButton.dataset.currentPath = currentPath;
       renameButton.dataset.currentPanel = panel;
       renameButton.onclick = function (e) {
         e.preventDefault();
-        const pathFromData = e.target.dataset.currentPath;
-        const panelFromData = e.target.dataset.currentPanel;
+        const pathFromData = this.dataset.currentPath;
+        const panelFromData = this.dataset.currentPanel;
         console.log('Remove text button clicked, path from data:', pathFromData, 'panel:', panelFromData);
         openCustomRenameModal(pathFromData, panelFromData);
       };
@@ -2835,18 +2908,20 @@ function updateRenameButtonVisibility(panel) {
       // Create or update the replace text button
       if (!replaceButton) {
         replaceButton = document.createElement('button');
-        replaceButton.className = 'btn btn-outline-warning btn-sm replace-text-btn me-2';
-        replaceButton.innerHTML = '<i class="bi bi-arrow-left-right me-2"></i>Replace Text';
+        replaceButton.type = 'button';
+        replaceButton.className = 'dropdown-item replace-text-btn';
+        replaceButton.innerHTML = '<i class="bi bi-arrow-left-right"></i><span>Replace Text</span>';
         replaceButton.title = 'Replace text in all filenames in this directory';
-        renameRow.appendChild(replaceButton);
+        placeDirectoryAction(replaceButton, actionContainers.overflowMenu);
       }
       replaceButton.style.display = '';
+      placeDirectoryAction(replaceButton, actionContainers.overflowMenu);
       replaceButton.dataset.currentPath = currentPath;
       replaceButton.dataset.currentPanel = panel;
       replaceButton.onclick = function (e) {
         e.preventDefault();
-        const pathFromData = e.target.dataset.currentPath;
-        const panelFromData = e.target.dataset.currentPanel;
+        const pathFromData = this.dataset.currentPath;
+        const panelFromData = this.dataset.currentPanel;
         console.log('Replace text button clicked, path from data:', pathFromData, 'panel:', panelFromData);
         openReplaceTextModal(pathFromData, panelFromData);
       };
@@ -2854,18 +2929,20 @@ function updateRenameButtonVisibility(panel) {
       // Create or update the series rename button
       if (!seriesRenameButton) {
         seriesRenameButton = document.createElement('button');
-        seriesRenameButton.className = 'btn btn-outline-success btn-sm series-rename-btn me-2';
+        seriesRenameButton.type = 'button';
+        seriesRenameButton.className = 'btn btn-outline-success btn-sm series-rename-btn';
         seriesRenameButton.innerHTML = '<i class="bi bi-pencil-square me-2"></i>Rename Series';
         seriesRenameButton.title = 'Replace series name while preserving issue numbers and years';
-        renameRow.appendChild(seriesRenameButton);
+        placeDirectoryAction(seriesRenameButton, actionContainers.primary);
       }
       seriesRenameButton.style.display = '';
+      placeDirectoryAction(seriesRenameButton, actionContainers.primary);
       seriesRenameButton.dataset.currentPath = currentPath;
       seriesRenameButton.dataset.currentPanel = panel;
       seriesRenameButton.onclick = function (e) {
         e.preventDefault();
-        const pathFromData = e.target.dataset.currentPath;
-        const panelFromData = e.target.dataset.currentPanel;
+        const pathFromData = this.dataset.currentPath;
+        const panelFromData = this.dataset.currentPanel;
         console.log('Series rename button clicked, path from data:', pathFromData, 'panel:', panelFromData);
         openRenameFilesModal(pathFromData, panelFromData);
       };
@@ -2875,12 +2952,13 @@ function updateRenameButtonVisibility(panel) {
       if (forceProviders.includes('comicvine')) {
         if (!forceComicVineButton) {
           forceComicVineButton = document.createElement('button');
-          forceComicVineButton.className = 'btn btn-outline-primary btn-sm force-metadata-comicvine-btn me-2';
+          forceComicVineButton.type = 'button';
+          forceComicVineButton.className = 'btn btn-outline-primary btn-sm force-metadata-comicvine-btn';
           forceComicVineButton.innerHTML = '<i class="bi bi-cloud-check me-2"></i>Force ComicVine';
           forceComicVineButton.title = 'Force match all files in this directory via ComicVine';
-          renameRow.appendChild(forceComicVineButton);
         }
         forceComicVineButton.style.display = '';
+        placeDirectoryAction(forceComicVineButton, compactActions ? actionContainers.overflowMenu : actionContainers.primary);
         forceComicVineButton.dataset.currentPath = currentPath;
         forceComicVineButton.dataset.currentPanel = panel;
         forceComicVineButton.onclick = function (e) {
@@ -2897,12 +2975,14 @@ function updateRenameButtonVisibility(panel) {
       if (forceProviders.includes('metron')) {
         if (!forceMetronButton) {
           forceMetronButton = document.createElement('button');
-          forceMetronButton.className = 'btn btn-outline-info btn-sm force-metadata-metron-btn me-2';
-          forceMetronButton.innerHTML = '<i class="bi bi-cloud-check me-2"></i>Force Metron';
+          forceMetronButton.type = 'button';
+          forceMetronButton.className = 'dropdown-item force-metadata-metron-btn';
+          forceMetronButton.innerHTML = '<i class="bi bi-cloud-check"></i><span>Force Metron</span>';
           forceMetronButton.title = 'Force match all files in this directory via Metron';
-          renameRow.appendChild(forceMetronButton);
+          placeDirectoryAction(forceMetronButton, actionContainers.overflowMenu);
         }
         forceMetronButton.style.display = '';
+        placeDirectoryAction(forceMetronButton, actionContainers.overflowMenu);
         forceMetronButton.dataset.currentPath = currentPath;
         forceMetronButton.dataset.currentPanel = panel;
         forceMetronButton.onclick = function (e) {
@@ -2928,11 +3008,13 @@ function updateRenameButtonVisibility(panel) {
     let cvInfoButton = renameRow.querySelector('.add-cvinfo-btn');
     if (!cvInfoButton) {
       cvInfoButton = document.createElement('button');
-      cvInfoButton.className = 'btn btn-outline-info btn-sm add-cvinfo-btn me-2';
+      cvInfoButton.type = 'button';
+      cvInfoButton.className = 'btn btn-outline-info btn-sm add-cvinfo-btn';
       cvInfoButton.innerHTML = '<i class="bi bi-link-45deg me-2"></i>Add CVINFO';
       cvInfoButton.title = 'Save ComicVine URL to cvinfo file in this directory';
-      renameRow.appendChild(cvInfoButton);
+      placeDirectoryAction(cvInfoButton, actionContainers.primary);
     }
+    placeDirectoryAction(cvInfoButton, actionContainers.primary);
 
     // Store the current path as a data attribute
     cvInfoButton.dataset.currentPath = currentPath;
@@ -2947,7 +3029,8 @@ function updateRenameButtonVisibility(panel) {
       promptForCVInfo(pathFromData, panelFromData);
     };
 
-    renameRow.style.display = 'block';
+    refreshDirectoryOverflowVisibility(renameRow);
+    renameRow.style.display = 'flex';
   } else {
     console.log('Hiding rename row:', panel, 'hasFiles=', hasFiles, 'isNotRoot=', isNotRoot, 'path=', currentPath);
     renameRow.style.display = 'none';
@@ -2959,6 +3042,8 @@ function updateRenameButtonVisibility(panel) {
     }
   }
 }
+
+window.addEventListener('resize', refreshVisibleDirectoryActionLayouts);
 
 // Custom Rename Modal functionality
 let customRenameModal;

@@ -27,80 +27,84 @@
     <!-- Source Panel -->
     <div class="col-md-6">
       <section class="files-panel">
-      <h3 class="mb-3">Source</h3>
-      <!-- Button group for switching between Library, Downloads and Recent Files -->
-      <div class="clu-toolbar mb-3" role="group" aria-label="View Options">
-        <!-- Library Dropdown -->
-        <div class="dropdown">
-          <button class="btn btn-outline-primary dropdown-toggle" type="button"
-                  id="sourceLibraryDropdown" data-bs-toggle="dropdown" aria-expanded="false">
-            <i class="bi bi-folder2-open me-1"></i><span id="sourceLibraryName">Library</span>
-          </button>
-          <ul class="dropdown-menu" id="sourceLibraryMenu">
-            <!-- Populated by JavaScript -->
-          </ul>
+      <div class="clu-panel-header mb-3">
+        <div class="files-panel-heading">
+          <h3 class="mb-0">Source</h3>
         </div>
-        <button type="button" id="btnDownloads" class="btn btn-outline-primary"
-          onclick="loadDownloads('{{ target_dir }}', 'source');" data-bs-toggle="button">Downloads</button>
-        <button type="button" id="btnRecentFiles" class="btn btn-outline-primary" onclick="loadRecentFiles('source');"
-          data-bs-toggle="button">Recent Files</button>
-        <button type="button" id="btnTrash" class="btn btn-outline-danger" onclick="loadTrash('source');"
-          data-bs-toggle="button"><i class="bi bi-trash3 me-1"></i>Trash<span id="trashBadge" class="badge rounded-pill text-bg-warning ms-1" style="display:none"></span></button>
+        <div class="clu-panel-toolbar">
+          <div class="clu-toolbar clu-panel-toolbar-main" role="group" aria-label="View Options">
+            <div class="dropdown">
+              <button class="btn btn-outline-primary dropdown-toggle" type="button"
+                      id="sourceLibraryDropdown" data-bs-toggle="dropdown" aria-expanded="false">
+                <i class="bi bi-folder2-open me-1"></i><span id="sourceLibraryName">Library</span>
+              </button>
+              <ul class="dropdown-menu" id="sourceLibraryMenu">
+                <!-- Populated by JavaScript -->
+              </ul>
+            </div>
+            <button type="button" id="btnDownloads" class="btn btn-outline-primary"
+              onclick="loadDownloads('{{ target_dir }}', 'source');" data-bs-toggle="button">Downloads</button>
+            <button type="button" id="btnRecentFiles" class="btn btn-outline-primary" onclick="loadRecentFiles('source');"
+              data-bs-toggle="button">Recent Files</button>
+            <button type="button" id="btnTrash" class="btn btn-outline-danger" onclick="loadTrash('source');"
+              data-bs-toggle="button"><i class="bi bi-trash3 me-1"></i>Trash<span id="trashBadge" class="badge rounded-pill text-bg-warning ms-1" style="display:none"></span></button>
+          </div>
+          <nav aria-label="breadcrumb" class="clu-panel-path">
+            <ol id="source-path-display" class="breadcrumb clu-inline-breadcrumb mb-0">
+              <li class="breadcrumb-item active">Loading...</li>
+            </ol>
+          </nav>
+        </div>
       </div>
-      <!-- Filter buttons for source panel -->
-      <div id="source-directory-filter" class="clu-filter-bar mb-3">
+      <div id="source-directory-filter" class="clu-filter-bar clu-filter-bar-inline mb-3">
         <div class="btn-group d-grid grid-filter-buttons clu-alpha-filter" role="group" aria-label="Directory Filter">
           <!-- Dynamically inserted buttons go here -->
         </div>
         <div id="source-directory-search-row" class="clu-search-row"></div>
-        <div id="source-directory-rename-row"></div>
+        <div id="source-directory-rename-row" class="clu-action-row"></div>
       </div>
-      <nav aria-label="breadcrumb" class="mb-3">
-        <ol id="source-path-display" class="breadcrumb mb-0">
-          <li class="breadcrumb-item active">Loading...</li>
-        </ol>
-      </nav>
       <ul id="source-list" class="list-group drop-target"></ul>
       </section>
     </div>
     <!-- Destination Panel -->
     <div class="col-md-6">
       <section class="files-panel">
-      <h3 class="mb-3">Destination</h3>
-      <!-- Library Dropdown and Action Buttons -->
-      <div class="clu-toolbar mb-3">
-        <!-- Library Dropdown -->
-        <div class="dropdown">
-          <button class="btn btn-outline-primary dropdown-toggle" type="button"
-                  id="destLibraryDropdown" data-bs-toggle="dropdown" aria-expanded="false">
-            <i class="bi bi-folder2-open me-1"></i><span id="destLibraryName">Library</span>
-          </button>
-          <ul class="dropdown-menu" id="destLibraryMenu">
-            <!-- Populated by JavaScript -->
-          </ul>
+      <div class="clu-panel-header mb-3">
+        <div class="files-panel-heading">
+          <h3 class="mb-0">Destination</h3>
         </div>
-        <!-- Action Buttons -->
-        <div class="btn-group" role="group" aria-label="Folder Options">
-          <button type="button" class="btn btn-outline-primary" onclick="openCreateFolderModal()"><i
-              class="bi bi-folder-plus"></i> Create Folder</button>
-          <button type="button" class="btn btn-outline-primary" onclick="openSearchModal()"><i class="bi bi-search"></i>
-            Search Files</button>
+        <div class="clu-panel-toolbar">
+          <div class="clu-toolbar clu-panel-toolbar-main">
+            <div class="dropdown">
+              <button class="btn btn-outline-primary dropdown-toggle" type="button"
+                      id="destLibraryDropdown" data-bs-toggle="dropdown" aria-expanded="false">
+                <i class="bi bi-folder2-open me-1"></i><span id="destLibraryName">Library</span>
+              </button>
+              <ul class="dropdown-menu" id="destLibraryMenu">
+                <!-- Populated by JavaScript -->
+              </ul>
+            </div>
+            <div class="btn-group" role="group" aria-label="Folder Options">
+              <button type="button" class="btn btn-outline-primary" onclick="openCreateFolderModal()"><i
+                  class="bi bi-folder-plus"></i> Create Folder</button>
+              <button type="button" class="btn btn-outline-primary" onclick="openSearchModal()"><i class="bi bi-search"></i>
+                Search Files</button>
+            </div>
+          </div>
+          <nav aria-label="breadcrumb" class="clu-panel-path">
+            <ol id="destination-path-display" class="breadcrumb clu-inline-breadcrumb mb-0">
+              <li class="breadcrumb-item active">Loading...</li>
+            </ol>
+          </nav>
         </div>
       </div>
-
-      <!-- Filter buttons for destination panel -->
-      <div id="destination-directory-filter" class="clu-filter-bar mb-3">
+      <div id="destination-directory-filter" class="clu-filter-bar clu-filter-bar-inline mb-3">
         <div class="btn-group d-grid grid-filter-buttons clu-alpha-filter" role="group" aria-label="Directory Filter">
           <!-- Dynamically inserted buttons go here -->
         </div>
         <div id="destination-directory-search-row" class="clu-search-row"></div>
-        <div id="destination-directory-rename-row"></div>
+        <div id="destination-directory-rename-row" class="clu-action-row"></div>
       </div>
-      <nav aria-label="breadcrumb" class="mb-3">
-        <ol id="destination-path-display" class="breadcrumb mb-0">
-          <li class="breadcrumb-item active">Loading...</li>
-        </ol>
-      </nav>
       <ul id="destination-list" class="list-group drop-target"></ul>
       </section>
     </div>

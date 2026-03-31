@@ -47,15 +47,11 @@
         flex-direction: column;
         gap: 0;
         height: 100%;
-        padding: 1rem 1.25rem 1.25rem;
+        padding: var(--clu-space-3) var(--clu-space-4) var(--clu-space-4);
         border: 1px solid var(--bs-border-color-translucent);
         border-radius: var(--bs-border-radius-xl);
         background: var(--bs-body-bg);
         box-shadow: 0 0.125rem 0.5rem rgba(0, 0, 0, 0.05);
-    }
-
-    .files-panel .breadcrumb {
-        min-height: 1.5rem;
     }
 
     .files-panel h3 {
@@ -69,11 +65,6 @@
     #source-directory-filter,
     #destination-directory-filter {
         max-width: 100%;
-    }
-
-    #source-directory-search-row .form-control,
-    #destination-directory-search-row .form-control {
-        margin-bottom: 0;
     }
 
     #destination-list,
