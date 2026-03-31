@@ -60,6 +60,60 @@ class CorruptedArchiveError(RuntimeError):
     """Raised when a CBZ cannot be safely rewritten due to archive corruption."""
 
 
+def _resolve_existing_file_path(file_path, file_name=None, library_id=None):
+    """Best-effort repair for stale file paths coming from indexed/library views."""
+    if file_path and os.path.exists(file_path):
+        return file_path
+
+    basename = os.path.basename(file_path or file_name or "")
+    if not basename:
+        return file_path
+
+    try:
+        from core.database import get_library_by_id, search_file_index
+
+        library_root = None
+        if library_id:
+            library = get_library_by_id(library_id)
+            if library and library.get("path"):
+                library_root = os.path.normpath(library["path"])
+
+        results = search_file_index(os.path.splitext(basename)[0], limit=100)
+        matches = []
+        for entry in results:
+            if entry.get("type") != "file":
+                continue
+
+            candidate_path = entry.get("path") or ""
+            normalized_candidate = os.path.normpath(candidate_path)
+            if os.path.basename(normalized_candidate) != basename:
+                continue
+            if library_root and not (
+                normalized_candidate == library_root
+                or normalized_candidate.startswith(library_root + os.sep)
+            ):
+                continue
+            if os.path.exists(candidate_path):
+                matches.append(candidate_path)
+
+        if len(matches) == 1:
+            app_logger.warning(
+                f"[search-metadata] Resolved stale path {file_path} -> {matches[0]}"
+            )
+            return matches[0]
+
+        if len(matches) > 1:
+            app_logger.warning(
+                f"[search-metadata] Ambiguous stale path resolution for {file_path}: {matches}"
+            )
+    except Exception as exc:
+        app_logger.warning(
+            f"[search-metadata] Failed to resolve stale path {file_path}: {exc}"
+        )
+
+    return file_path
+
+
 def _get_comicinfo_write_lock(file_path):
     normalized_path = os.path.abspath(file_path)
     with _comicinfo_write_locks_guard:
@@ -124,6 +178,31 @@ def _resolve_comicvine_volume_data(
             )
 
     return volume_data
+
+
+_MONTH_TOKEN_RE = re.compile(
+    r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|"
+    r"january|february|march|april|june|july|august|september|october|"
+    r"november|december|spring|summer|fall|autumn|winter)\b",
+    re.IGNORECASE,
+)
+
+
+def _has_explicit_issue_marker(filename):
+    return bool(re.search(r"(?:\bissue\s+\d|#\d)", filename or "", re.IGNORECASE))
+
+
+def _looks_like_year_token(filename, token):
+    token = str(token or "").strip()
+    if not re.fullmatch(r"\d{4}", token):
+        return False
+
+    escaped = re.escape(token)
+    if re.search(rf"\({escaped}\)", filename or ""):
+        return True
+    if re.search(rf"\b{escaped}\b", filename or "") and _MONTH_TOKEN_RE.search(filename or ""):
+        return True
+    return False
 
 
 def _extract_batch_series_name(directory, comic_files):
@@ -3523,7 +3602,10 @@ def search_metadata():
         # overriding a valid match, e.g. "Spider-Man 2099 001" where 001 is correct)
         if not issue_from_pattern:
             extracted = comicvine.extract_issue_number(file_name)
-            if extracted:
+            if extracted and not (
+                _looks_like_year_token(file_name, extracted)
+                and not _has_explicit_issue_marker(file_name)
+            ):
                 issue_number = extracted
 
         app_logger.info(f"[search-metadata] Parsed: series='{series_name}', issue=#{issue_number}, year={year}")
@@ -3535,18 +3617,21 @@ def search_metadata():
         if force_provider and force_provider not in {'comicvine', 'metron'}:
             return jsonify({"success": False, "error": "Force metadata requires ComicVine or Metron"}), 400
 
-        # Check for cvinfo file in parent folder
-        folder_path = os.path.dirname(file_path)
-        cvinfo_path = comicvine.find_cvinfo_in_folder(folder_path)
-
         # Handle selection follow-up (user picked from a selection modal)
         if selected_match:
+            if library_id:
+                file_path = _resolve_existing_file_path(file_path, file_name, library_id)
+                if not os.path.exists(file_path):
+                    return jsonify({"success": False, "error": f"File not found: {file_path}"}), 404
+
             provider = selected_match.get('provider')
             app_logger.info(f"[search-metadata] Selection follow-up for provider: {provider}")
 
             metadata = None
             img_url = None
             volume_data = None
+            folder_path = os.path.dirname(file_path)
+            cvinfo_path = comicvine.find_cvinfo_in_folder(folder_path)
 
             if provider == 'comicvine':
                 volume_id = selected_match.get('volume_id')
@@ -3643,6 +3728,10 @@ def search_metadata():
 
             app_logger.info(f"[search-metadata] {provider} returned metadata for {file_name} (via selection)")
             return jsonify(response_data)
+
+        # Check for cvinfo file in parent folder
+        folder_path = os.path.dirname(file_path)
+        cvinfo_path = comicvine.find_cvinfo_in_folder(folder_path)
 
         # Look up library provider priorities
         if library_id:

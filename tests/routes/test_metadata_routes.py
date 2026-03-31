@@ -818,6 +818,98 @@ class TestComicVineVolumeYearHandling:
     @patch("routes.metadata.comicvine.auto_move_file", return_value=None)
     @patch("routes.metadata.comicvine.get_volume_details", return_value={"start_year": 2016, "publisher_name": "DC Comics"})
     @patch("routes.metadata.comicvine.get_issue_by_number")
+    @patch("routes.metadata._resolve_existing_file_path", return_value="/data/Batman (2016)/Batman 001 (2020).cbz")
+    @patch("routes.metadata.os.path.exists", return_value=True)
+    def test_search_metadata_selection_repairs_stale_library_path(
+        self,
+        mock_exists,
+        mock_resolve_path,
+        mock_get_issue,
+        mock_get_volume_details,
+        mock_auto_move,
+        mock_add_xml,
+        mock_set_has_comicinfo,
+        client,
+    ):
+        client.application.config["COMICVINE_API_KEY"] = "test-key"
+        mock_get_issue.return_value = {
+            "id": 1001,
+            "name": "Rebirth",
+            "issue_number": "1",
+            "volume_name": "Batman",
+            "volume_id": 4050,
+            "publisher": "DC Comics",
+            "year": 2020,
+        }
+
+        resp = client.post("/api/search-metadata", json={
+            "file_path": "/data/-to do-/Batman 001 (2020).cbz",
+            "file_name": "Batman 001 (2020).cbz",
+            "library_id": 1,
+            "selected_match": {
+                "provider": "comicvine",
+                "volume_id": 4050,
+                "publisher_name": "DC Comics",
+            },
+        })
+
+        assert resp.status_code == 200
+        mock_resolve_path.assert_called_once_with(
+            "/data/-to do-/Batman 001 (2020).cbz",
+            "Batman 001 (2020).cbz",
+            1,
+        )
+        mock_add_xml.assert_called_once()
+        assert mock_add_xml.call_args.args[0] == "/data/Batman (2016)/Batman 001 (2020).cbz"
+
+    @patch("core.database.set_has_comicinfo")
+    @patch("routes.metadata.add_comicinfo_to_cbz")
+    @patch("routes.metadata.comicvine.auto_move_file", return_value=None)
+    @patch("routes.metadata.comicvine.get_volume_details", return_value={"start_year": 2017, "publisher_name": "Fantagraphics"})
+    @patch("routes.metadata.comicvine.get_issue_by_number")
+    def test_search_metadata_selection_does_not_treat_year_token_as_issue_number(
+        self,
+        mock_get_issue,
+        mock_get_volume_details,
+        mock_auto_move,
+        mock_add_xml,
+        mock_set_has_comicinfo,
+        client,
+    ):
+        client.application.config["COMICVINE_API_KEY"] = "test-key"
+        mock_get_issue.return_value = {
+            "id": 613847,
+            "name": "GN",
+            "issue_number": "1",
+            "volume_name": "My Pretty Vampire",
+            "volume_id": 103399,
+            "publisher": "Fantagraphics",
+            "year": 2017,
+        }
+
+        file_name = (
+            "My Pretty Vampire (2017) (digital) (Minutemen-dask)_cbr -- "
+            "Katie Skelly (artist, cover, writer) -- My Pretty Vampire, 2017 aug -- "
+            "Fantagraphics -- f218a0ecf3fbf011e706452ae2c271e0 -- Anna's Archive"
+        )
+        resp = client.post("/api/search-metadata", json={
+            "file_path": "/data/-to do-/" + file_name,
+            "file_name": file_name,
+            "selected_match": {
+                "provider": "comicvine",
+                "volume_id": 103399,
+                "publisher_name": "Fantagraphics",
+            },
+        })
+
+        assert resp.status_code == 200
+        mock_get_issue.assert_called_once_with("test-key", 103399, "1", None)
+
+    @patch("core.database.set_has_comicinfo")
+    @patch("routes.metadata.add_comicinfo_to_cbz")
+    @patch("routes.metadata.comicvine.auto_move_file", return_value=None)
+    @patch("routes.metadata.comicvine.get_volume_details", return_value={"start_year": 2016, "publisher_name": "DC Comics"})
+    @patch("routes.metadata.comicvine.get_issue_by_number")
     def test_selected_comicvine_endpoint_fetches_volume_start_year_when_request_omits_it(
         self,
         mock_get_issue,

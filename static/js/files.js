@@ -403,6 +403,10 @@ function createListItem(itemName, fullPath, type, panel, isDraggable) {
     lowercase: fileData.name.toLowerCase()
   });
 
+  const providers = getProvidersForPanel(panel);
+  const hasGCD = providers.some(p => p.provider_type === 'gcd');
+  const hasAnyProvider = providers.length > 0;
+
   // Add CBZ info functionality
   if (
     type === "file" &&
@@ -433,12 +437,6 @@ function createListItem(itemName, fullPath, type, panel, isDraggable) {
     };
     iconContainer.appendChild(infoBtn);
     console.log('Info button added');
-
-    // Get providers configured for this library
-    const providers = getProvidersForPanel(panel);
-    const hasGCD = providers.some(p => p.provider_type === 'gcd');
-    const hasAnyProvider = providers.length > 0;
-
     // Add cloud-download button for cascade metadata search (if any providers configured)
     if (hasAnyProvider) {
       const metadataBtn = document.createElement("button");
@@ -539,11 +537,6 @@ function createListItem(itemName, fullPath, type, panel, isDraggable) {
     infoWrapper.appendChild(infoIcon);
     infoWrapper.appendChild(sizeDisplay);
     iconContainer.appendChild(infoWrapper);
-
-    // Get providers configured for this library
-    const providers = getProvidersForPanel(panel);
-    const hasGCD = providers.some(p => p.provider_type === 'gcd');
-    const hasAnyProvider = providers.length > 0;
 
     // Add cloud-download button for directory cascade metadata fetch
     if (fileData.name !== "Parent" && hasAnyProvider) {
