@@ -323,6 +323,29 @@ def update_comicinfo_xml(xml_data: bytes, updates: dict) -> bytes:
     return updated_xml_bytes
 
 
+def generate_comicinfo_xml_from_dict(comicinfo_dict: dict) -> bytes:
+    """
+    Generate ComicInfo.xml bytes from a dictionary of tag -> value pairs.
+    Empty values are omitted. Existing key order is preserved.
+
+    :param comicinfo_dict: Dictionary of ComicInfo tags and values.
+    :return: XML bytes with declaration.
+    """
+    root = ET.Element("ComicInfo")
+
+    for tag, value in comicinfo_dict.items():
+        if value is None:
+            continue
+
+        text = str(value).strip()
+        if not text:
+            continue
+
+        ET.SubElement(root, str(tag)).text = text
+
+    return ET.tostring(root, encoding='utf-8', xml_declaration=True)
+
+
 def update_comicinfo_in_zip(zip_path: str, updates: dict):
     """
     Updates the 'ComicInfo.xml' entry in a ZIP or CBZ without extracting

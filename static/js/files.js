@@ -2684,6 +2684,14 @@ function moveMultipleItems(filePaths, targetFolder, panel, itemsWithTypes = null
 
 // CBZ info – contract setup, adapts arguments for CLU.showCBZInfo
 function showCBZInfo(filePath, fileName, directoryPath, fileList) {
+  window._cluCbzInfo = {
+    onClearComplete: function (path) {
+      refreshPanelForPath(path);
+    },
+    onEditComplete: function (path) {
+      refreshPanelForPath(path);
+    }
+  };
   var opts = {};
   if (directoryPath && fileList) { opts.directoryPath = directoryPath; opts.fileList = fileList; }
   CLU.showCBZInfo(filePath, fileName, opts);

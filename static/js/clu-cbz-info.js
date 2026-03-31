@@ -11,6 +11,7 @@
  * External contract:
  *   window._cluCbzInfo = {
  *     onClearComplete(path)      // called after successful ComicInfo.xml removal
+ *     onEditComplete(path, data) // called after successful ComicInfo.xml save
  *   }
  *
  * DOM contracts:
@@ -30,6 +31,7 @@
   var _currentDirectory = '';
   var _currentFileList = [];
   var _currentIndex = -1;
+  var _currentComicInfo = {};
 
   // Page viewer state
   var _viewerPath = null;
@@ -112,6 +114,75 @@
         { key: 'Manga', label: 'Manga' }
       ],
       fullWidth: true
+    }
+  ];
+
+  var _editorSections = [
+    {
+      title: 'Basic Information',
+      fields: [
+        { key: 'Title', label: 'Title' },
+        { key: 'Series', label: 'Series' },
+        { key: 'Number', label: 'Number' },
+        { key: 'Count', label: 'Count', type: 'number', min: '0' },
+        { key: 'Volume', label: 'Volume', type: 'number', min: '0' },
+        { key: 'AlternateSeries', label: 'Alternate Series' },
+        { key: 'AlternateNumber', label: 'Alternate Number' },
+        { key: 'AlternateCount', label: 'Alternate Count' }
+      ]
+    },
+    {
+      title: 'Publication Details',
+      fields: [
+        { key: 'Year', label: 'Year', type: 'number', min: '0' },
+        { key: 'Month', label: 'Month', type: 'number', min: '1', max: '12' },
+        { key: 'Day', label: 'Day', type: 'number', min: '1', max: '31' },
+        { key: 'Publisher', label: 'Publisher' },
+        { key: 'Imprint', label: 'Imprint' },
+        { key: 'Format', label: 'Format' },
+        { key: 'PageCount', label: 'Page Count', type: 'number', min: '0' },
+        { key: 'LanguageISO', label: 'Language ISO' },
+        { key: 'MetronId', label: 'Metron ID' }
+      ]
+    },
+    {
+      title: 'Creative Team',
+      fields: [
+        { key: 'Writer', label: 'Writer' },
+        { key: 'Penciller', label: 'Penciller' },
+        { key: 'Inker', label: 'Inker' },
+        { key: 'Colorist', label: 'Colorist' },
+        { key: 'Letterer', label: 'Letterer' },
+        { key: 'CoverArtist', label: 'Cover Artist' },
+        { key: 'Editor', label: 'Editor' }
+      ]
+    },
+    {
+      title: 'Content Details',
+      fields: [
+        { key: 'Genre', label: 'Genre' },
+        { key: 'Characters', label: 'Characters' },
+        { key: 'Teams', label: 'Teams' },
+        { key: 'Locations', label: 'Locations' },
+        { key: 'StoryArc', label: 'Story Arc' },
+        { key: 'SeriesGroup', label: 'Series Group' },
+        { key: 'MainCharacterOrTeam', label: 'Main Character/Team' },
+        { key: 'AgeRating', label: 'Age Rating' }
+      ]
+    },
+    {
+      title: 'Additional Information',
+      fullWidth: true,
+      fields: [
+        { key: 'Summary', label: 'Summary', type: 'textarea', rows: 4 },
+        { key: 'Notes', label: 'Notes', type: 'textarea', rows: 4 },
+        { key: 'Web', label: 'Web' },
+        { key: 'ScanInformation', label: 'Scan Information' },
+        { key: 'Review', label: 'Review', type: 'textarea', rows: 3 },
+        { key: 'CommunityRating', label: 'Community Rating' },
+        { key: 'BlackAndWhite', label: 'Black & White', type: 'select', options: ['', 'Yes', 'No'] },
+        { key: 'Manga', label: 'Manga', type: 'select', options: ['', 'Yes', 'No', 'YesAndRightToLeft'] }
+      ]
     }
   ];
 
@@ -347,6 +418,125 @@
       });
   }
 
+  function _renderEditorForm(comicInfo) {
+    var container = document.getElementById('editComicInfoForm');
+    if (!container) return;
+
+    var html = '<div class="row g-3">';
+    _editorSections.forEach(function (section) {
+      html += '<div class="' + (section.fullWidth ? 'col-12' : 'col-12 col-md-6') + '">' +
+        '<div class="border rounded p-3 h-100">' +
+        '<h6 class="mb-3">' + section.title + '</h6>';
+
+      section.fields.forEach(function (field) {
+        var value = comicInfo && comicInfo[field.key] ? String(comicInfo[field.key]) : '';
+        html += '<div class="mb-3">' +
+          '<label class="form-label small" for="comicinfoField_' + field.key + '">' + field.label + '</label>';
+
+        if (field.type === 'textarea') {
+          html += '<textarea class="form-control form-control-sm comicinfo-edit-field" ' +
+            'id="comicinfoField_' + field.key + '" data-key="' + field.key + '" rows="' + (field.rows || 3) + '">' +
+            CLU.escapeHtml(value) +
+            '</textarea>';
+        } else if (field.type === 'select') {
+          html += '<select class="form-select form-select-sm comicinfo-edit-field" ' +
+            'id="comicinfoField_' + field.key + '" data-key="' + field.key + '">';
+          field.options.forEach(function (optionValue) {
+            var selected = value === optionValue ? ' selected' : '';
+            var label = optionValue || 'Unset';
+            html += '<option value="' + CLU.escapeHtml(optionValue) + '"' + selected + '>' +
+              CLU.escapeHtml(label) +
+              '</option>';
+          });
+          html += '</select>';
+        } else {
+          html += '<input class="form-control form-control-sm comicinfo-edit-field" ' +
+            'id="comicinfoField_' + field.key + '" data-key="' + field.key + '" ' +
+            'type="' + (field.type || 'text') + '" ' +
+            (field.min ? 'min="' + field.min + '" ' : '') +
+            (field.max ? 'max="' + field.max + '" ' : '') +
+            'value="' + CLU.escapeHtml(value) + '">';
+        }
+
+        html += '</div>';
+      });
+
+      html += '</div></div>';
+    });
+    html += '</div>';
+    container.innerHTML = html;
+  }
+
+  function _openEditComicInfoModal() {
+    _renderEditorForm(_currentComicInfo || {});
+    var modal = bootstrap.Modal.getOrCreateInstance(document.getElementById('editComicInfoModal'));
+    modal.show();
+  }
+
+  function _collectComicInfoFormData() {
+    var payload = {};
+    document.querySelectorAll('.comicinfo-edit-field').forEach(function (field) {
+      payload[field.dataset.key] = (field.value || '').trim();
+    });
+    return payload;
+  }
+
+  function _saveComicInfoEdits() {
+    if (!_currentFilePath) {
+      CLU.showError('No CBZ file is currently selected.');
+      return;
+    }
+
+    var comicinfo = _collectComicInfoFormData();
+    var hasValue = Object.keys(comicinfo).some(function (key) {
+      return comicinfo[key];
+    });
+
+    if (!hasValue) {
+      CLU.showToast('Validation Error', 'Please fill at least one ComicInfo field.', 'warning');
+      return;
+    }
+
+    fetch('/cbz-save-comicinfo', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        path: _currentFilePath,
+        comicinfo: comicinfo
+      })
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (result) {
+        if (!result.success) {
+          CLU.showError(result.error || 'Failed to save ComicInfo.xml');
+          return;
+        }
+
+        _currentComicInfo = result.comicinfo || {};
+        CLU.showSuccess('ComicInfo.xml saved successfully.');
+
+        var editModal = bootstrap.Modal.getInstance(document.getElementById('editComicInfoModal'));
+        if (editModal) editModal.hide();
+
+        var fn = _currentFilePath.split('/').pop();
+        var opts = {};
+        if (_currentDirectory && _currentFileList.length > 0) {
+          opts.directoryPath = _currentDirectory;
+          opts.fileList = _currentFileList;
+        }
+        CLU.showCBZInfo(_currentFilePath, fn, opts);
+
+        var contract = _getContract();
+        if (typeof contract.onEditComplete === 'function') {
+          contract.onEditComplete(_currentFilePath, _currentComicInfo);
+        }
+      })
+      .catch(function (err) {
+        console.error('Error saving ComicInfo.xml:', err);
+        CLU.showError('An error occurred while saving ComicInfo.xml.');
+      });
+  }
+
   // ── Render helpers ────────────────────────────────────────────────────────
 
   function _renderFieldGroups(comicInfo) {
@@ -392,6 +582,7 @@
     if (!modalElement || !content) return;
 
     _currentFilePath = filePath;
+    _currentComicInfo = {};
 
     // Navigation context
     if (options.directoryPath && options.fileList && options.fileList.length > 0) {
@@ -421,21 +612,34 @@
     fetch('/cbz-metadata?path=' + encodeURIComponent(filePath))
       .then(function (res) { return res.json(); })
       .then(function (data) {
+        _currentComicInfo = data.comicinfo || {};
         var html = '<div class="row"><div class="col-md-7">';
 
         if (data.comicinfo) {
           html +=
             '<div class="d-flex justify-content-between align-items-center mb-2">' +
               '<h6 class="mb-0">Comic Information</h6>' +
-              '<button type="button" class="btn btn-outline-danger btn-sm" id="clearComicInfoBtn" title="Clear ComicInfo.xml">' +
-                '<i class="bi bi-eraser"></i>' +
-              '</button>' +
+              '<div class="btn-group">' +
+                '<button type="button" class="btn btn-outline-primary btn-sm" id="editComicInfoBtn" title="Edit ComicInfo.xml">' +
+                  '<i class="bi bi-pencil-square"></i>' +
+                '</button>' +
+                '<button type="button" class="btn btn-outline-danger btn-sm" id="clearComicInfoBtn" title="Clear ComicInfo.xml">' +
+                  '<i class="bi bi-eraser"></i>' +
+                '</button>' +
+              '</div>' +
             '</div>' +
             '<div class="card"><div class="card-body"><div class="row">' +
             _renderFieldGroups(data.comicinfo) +
             '</div></div></div>';
         } else {
-          html += '<p class="text-muted">No ComicInfo.xml found</p>';
+          html +=
+            '<div class="d-flex justify-content-between align-items-center mb-2">' +
+              '<h6 class="mb-0">Comic Information</h6>' +
+              '<button type="button" class="btn btn-outline-primary btn-sm" id="editComicInfoBtn" title="Create ComicInfo.xml">' +
+                '<i class="bi bi-pencil-square me-1"></i>Edit ComicInfo' +
+              '</button>' +
+            '</div>' +
+            '<p class="text-muted">No ComicInfo.xml found</p>';
         }
 
         // Preview column with optional page viewer
@@ -477,6 +681,8 @@
         content.innerHTML = html;
 
         // Attach clear button handler
+        var editBtn = document.getElementById('editComicInfoBtn');
+        if (editBtn) editBtn.addEventListener('click', _openEditComicInfoModal);
         var clearBtn = document.getElementById('clearComicInfoBtn');
         if (clearBtn) clearBtn.addEventListener('click', _clearComicInfoXml);
 
@@ -569,6 +775,11 @@
         document.removeEventListener('keydown', _handleKeydown);
         _resetPageViewer();
       });
+    }
+
+    var saveComicInfoBtn = document.getElementById('saveComicInfoBtn');
+    if (saveComicInfoBtn) {
+      saveComicInfoBtn.addEventListener('click', _saveComicInfoEdits);
     }
   });
 

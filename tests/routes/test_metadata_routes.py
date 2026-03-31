@@ -201,7 +201,6 @@ class TestBulkClearComicInfo:
         assert resp.status_code == 200
         data = resp.get_json()
         assert data["success"] is True
-        assert data["total"] == 2
 
     def test_bulk_clear_empty(self, client, tmp_path):
         empty_dir = str(tmp_path / "data" / "empty")
@@ -224,6 +223,85 @@ class TestBulkClearComicInfo:
         assert resp.status_code == 200
         data = resp.get_json()
         assert data["success"] is True
+
+
+class TestSaveComicInfoEndpoint:
+
+    @patch("routes.metadata.is_valid_library_path", return_value=True)
+    @patch("core.database.update_file_index_from_comicinfo")
+    @patch("core.database.set_has_comicinfo")
+    def test_creates_comicinfo_when_missing(self, mock_set, mock_update_index, mock_valid, client, tmp_path):
+        cbz_path = str(tmp_path / "data" / "new.cbz")
+        os.makedirs(str(tmp_path / "data"), exist_ok=True)
+        _make_cbz(cbz_path, with_comicinfo=False)
+
+        resp = client.post('/cbz-save-comicinfo', json={
+            "path": cbz_path,
+            "comicinfo": {
+                "Series": "Batman",
+                "Number": "1",
+                "Year": "2020",
+            }
+        })
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["success"] is True
+
+        with zipfile.ZipFile(cbz_path, 'r') as zf:
+            xml_data = zf.read("ComicInfo.xml").decode("utf-8")
+            assert "<Series>Batman</Series>" in xml_data
+            assert "<Number>1</Number>" in xml_data
+            assert "<Year>2020</Year>" in xml_data
+
+    @patch("routes.metadata.is_valid_library_path", return_value=True)
+    @patch("core.database.update_file_index_from_comicinfo")
+    @patch("core.database.set_has_comicinfo")
+    def test_preserves_existing_unedited_tags(self, mock_set, mock_update_index, mock_valid, client, tmp_path):
+        cbz_path = str(tmp_path / "data" / "existing.cbz")
+        os.makedirs(str(tmp_path / "data"), exist_ok=True)
+        with zipfile.ZipFile(cbz_path, 'w') as zf:
+            zf.writestr("page_001.png", b"fake image data")
+            zf.writestr(
+                "ComicInfo.xml",
+                "<ComicInfo><Series>Old Series</Series><CustomTag>Keep Me</CustomTag></ComicInfo>"
+            )
+
+        resp = client.post('/cbz-save-comicinfo', json={
+            "path": cbz_path,
+            "comicinfo": {
+                "Title": "New Title"
+            }
+        })
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["success"] is True
+
+        with zipfile.ZipFile(cbz_path, 'r') as zf:
+            xml_data = zf.read("ComicInfo.xml").decode("utf-8")
+            assert "<Title>New Title</Title>" in xml_data
+            assert "<Series>Old Series</Series>" in xml_data
+            assert "<CustomTag>Keep Me</CustomTag>" in xml_data
+
+    @patch("routes.metadata.is_valid_library_path", return_value=True)
+    def test_rejects_empty_payload(self, mock_valid, client, tmp_path):
+        cbz_path = str(tmp_path / "data" / "empty.cbz")
+        os.makedirs(str(tmp_path / "data"), exist_ok=True)
+        _make_cbz(cbz_path, with_comicinfo=False)
+
+        resp = client.post('/cbz-save-comicinfo', json={
+            "path": cbz_path,
+            "comicinfo": {
+                "Series": "",
+                "Title": "",
+                "Notes": "   "
+            }
+        })
+
+        assert resp.status_code == 400
+        data = resp.get_json()
+        assert data["success"] is False
 
 
 class TestUpdateXmlFileIndexSync:

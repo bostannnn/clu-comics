@@ -460,6 +460,64 @@ def cbz_metadata():
         return jsonify({"error": str(e)}), 500
 
 
+@metadata_bp.route('/cbz-save-comicinfo', methods=['POST'])
+def cbz_save_comicinfo():
+    """Create or update ComicInfo.xml in a single CBZ/ZIP file from manual form edits."""
+    data = request.get_json(silent=True) or {}
+    file_path = data.get('path')
+    comicinfo_updates = data.get('comicinfo') or {}
+
+    if not file_path or not os.path.exists(file_path):
+        return jsonify({"success": False, "error": "Invalid file path"}), 400
+
+    if not is_valid_library_path(file_path):
+        return jsonify({"success": False, "error": "Invalid library path"}), 400
+
+    if not file_path.lower().endswith(('.cbz', '.zip')):
+        return jsonify({"success": False, "error": "File is not a CBZ"}), 400
+
+    try:
+        from core.comicinfo import read_comicinfo_from_zip, generate_comicinfo_xml_from_dict
+        from core.database import set_has_comicinfo, update_file_index_from_comicinfo
+
+        existing_comicinfo = read_comicinfo_from_zip(file_path) or {}
+
+        editable_keys = {
+            'Title', 'Series', 'Number', 'Count', 'Volume', 'AlternateSeries',
+            'AlternateNumber', 'AlternateCount', 'Year', 'Month', 'Day',
+            'Publisher', 'Imprint', 'Format', 'PageCount', 'LanguageISO',
+            'MetronId', 'Writer', 'Penciller', 'Inker', 'Colorist', 'Letterer',
+            'CoverArtist', 'Editor', 'Genre', 'Characters', 'Teams',
+            'Locations', 'StoryArc', 'SeriesGroup', 'MainCharacterOrTeam',
+            'AgeRating', 'Summary', 'Notes', 'Web', 'ScanInformation',
+            'Review', 'CommunityRating', 'BlackAndWhite', 'Manga'
+        }
+
+        merged_comicinfo = dict(existing_comicinfo)
+        for key in editable_keys:
+            if key in comicinfo_updates:
+                merged_comicinfo[key] = str(comicinfo_updates.get(key) or '').strip()
+
+        normalized_payload = {k: v for k, v in merged_comicinfo.items() if str(v).strip()}
+        if not normalized_payload:
+            return jsonify({"success": False, "error": "At least one ComicInfo field is required"}), 400
+
+        xml_bytes = generate_comicinfo_xml_from_dict(merged_comicinfo)
+        add_comicinfo_to_cbz(file_path, xml_bytes)
+        set_has_comicinfo(file_path)
+        update_file_index_from_comicinfo(file_path, merged_comicinfo)
+
+        return jsonify({
+            "success": True,
+            "message": "ComicInfo.xml saved successfully",
+            "comicinfo": merged_comicinfo,
+        })
+
+    except Exception as e:
+        app_logger.error(f"Error saving ComicInfo.xml for {file_path}: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 def _remove_comicinfo_from_cbz(file_path):
     """Remove ComicInfo.xml from a single CBZ file.
 

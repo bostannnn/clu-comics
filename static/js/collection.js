@@ -4266,7 +4266,17 @@ function showMissingFileCheckModal(data) {
 // ============================================================================
 
 // CBZ info – contract setup, adapts arguments for CLU.showCBZInfo
-function showCBZInfo(filePath, fileName) { CLU.showCBZInfo(filePath, fileName); }
+function showCBZInfo(filePath, fileName) {
+    window._cluCbzInfo = {
+        onClearComplete: function () {
+            loadDirectory(currentPath, true);
+        },
+        onEditComplete: function () {
+            loadDirectory(currentPath, true);
+        }
+    };
+    CLU.showCBZInfo(filePath, fileName);
+}
 
 // ============================================================================
 // TEXT FILE VIEWER FUNCTIONALITY

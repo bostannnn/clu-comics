@@ -1054,6 +1054,9 @@ function setupInfoContract() {
     window._cluCbzInfo = {
         onClearComplete: function () {
             loadPath(swCurrentPath);
+        },
+        onEditComplete: function () {
+            loadPath(swCurrentPath);
         }
     };
 }
