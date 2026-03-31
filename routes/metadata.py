@@ -3593,6 +3593,13 @@ def search_metadata():
             if op_id:
                 app_state.update_operation(op_id, current=current, detail=detail)
 
+        def fail_single_metadata(status_code, payload, current=None, detail=None):
+            nonlocal op_error
+            op_error = True
+            if detail is not None:
+                update_single_metadata_progress(current, detail)
+            return jsonify(payload), status_code
+
         app_logger.info(f"[search-metadata] Starting search for {file_name}")
         update_single_metadata_progress(1, "Parsing filename...")
 
@@ -3626,7 +3633,12 @@ def search_metadata():
             app_logger.info(f"[search-metadata] Using manual search term override: '{series_name}'")
 
         if force_provider and force_provider not in {'comicvine', 'metron'}:
-            return jsonify({"success": False, "error": "Force metadata requires ComicVine or Metron"}), 400
+            return fail_single_metadata(
+                400,
+                {"success": False, "error": "Force metadata requires ComicVine or Metron"},
+                current=2,
+                detail="Unsupported force provider",
+            )
 
         # Handle selection follow-up (user picked from a selection modal)
         if selected_match:
@@ -3635,7 +3647,12 @@ def search_metadata():
                 update_single_metadata_progress(2, "Resolving file path...")
                 file_path = _resolve_existing_file_path(file_path, file_name, library_id)
                 if not os.path.exists(file_path):
-                    return jsonify({"success": False, "error": f"File not found: {file_path}"}), 404
+                    return fail_single_metadata(
+                        404,
+                        {"success": False, "error": f"File not found: {file_path}"},
+                        current=2,
+                        detail="File not found",
+                    )
 
             provider = selected_match.get('provider')
             app_logger.info(f"[search-metadata] Selection follow-up for provider: {provider}")
@@ -3705,8 +3722,12 @@ def search_metadata():
                         preferred_title=preferred_title, alternate_title=alternate_title)
 
             if not metadata:
-                update_single_metadata_progress(4, "No metadata found for selection")
-                return jsonify({"success": False, "error": "No metadata found for selection"}), 404
+                return fail_single_metadata(
+                    404,
+                    {"success": False, "error": "No metadata found for selection"},
+                    current=4,
+                    detail="No metadata found for selection",
+                )
 
             # Apply metadata
             update_single_metadata_progress(4, "Writing ComicInfo.xml...")
@@ -3777,10 +3798,15 @@ def search_metadata():
 
         if force_provider:
             if force_provider not in provider_order:
-                return jsonify({
-                    "success": False,
-                    "error": f"{force_provider.title()} is not enabled for this library"
-                }), 400
+                return fail_single_metadata(
+                    400,
+                    {
+                        "success": False,
+                        "error": f"{force_provider.title()} is not enabled for this library"
+                    },
+                    current=2,
+                    detail=f"{force_provider} is not enabled",
+                )
             provider_order = [force_provider]
 
         app_logger.info(f"[search-metadata] Provider order: {provider_order}")
@@ -3957,16 +3983,20 @@ def search_metadata():
 
         # All providers exhausted
         app_logger.info(f"[search-metadata] No metadata found from any provider for {file_name}")
-        update_single_metadata_progress(4, "No metadata found")
-        return jsonify({
-            "success": False,
-            "error": "No metadata found from any provider",
-            "parsed_filename": {
-                "series_name": series_name,
-                "issue_number": issue_number,
-                "year": year
-            }
-        }), 404
+        return fail_single_metadata(
+            404,
+            {
+                "success": False,
+                "error": "No metadata found from any provider",
+                "parsed_filename": {
+                    "series_name": series_name,
+                    "issue_number": issue_number,
+                    "year": year
+                }
+            },
+            current=4,
+            detail="No metadata found",
+        )
 
     except Exception as e:
         op_error = True

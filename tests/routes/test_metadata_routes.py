@@ -784,6 +784,54 @@ class TestSearchMetadataParsedFilename:
         mock_register_op.assert_called_once_with("metadata", "Batman 001 (2020).cbz", total=5)
         mock_complete_op.assert_called_once_with("op-456", error=True)
 
+    @patch("routes.metadata.app_state.complete_operation")
+    @patch("routes.metadata.app_state.update_operation")
+    @patch("routes.metadata.app_state.register_operation", return_value="op-789")
+    @patch("models.comicvine.find_cvinfo_in_folder", return_value=None)
+    def test_search_metadata_marks_single_file_operation_error_on_no_match(
+        self,
+        mock_cvinfo,
+        mock_register_op,
+        mock_update_op,
+        mock_complete_op,
+        client,
+    ):
+        client.application.config["COMICVINE_API_KEY"] = ""
+        resp = client.post('/api/search-metadata', json={
+            'file_path': '/data/Batman 001 (2020).cbz',
+            'file_name': 'Batman 001 (2020).cbz',
+        })
+
+        assert resp.status_code == 404
+        detail_updates = [call.kwargs["detail"] for call in mock_update_op.call_args_list if "detail" in call.kwargs]
+        assert "No metadata found" in detail_updates
+        mock_register_op.assert_called_once_with("metadata", "Batman 001 (2020).cbz", total=5)
+        mock_complete_op.assert_called_once_with("op-789", error=True)
+
+    @patch("routes.metadata.app_state.complete_operation")
+    @patch("routes.metadata.app_state.update_operation")
+    @patch("routes.metadata.app_state.register_operation", return_value="op-999")
+    @patch("models.comicvine.find_cvinfo_in_folder", return_value=None)
+    def test_search_metadata_marks_single_file_operation_error_on_invalid_force_provider(
+        self,
+        mock_cvinfo,
+        mock_register_op,
+        mock_update_op,
+        mock_complete_op,
+        client,
+    ):
+        resp = client.post('/api/search-metadata', json={
+            'file_path': '/data/Batman 001 (2020).cbz',
+            'file_name': 'Batman 001 (2020).cbz',
+            'force_provider': 'gcd',
+        })
+
+        assert resp.status_code == 400
+        detail_updates = [call.kwargs["detail"] for call in mock_update_op.call_args_list if "detail" in call.kwargs]
+        assert "Unsupported force provider" in detail_updates
+        mock_register_op.assert_called_once_with("metadata", "Batman 001 (2020).cbz", total=5)
+        mock_complete_op.assert_called_once_with("op-999", error=True)
+
 
 class TestComicVineVolumeYearHandling:
 
