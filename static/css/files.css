@@ -109,6 +109,13 @@
         flex: 0 1 auto;
     }
 
+    .files-list-actions {
+        width: 100%;
+        margin-left: 0;
+        justify-content: flex-start;
+        align-items: center;
+    }
+
     @media (max-width: 1199.98px) {
         .files-filter-row-secondary {
             padding-top: var(--clu-space-1);

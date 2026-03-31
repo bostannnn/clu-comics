@@ -1131,6 +1131,7 @@ function updateFilterBar(panel, directories) {
   const btnGroup = outerContainer.querySelector('.btn-group');
   if (!btnGroup) return;
   const alphaRow = outerContainer.querySelector('.files-filter-row');
+  const searchContainer = document.getElementById(panel + '-directory-search-container');
 
   // Handle undefined or null directories - provide empty array as fallback
   if (!directories) {
@@ -1181,8 +1182,9 @@ function updateFilterBar(panel, directories) {
 
   // Directory search box logic (show for large directory lists on both panels)
   const searchRow = document.getElementById(panel + '-directory-search-row');
+  const showSearch = directories.length > 25;
   if (searchRow) {
-    if (directories.length > 25) {
+    if (showSearch) {
       const inputId = panel + '-directory-search';
       const currentValue = directorySearchTerms[panel] || '';
       searchRow.innerHTML = `<input type="text" id="${inputId}" class="form-control" placeholder="Filter directories...">`;
@@ -1197,6 +1199,12 @@ function updateFilterBar(panel, directories) {
       searchRow.innerHTML = '';
     }
   }
+
+  if (searchContainer) {
+    searchContainer.style.display = showSearch ? 'flex' : 'none';
+  }
+
+  outerContainer.style.display = (showAlphaFilter || showSearch) ? '' : 'none';
 }
 
 // Function to restore filter from history if valid for the given path
@@ -1292,8 +1300,9 @@ function loadDirectories(path, panel) {
   // Show filter bar
   const filterBar = document.getElementById(`${panel}-directory-filter`);
   if (filterBar) {
-    filterBar.style.display = 'block';
+    filterBar.style.display = '';
   }
+  setDirectoryActionRowVisibility(panel, true);
 
   window.scrollTo({ top: 0, behavior: "smooth" });
   let container = panel === 'source' ? document.getElementById("source-list")
@@ -1471,7 +1480,7 @@ function loadDownloads(path, panel) {
   // Show filter bar
   const filterBar = document.getElementById(`${panel}-directory-filter`);
   if (filterBar) {
-    filterBar.style.display = 'block';
+    filterBar.style.display = '';
   }
 
   window.scrollTo({ top: 0, behavior: "smooth" });
@@ -1553,6 +1562,7 @@ function loadRecentFiles(panel) {
   if (filterBar) {
     filterBar.style.display = 'none';
   }
+  setDirectoryActionRowVisibility(panel, false);
 
   // Update breadcrumb to show "Recent Files"
   updateBreadcrumb(panel, 'Recent Files');
@@ -1875,6 +1885,7 @@ function loadTrash(panel) {
   // Hide filter bar
   const filterBar = document.getElementById(`${panel}-directory-filter`);
   if (filterBar) filterBar.style.display = 'none';
+  setDirectoryActionRowVisibility(panel, false);
 
   updateBreadcrumb(panel, 'Trash');
 
@@ -2879,6 +2890,15 @@ function refreshVisibleDirectoryActionLayouts() {
       updateRenameButtonVisibility(panel);
     }
   });
+}
+
+function setDirectoryActionRowVisibility(panel, visible) {
+  const renameRowId = panel === 'source' ? 'source-directory-rename-row' : 'destination-directory-rename-row';
+  const renameRow = document.getElementById(renameRowId);
+  if (!renameRow) {
+    return;
+  }
+  renameRow.style.display = visible ? '' : 'none';
 }
 
 // Function to update rename button visibility and functionality
