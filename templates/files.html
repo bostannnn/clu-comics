@@ -10,7 +10,8 @@
 {% block content %}
 
 <div class="container-fluid px-4">
-  <h2 class="text-primary-emphasis">File Manager</h2>
+  <div class="py-3">
+  <h2 class="text-primary-emphasis mb-4">File Manager</h2>
 
   <!-- Progress indicator -->
   {% include 'partials/progress_container.html' %}
@@ -22,12 +23,13 @@
     <span class="badge-hint">Drag to move • Right-click for options</span>
   </div>
 
-  <div class="row">
+  <div class="row g-4 align-items-start">
     <!-- Source Panel -->
     <div class="col-md-6">
-      <h3>Source</h3>
+      <section class="files-panel">
+      <h3 class="mb-3">Source</h3>
       <!-- Button group for switching between Library, Downloads and Recent Files -->
-      <div class="btn-group mb-2" role="group" aria-label="View Options">
+      <div class="clu-toolbar mb-3" role="group" aria-label="View Options">
         <!-- Library Dropdown -->
         <div class="dropdown">
           <button class="btn btn-outline-primary dropdown-toggle" type="button"
@@ -46,25 +48,27 @@
           data-bs-toggle="button"><i class="bi bi-trash3 me-1"></i>Trash<span id="trashBadge" class="badge rounded-pill text-bg-warning ms-1" style="display:none"></span></button>
       </div>
       <!-- Filter buttons for source panel -->
-      <div id="source-directory-filter" class="mb-2">
-        <div class="btn-group d-grid grid-filter-buttons" role="group" aria-label="Directory Filter">
+      <div id="source-directory-filter" class="clu-filter-bar mb-3">
+        <div class="btn-group d-grid grid-filter-buttons clu-alpha-filter" role="group" aria-label="Directory Filter">
           <!-- Dynamically inserted buttons go here -->
         </div>
-        <div id="source-directory-search-row" class="pt-2"></div>
-        <div id="source-directory-rename-row" class="pt-2"></div>
+        <div id="source-directory-search-row" class="clu-search-row"></div>
+        <div id="source-directory-rename-row"></div>
       </div>
-      <nav aria-label="breadcrumb">
-        <ol id="source-path-display" class="breadcrumb">
+      <nav aria-label="breadcrumb" class="mb-3">
+        <ol id="source-path-display" class="breadcrumb mb-0">
           <li class="breadcrumb-item active">Loading...</li>
         </ol>
       </nav>
       <ul id="source-list" class="list-group drop-target"></ul>
+      </section>
     </div>
     <!-- Destination Panel -->
     <div class="col-md-6">
-      <h3>Destination</h3>
+      <section class="files-panel">
+      <h3 class="mb-3">Destination</h3>
       <!-- Library Dropdown and Action Buttons -->
-      <div class="d-flex gap-2 mb-2">
+      <div class="clu-toolbar mb-3">
         <!-- Library Dropdown -->
         <div class="dropdown">
           <button class="btn btn-outline-primary dropdown-toggle" type="button"
@@ -85,19 +89,20 @@
       </div>
 
       <!-- Filter buttons for destination panel -->
-      <div id="destination-directory-filter" class="mb-2">
-        <div class="btn-group d-grid grid-filter-buttons" role="group" aria-label="Directory Filter">
+      <div id="destination-directory-filter" class="clu-filter-bar mb-3">
+        <div class="btn-group d-grid grid-filter-buttons clu-alpha-filter" role="group" aria-label="Directory Filter">
           <!-- Dynamically inserted buttons go here -->
         </div>
-        <div id="destination-directory-search-row" class="pt-2"></div>
-        <div id="destination-directory-rename-row" class="pt-2"></div>
+        <div id="destination-directory-search-row" class="clu-search-row"></div>
+        <div id="destination-directory-rename-row"></div>
       </div>
-      <nav aria-label="breadcrumb">
-        <ol id="destination-path-display" class="breadcrumb">
+      <nav aria-label="breadcrumb" class="mb-3">
+        <ol id="destination-path-display" class="breadcrumb mb-0">
           <li class="breadcrumb-item active">Loading...</li>
         </ol>
       </nav>
       <ul id="destination-list" class="list-group drop-target"></ul>
+      </section>
     </div>
   </div>
 
@@ -144,6 +149,7 @@
     </div>
   </div>
 
+</div>
 </div>
 
 <!-- Context Menu for Multi-file Selection -->

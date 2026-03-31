@@ -214,13 +214,7 @@
 /* Filter bar reuse */
 .sw-filter-buttons {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(38px, 1fr));
-    gap: 2px;
-}
-
-.sw-filter-buttons .btn {
-    padding: 0.25rem 0.5rem;
-    font-size: 0.8rem;
+    grid-template-columns: repeat(auto-fill, minmax(42px, 1fr));
 }
 
 /* Selected row highlight */
@@ -265,4 +259,3 @@
     grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
     gap: 0.5rem;
 }
-

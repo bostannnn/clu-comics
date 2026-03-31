@@ -42,14 +42,38 @@
         opacity: 1;
     }
 
-    .grid-filter-buttons {
-        grid-template-columns: repeat(auto-fill, minmax(36px, 1fr));
+    .files-panel {
+        display: flex;
+        flex-direction: column;
+        gap: 0;
+        height: 100%;
+        padding: 1rem 1.25rem 1.25rem;
+        border: 1px solid var(--bs-border-color-translucent);
+        border-radius: var(--bs-border-radius-xl);
+        background: var(--bs-body-bg);
+        box-shadow: 0 0.125rem 0.5rem rgba(0, 0, 0, 0.05);
     }
 
-    .grid-filter-buttons .btn {
-        padding: 0.2rem 0.35rem;
-        font-size: 0.8rem;
-        line-height: 1.1;
+    .files-panel .breadcrumb {
+        min-height: 1.5rem;
+    }
+
+    .files-panel h3 {
+        font-size: 1.65rem;
+    }
+
+    .grid-filter-buttons {
+        grid-template-columns: repeat(auto-fill, minmax(42px, 1fr));
+    }
+
+    #source-directory-filter,
+    #destination-directory-filter {
+        max-width: 100%;
+    }
+
+    #source-directory-search-row .form-control,
+    #destination-directory-search-row .form-control {
+        margin-bottom: 0;
     }
 
     #destination-list,
@@ -58,6 +82,8 @@
            We subtract approx 485px to account for the header, buttons, and breadcrumbs above it. */
         height: calc(100vh - 485px);
         overflow-y: auto;
+        border-radius: var(--bs-border-radius);
+        background-color: var(--bs-body-bg);
     }
 
     /* Drag and drop hover effects */
