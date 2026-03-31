@@ -721,6 +721,69 @@ class TestSearchMetadataParsedFilename:
         assert data["success"] is False
         assert "not enabled for this library" in data["error"]
 
+    @patch("routes.metadata.app_state.complete_operation")
+    @patch("routes.metadata.app_state.update_operation")
+    @patch("routes.metadata.app_state.register_operation", return_value="op-123")
+    @patch("core.database.update_file_index_from_comicinfo")
+    @patch("routes.metadata.add_comicinfo_to_cbz")
+    @patch(
+        "routes.metadata._try_comicvine_single",
+        return_value=({"Series": "Batman", "Number": "1", "Year": "2020"}, None, None, None),
+    )
+    @patch("models.comicvine.find_cvinfo_in_folder", return_value=None)
+    def test_search_metadata_registers_and_completes_single_file_operation(
+        self,
+        mock_cvinfo,
+        mock_try_comicvine,
+        mock_add_xml,
+        mock_update_index,
+        mock_register_op,
+        mock_update_op,
+        mock_complete_op,
+        client,
+    ):
+        client.application.config["COMICVINE_API_KEY"] = "test-key"
+
+        resp = client.post('/api/search-metadata', json={
+            'file_path': '/data/Batman 001 (2020).cbz',
+            'file_name': 'Batman 001 (2020).cbz',
+        })
+
+        assert resp.status_code == 200
+        mock_register_op.assert_called_once_with("metadata", "Batman 001 (2020).cbz", total=5)
+        detail_updates = [call.kwargs["detail"] for call in mock_update_op.call_args_list if "detail" in call.kwargs]
+        assert "Parsing filename..." in detail_updates
+        assert "Preparing provider search..." in detail_updates
+        assert "Searching comicvine..." in detail_updates
+        assert "Applying metadata from comicvine..." in detail_updates
+        assert "Finalizing file updates..." in detail_updates
+        mock_complete_op.assert_called_once_with("op-123", error=False)
+
+    @patch("routes.metadata.app_state.complete_operation")
+    @patch("routes.metadata.app_state.update_operation")
+    @patch("routes.metadata.app_state.register_operation", return_value="op-456")
+    @patch("routes.metadata._try_comicvine_single", side_effect=RuntimeError("boom"))
+    @patch("models.comicvine.find_cvinfo_in_folder", return_value=None)
+    def test_search_metadata_marks_single_file_operation_error_on_exception(
+        self,
+        mock_cvinfo,
+        mock_try_comicvine,
+        mock_register_op,
+        mock_update_op,
+        mock_complete_op,
+        client,
+    ):
+        client.application.config["COMICVINE_API_KEY"] = "test-key"
+
+        resp = client.post('/api/search-metadata', json={
+            'file_path': '/data/Batman 001 (2020).cbz',
+            'file_name': 'Batman 001 (2020).cbz',
+        })
+
+        assert resp.status_code == 500
+        mock_register_op.assert_called_once_with("metadata", "Batman 001 (2020).cbz", total=5)
+        mock_complete_op.assert_called_once_with("op-456", error=True)
+
 
 class TestComicVineVolumeYearHandling:
 

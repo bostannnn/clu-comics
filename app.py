@@ -6760,7 +6760,8 @@ signal.signal(signal.SIGINT, lambda signum, frame: shutdown_server())
 @app.route("/api/operations")
 def active_operations():
     ops = app_state.get_active_operations()
-    notifications = app_state.get_and_clear_notifications()
+    include_notifications = request.args.get("include_notifications", "1").lower() not in {"0", "false", "no"}
+    notifications = app_state.get_and_clear_notifications() if include_notifications else []
     return jsonify({"operations": ops, "notifications": notifications})
 
 

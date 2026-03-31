@@ -220,10 +220,12 @@ def app(db_connection, tmp_path):
 
     @test_app.route("/api/operations")
     def active_operations():
-        from flask import jsonify
+        from flask import jsonify, request as flask_request
         import core.app_state as app_state
         ops = app_state.get_active_operations()
-        return jsonify({"operations": ops})
+        include_notifications = flask_request.args.get("include_notifications", "1").lower() not in {"0", "false", "no"}
+        notifications = app_state.get_and_clear_notifications() if include_notifications else []
+        return jsonify({"operations": ops, "notifications": notifications})
 
     @test_app.route("/api/on-the-stack")
     def api_on_the_stack():

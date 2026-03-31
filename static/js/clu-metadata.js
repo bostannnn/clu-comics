@@ -36,21 +36,25 @@
 
   // ── Progress toast builder ────────────────────────────────────────────
 
-  function _buildProgressToast() {
+  function _buildProgressToast(title, countText, detailText) {
+    title = title || 'Fetching Metadata';
+    countText = countText || '0/0';
+    detailText = detailText || 'Starting...';
+
     var toast = document.createElement('div');
     toast.className = 'toast show position-fixed';
     toast.style.cssText = 'z-index: 1200; top: 60px; right: 1rem;';
     toast.innerHTML =
       '<div class="toast-header bg-primary text-white">' +
-        '<strong class="me-auto">Fetching Metadata</strong>' +
-        '<small class="batch-progress-count">0/0</small>' +
+        '<strong class="me-auto">' + CLU.escapeHtml(title) + '</strong>' +
+        '<small class="batch-progress-count">' + CLU.escapeHtml(countText) + '</small>' +
       '</div>' +
       '<div class="toast-body">' +
         '<div class="d-flex align-items-center">' +
           '<div class="spinner-border spinner-border-sm me-2" role="status">' +
             '<span class="visually-hidden">Loading...</span>' +
           '</div>' +
-          '<span class="batch-progress-file text-truncate" style="max-width: 250px;">Starting...</span>' +
+          '<span class="batch-progress-file text-truncate" style="max-width: 250px;">' + CLU.escapeHtml(detailText) + '</span>' +
         '</div>' +
       '</div>';
     document.body.appendChild(toast);
@@ -122,6 +126,60 @@
     }
 
     return read();
+  }
+
+  function _startSingleFileProgressWatcher(filePath, fileName, progressToast) {
+    var label = (fileName || filePath || '').split('/').pop();
+    var startedAfter = Date.now() / 1000;
+    var countEl = progressToast.querySelector('.batch-progress-count');
+    var fileEl = progressToast.querySelector('.batch-progress-file');
+    var pollId = null;
+
+    function updateToast(op) {
+      if (!op) {
+        return;
+      }
+
+      if (countEl) {
+        countEl.textContent = op.total > 0 ? op.current + '/' + op.total : '';
+      }
+      if (fileEl) {
+        fileEl.textContent = op.detail || 'Working...';
+        fileEl.title = op.detail || '';
+      }
+    }
+
+    function findOperation(operations) {
+      var matches = (operations || []).filter(function (op) {
+        return op.op_type === 'metadata' &&
+          op.label === label &&
+          op.started_at >= (startedAfter - 1);
+      });
+
+      matches.sort(function (a, b) {
+        return (b.started_at || 0) - (a.started_at || 0);
+      });
+
+      return matches[0] || null;
+    }
+
+    function poll() {
+      fetch('/api/operations?include_notifications=0')
+        .then(function (response) { return response.json(); })
+        .then(function (data) {
+          updateToast(findOperation(data.operations));
+        })
+        .catch(function () {});
+    }
+
+    poll();
+    pollId = window.setInterval(poll, 1000);
+
+    return function stop() {
+      if (pollId !== null) {
+        window.clearInterval(pollId);
+      }
+    };
   }
 
   // ── Refine search modal (no-match fallback) ─────────────────────────
@@ -660,6 +718,8 @@
     var contract = _getContract();
     var searchTerm = null;
     var forceProvider = null;
+    var progressToast = _buildProgressToast('Searching Metadata', '0/5', 'Starting request...');
+    var stopProgressWatcher = _startSingleFileProgressWatcher(filePath, fileName, progressToast);
 
     if (typeof searchTermOrOptions === 'string') {
       searchTerm = searchTermOrOptions;
@@ -667,8 +727,6 @@
       searchTerm = searchTermOrOptions.searchTerm || null;
       forceProvider = searchTermOrOptions.forceProvider || null;
     }
-
-    CLU.showToast('Searching Metadata', 'Searching metadata for \'' + fileName + '\'...', 'info');
 
     var requestBody = { file_path: filePath, file_name: fileName };
     if (libraryId) {
@@ -688,6 +746,9 @@
     })
       .then(function (response) { return response.json(); })
       .then(function (data) {
+        stopProgressWatcher();
+        _removeToast(progressToast);
+
         if (data.requires_selection) {
           if (data.provider === 'comicvine') {
             _showCVVolumeModal(data, filePath, fileName);
@@ -734,6 +795,8 @@
         }
       })
       .catch(function (error) {
+        stopProgressWatcher();
+        _removeToast(progressToast);
         console.error('Metadata search error:', error);
         CLU.showToast('Metadata Error', error.message || 'Failed to search metadata', 'error');
         if (typeof contract.onMetadataError === 'function') {
@@ -757,8 +820,9 @@
   CLU.searchMetadataWithSelection = function (filePath, fileName, selectedMatch) {
     var libraryId = _getLibraryId();
     var contract = _getContract();
-
-    CLU.showToast('Fetching Metadata', 'Fetching metadata from ' + selectedMatch.provider + '...', 'info');
+    var providerLabel = selectedMatch.provider || 'provider';
+    var progressToast = _buildProgressToast('Fetching Metadata', '0/5', 'Waiting for ' + CLU.escapeHtml(providerLabel) + '...');
+    var stopProgressWatcher = _startSingleFileProgressWatcher(filePath, fileName, progressToast);
 
     var requestBody = {
       file_path: filePath,
@@ -776,6 +840,9 @@
     })
       .then(function (response) { return response.json(); })
       .then(function (data) {
+        stopProgressWatcher();
+        _removeToast(progressToast);
+
         if (data.success) {
           CLU.showToast('Metadata Found', 'Metadata found via ' + data.source, 'success');
 
@@ -790,6 +857,8 @@
         }
       })
       .catch(function (error) {
+        stopProgressWatcher();
+        _removeToast(progressToast);
         console.error('Metadata selection error:', error);
         CLU.showToast('Metadata Error', error.message || 'Failed to fetch metadata', 'error');
         if (typeof contract.onMetadataError === 'function') {

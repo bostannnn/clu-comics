@@ -3570,6 +3570,9 @@ def search_metadata():
     from app import log_file_if_in_data, invalidate_cache_for_path, update_index_on_move
     from core.database import get_library_providers, set_has_comicinfo
 
+    op_id = None
+    op_error = False
+
     try:
         data = request.get_json()
         file_path = data.get('file_path')
@@ -3583,7 +3586,15 @@ def search_metadata():
         if not file_path or not file_name:
             return jsonify({"success": False, "error": "Missing file_path or file_name"}), 400
 
+        op_label = os.path.basename(file_name or file_path)
+        op_id = app_state.register_operation("metadata", op_label, total=5)
+
+        def update_single_metadata_progress(current, detail):
+            if op_id:
+                app_state.update_operation(op_id, current=current, detail=detail)
+
         app_logger.info(f"[search-metadata] Starting search for {file_name}")
+        update_single_metadata_progress(1, "Parsing filename...")
 
         # Parse filename - extract series name, issue number, year
         from cbz_ops.rename import parse_comic_filename
@@ -3619,13 +3630,16 @@ def search_metadata():
 
         # Handle selection follow-up (user picked from a selection modal)
         if selected_match:
+            update_single_metadata_progress(2, "Preparing selected provider lookup...")
             if library_id:
+                update_single_metadata_progress(2, "Resolving file path...")
                 file_path = _resolve_existing_file_path(file_path, file_name, library_id)
                 if not os.path.exists(file_path):
                     return jsonify({"success": False, "error": f"File not found: {file_path}"}), 404
 
             provider = selected_match.get('provider')
             app_logger.info(f"[search-metadata] Selection follow-up for provider: {provider}")
+            update_single_metadata_progress(3, f"Fetching {provider} metadata...")
 
             metadata = None
             img_url = None
@@ -3691,9 +3705,11 @@ def search_metadata():
                         preferred_title=preferred_title, alternate_title=alternate_title)
 
             if not metadata:
+                update_single_metadata_progress(4, "No metadata found for selection")
                 return jsonify({"success": False, "error": "No metadata found for selection"}), 404
 
             # Apply metadata
+            update_single_metadata_progress(4, "Writing ComicInfo.xml...")
             comicinfo_xml = generate_comicinfo_xml(metadata)
             add_comicinfo_to_cbz(file_path, comicinfo_xml)
             set_has_comicinfo(file_path)
@@ -3702,9 +3718,12 @@ def search_metadata():
             new_file_path = None
             if volume_data:
                 try:
+                    update_single_metadata_progress(5, "Finalizing file updates...")
                     new_file_path = comicvine.auto_move_file(file_path, volume_data, current_app.config)
                 except Exception as move_error:
                     app_logger.error(f"[search-metadata] Auto-move failed: {move_error}")
+            else:
+                update_single_metadata_progress(5, "Finalizing file updates...")
 
             response_data = {
                 "success": True,
@@ -3730,6 +3749,7 @@ def search_metadata():
             return jsonify(response_data)
 
         # Check for cvinfo file in parent folder
+        update_single_metadata_progress(2, "Preparing provider search...")
         folder_path = os.path.dirname(file_path)
         cvinfo_path = comicvine.find_cvinfo_in_folder(folder_path)
 
@@ -3768,6 +3788,7 @@ def search_metadata():
         # Try each provider in priority order
         for provider_type in provider_order:
             app_logger.info(f"[search-metadata] Trying provider: {provider_type} for {file_name}")
+            update_single_metadata_progress(3, f"Searching {provider_type}...")
 
             metadata = None
             img_url = None
@@ -3788,6 +3809,7 @@ def search_metadata():
                         "issue_number": issue_number,
                         "year": year
                     }
+                    update_single_metadata_progress(4, f"{provider_type} requires selection")
                     app_logger.info(f"[search-metadata] {provider_type} requires selection for {file_name}")
                     return jsonify(selection_data)
 
@@ -3799,6 +3821,7 @@ def search_metadata():
                         "issue_number": issue_number,
                         "year": year
                     }
+                    update_single_metadata_progress(4, f"{provider_type} requires selection")
                     app_logger.info(f"[search-metadata] {provider_type} requires selection for {file_name}")
                     return jsonify(selection_data)
 
@@ -3813,6 +3836,7 @@ def search_metadata():
                         "issue_number": issue_number,
                         "year": year
                     }
+                    update_single_metadata_progress(4, f"{provider_type} requires selection")
                     app_logger.info(f"[search-metadata] {provider_type} requires selection for {file_name}")
                     return jsonify(selection_data)
 
@@ -3871,6 +3895,7 @@ def search_metadata():
                                     "year": year
                                 }
                             }
+                            update_single_metadata_progress(4, f"{provider_type} requires selection")
                             app_logger.info(f"[search-metadata] {provider_type} requires selection for {file_name}")
                             return jsonify(selection_data)
                         else:
@@ -3887,6 +3912,7 @@ def search_metadata():
                 app_logger.info(f"[search-metadata] {provider_type} returned metadata for {file_name}")
 
                 # Apply metadata to file
+                update_single_metadata_progress(4, f"Applying metadata from {provider_type}...")
                 comicinfo_xml = generate_comicinfo_xml(metadata)
                 add_comicinfo_to_cbz(file_path, comicinfo_xml)
 
@@ -3898,9 +3924,12 @@ def search_metadata():
                 new_file_path = None
                 if volume_data:
                     try:
+                        update_single_metadata_progress(5, "Finalizing file updates...")
                         new_file_path = comicvine.auto_move_file(file_path, volume_data, current_app.config)
                     except Exception as move_error:
                         app_logger.error(f"[search-metadata] Auto-move failed: {move_error}")
+                else:
+                    update_single_metadata_progress(5, "Finalizing file updates...")
 
                 response_data = {
                     "success": True,
@@ -3928,6 +3957,7 @@ def search_metadata():
 
         # All providers exhausted
         app_logger.info(f"[search-metadata] No metadata found from any provider for {file_name}")
+        update_single_metadata_progress(4, "No metadata found")
         return jsonify({
             "success": False,
             "error": "No metadata found from any provider",
@@ -3939,12 +3969,16 @@ def search_metadata():
         }), 404
 
     except Exception as e:
+        op_error = True
         if metron.is_connection_error(e):
             app_logger.warning(f"[search-metadata] Metron unavailable: {e}")
             return jsonify({"success": False, "error": "Metron is currently unavailable. Please try again later."}), 503
         app_logger.error(f"[search-metadata] Error: {e}")
         app_logger.error(f"Traceback: {traceback.format_exc()}")
         return jsonify({"success": False, "error": str(e)}), 500
+    finally:
+        if op_id:
+            app_state.complete_operation(op_id, error=op_error)
 
 
 # =============================================================================

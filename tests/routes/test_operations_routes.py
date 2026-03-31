@@ -7,12 +7,19 @@ def _clear_operations():
         app_state._operations.clear()
 
 
+def _clear_notifications():
+    with app_state._notifications_lock:
+        app_state._notifications.clear()
+
+
 class TestOperationsRoute:
     def setup_method(self):
         _clear_operations()
+        _clear_notifications()
 
     def teardown_method(self):
         _clear_operations()
+        _clear_notifications()
 
     def test_no_operations(self, client):
         resp = client.get("/api/operations")
@@ -36,3 +43,17 @@ class TestOperationsRoute:
         assert op["current"] == 3
         assert op["total"] == 10
         assert op["detail"] == "Issue #3"
+
+    def test_non_destructive_operations_poll_preserves_notifications(self, client):
+        app_state.add_notification("Background warning", level="warning")
+
+        resp = client.get("/api/operations?include_notifications=0")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["notifications"] == []
+
+        resp = client.get("/api/operations")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert len(data["notifications"]) == 1
+        assert data["notifications"][0]["message"] == "Background warning"
