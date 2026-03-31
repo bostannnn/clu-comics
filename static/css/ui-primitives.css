@@ -9,6 +9,32 @@
     --clu-compact-gap: var(--clu-space-1);
 }
 
+.clu-stack {
+    display: flex;
+    flex-direction: column;
+    gap: var(--clu-section-gap);
+}
+
+.clu-stack-sm {
+    display: flex;
+    flex-direction: column;
+    gap: var(--clu-toolbar-gap);
+}
+
+.clu-section-row {
+    display: flex;
+    align-items: center;
+    gap: var(--clu-section-gap);
+    flex-wrap: wrap;
+}
+
+.clu-section-row-tight {
+    display: flex;
+    align-items: center;
+    gap: var(--clu-toolbar-gap);
+    flex-wrap: wrap;
+}
+
 .clu-filter-bar {
     display: flex;
     flex-direction: column;

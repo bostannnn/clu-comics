@@ -26,8 +26,8 @@
   <div class="row g-4 align-items-start">
     <!-- Source Panel -->
     <div class="col-md-6">
-      <section class="files-panel">
-      <div class="clu-panel-header mb-3">
+      <section class="files-panel clu-stack">
+      <div class="clu-panel-header">
         <div class="files-panel-heading">
           <h3 class="mb-0">Source</h3>
         </div>
@@ -56,20 +56,24 @@
           </nav>
         </div>
       </div>
-      <div id="source-directory-filter" class="clu-filter-bar clu-filter-bar-inline mb-3">
-        <div class="btn-group d-grid grid-filter-buttons clu-alpha-filter" role="group" aria-label="Directory Filter">
-          <!-- Dynamically inserted buttons go here -->
+      <div id="source-directory-filter" class="clu-stack-sm">
+        <div class="clu-section-row-tight files-filter-row">
+          <div class="btn-group d-grid grid-filter-buttons clu-alpha-filter" role="group" aria-label="Directory Filter">
+            <!-- Dynamically inserted buttons go here -->
+          </div>
         </div>
-        <div id="source-directory-search-row" class="clu-search-row"></div>
-        <div id="source-directory-rename-row" class="clu-action-row"></div>
+        <div class="clu-section-row files-filter-row files-filter-row-secondary">
+          <div id="source-directory-search-row" class="clu-search-row"></div>
+          <div id="source-directory-rename-row" class="clu-action-row"></div>
+        </div>
       </div>
       <ul id="source-list" class="list-group drop-target"></ul>
       </section>
     </div>
     <!-- Destination Panel -->
     <div class="col-md-6">
-      <section class="files-panel">
-      <div class="clu-panel-header mb-3">
+      <section class="files-panel clu-stack">
+      <div class="clu-panel-header">
         <div class="files-panel-heading">
           <h3 class="mb-0">Destination</h3>
         </div>
@@ -98,12 +102,16 @@
           </nav>
         </div>
       </div>
-      <div id="destination-directory-filter" class="clu-filter-bar clu-filter-bar-inline mb-3">
-        <div class="btn-group d-grid grid-filter-buttons clu-alpha-filter" role="group" aria-label="Directory Filter">
-          <!-- Dynamically inserted buttons go here -->
+      <div id="destination-directory-filter" class="clu-stack-sm">
+        <div class="clu-section-row-tight files-filter-row">
+          <div class="btn-group d-grid grid-filter-buttons clu-alpha-filter" role="group" aria-label="Directory Filter">
+            <!-- Dynamically inserted buttons go here -->
+          </div>
         </div>
-        <div id="destination-directory-search-row" class="clu-search-row"></div>
-        <div id="destination-directory-rename-row" class="clu-action-row"></div>
+        <div class="clu-section-row files-filter-row files-filter-row-secondary">
+          <div id="destination-directory-search-row" class="clu-search-row"></div>
+          <div id="destination-directory-rename-row" class="clu-action-row"></div>
+        </div>
       </div>
       <ul id="destination-list" class="list-group drop-target"></ul>
       </section>
