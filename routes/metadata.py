@@ -439,6 +439,7 @@ def cbz_metadata():
                     with zf.open(comicinfo_match) as xml_file:
                         xml_data = xml_file.read()
                         app_logger.info(f"Found ComicInfo.xml in {file_path}, size: {len(xml_data)} bytes")
+                        metadata["comicinfo_xml_text"] = xml_data.decode('utf-8', errors='replace')
                         comicinfo = read_comicinfo_xml(xml_data)
                         if comicinfo:
                             app_logger.info(f"Successfully parsed ComicInfo.xml with {len(comicinfo)} fields")
@@ -511,10 +512,63 @@ def cbz_save_comicinfo():
             "success": True,
             "message": "ComicInfo.xml saved successfully",
             "comicinfo": merged_comicinfo,
+            "comicinfo_xml_text": xml_bytes.decode('utf-8', errors='replace'),
         })
 
     except Exception as e:
         app_logger.error(f"Error saving ComicInfo.xml for {file_path}: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@metadata_bp.route('/cbz-save-comicinfo-xml', methods=['POST'])
+def cbz_save_comicinfo_xml():
+    """Create or update ComicInfo.xml in a single CBZ/ZIP file from raw XML."""
+    data = request.get_json(silent=True) or {}
+    file_path = data.get('path')
+    comicinfo_xml_text = data.get('comicinfo_xml')
+
+    if not file_path or not os.path.exists(file_path):
+        return jsonify({"success": False, "error": "Invalid file path"}), 400
+
+    if not is_valid_library_path(file_path):
+        return jsonify({"success": False, "error": "Invalid library path"}), 400
+
+    if not file_path.lower().endswith(('.cbz', '.zip')):
+        return jsonify({"success": False, "error": "File is not a CBZ"}), 400
+
+    if not isinstance(comicinfo_xml_text, str) or not comicinfo_xml_text.strip():
+        return jsonify({"success": False, "error": "ComicInfo.xml content is required"}), 400
+
+    try:
+        from defusedxml import ElementTree as SafeET
+        from core.database import set_has_comicinfo, update_file_index_from_comicinfo
+
+        xml_bytes = comicinfo_xml_text.encode('utf-8')
+        root = SafeET.fromstring(xml_bytes)
+        root_tag = root.tag.split('}')[-1] if '}' in root.tag else root.tag
+        if root_tag != 'ComicInfo':
+            return jsonify({"success": False, "error": "Root element must be ComicInfo"}), 400
+
+        parsed_comicinfo = {}
+        for child in root:
+            tag_name = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+            parsed_comicinfo[tag_name] = child.text if child.text else ""
+
+        add_comicinfo_to_cbz(file_path, xml_bytes)
+        set_has_comicinfo(file_path)
+        update_file_index_from_comicinfo(file_path, parsed_comicinfo)
+
+        return jsonify({
+            "success": True,
+            "message": "ComicInfo.xml saved successfully",
+            "comicinfo": parsed_comicinfo,
+            "comicinfo_xml_text": comicinfo_xml_text,
+        })
+
+    except ET.ParseError as e:
+        return jsonify({"success": False, "error": f"Invalid XML: {e}"}), 400
+    except Exception as e:
+        app_logger.error(f"Error saving raw ComicInfo.xml for {file_path}: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
 

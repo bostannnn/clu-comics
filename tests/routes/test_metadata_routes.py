@@ -247,6 +247,7 @@ class TestSaveComicInfoEndpoint:
         assert resp.status_code == 200
         data = resp.get_json()
         assert data["success"] is True
+        assert "<Series>Batman</Series>" in data["comicinfo_xml_text"]
 
         with zipfile.ZipFile(cbz_path, 'r') as zf:
             xml_data = zf.read("ComicInfo.xml").decode("utf-8")
@@ -302,6 +303,97 @@ class TestSaveComicInfoEndpoint:
         assert resp.status_code == 400
         data = resp.get_json()
         assert data["success"] is False
+
+
+class TestSaveComicInfoRawXmlEndpoint:
+
+    @patch("routes.metadata.is_valid_library_path", return_value=True)
+    @patch("core.database.update_file_index_from_comicinfo")
+    @patch("core.database.set_has_comicinfo")
+    def test_creates_raw_comicinfo_when_missing(self, mock_set, mock_update_index, mock_valid, client, tmp_path):
+        cbz_path = str(tmp_path / "data" / "raw-new.cbz")
+        os.makedirs(str(tmp_path / "data"), exist_ok=True)
+        _make_cbz(cbz_path, with_comicinfo=False)
+
+        raw_xml = """<?xml version="1.0" encoding="utf-8"?>
+<ComicInfo>
+  <Series>Sandman</Series>
+  <Number>1</Number>
+  <Publisher>DC Comics</Publisher>
+</ComicInfo>"""
+
+        resp = client.post('/cbz-save-comicinfo-xml', json={
+            "path": cbz_path,
+            "comicinfo_xml": raw_xml,
+        })
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["success"] is True
+        assert data["comicinfo"]["Series"] == "Sandman"
+        assert data["comicinfo"]["Publisher"] == "DC Comics"
+
+        with zipfile.ZipFile(cbz_path, 'r') as zf:
+            xml_data = zf.read("ComicInfo.xml").decode("utf-8")
+            assert "<Series>Sandman</Series>" in xml_data
+            assert "<Publisher>DC Comics</Publisher>" in xml_data
+
+    @patch("routes.metadata.is_valid_library_path", return_value=True)
+    def test_rejects_malformed_xml(self, mock_valid, client, tmp_path):
+        cbz_path = str(tmp_path / "data" / "bad-xml.cbz")
+        os.makedirs(str(tmp_path / "data"), exist_ok=True)
+        _make_cbz(cbz_path, with_comicinfo=False)
+
+        resp = client.post('/cbz-save-comicinfo-xml', json={
+            "path": cbz_path,
+            "comicinfo_xml": "<ComicInfo><Series>Broken</ComicInfo>",
+        })
+
+        assert resp.status_code == 400
+        data = resp.get_json()
+        assert data["success"] is False
+        assert "Invalid XML" in data["error"]
+
+    @patch("routes.metadata.is_valid_library_path", return_value=True)
+    def test_rejects_wrong_root_tag(self, mock_valid, client, tmp_path):
+        cbz_path = str(tmp_path / "data" / "wrong-root.cbz")
+        os.makedirs(str(tmp_path / "data"), exist_ok=True)
+        _make_cbz(cbz_path, with_comicinfo=False)
+
+        resp = client.post('/cbz-save-comicinfo-xml', json={
+            "path": cbz_path,
+            "comicinfo_xml": "<NotComicInfo><Series>Broken</Series></NotComicInfo>",
+        })
+
+        assert resp.status_code == 400
+        data = resp.get_json()
+        assert data["success"] is False
+        assert "Root element must be ComicInfo" in data["error"]
+
+
+class TestCbzMetadataRawXmlText:
+
+    @patch("routes.metadata.is_valid_library_path", return_value=True)
+    def test_cbz_metadata_includes_raw_comicinfo_xml_text(self, mock_valid, client, tmp_path):
+        cbz_path = str(tmp_path / "data" / "with-xml.cbz")
+        os.makedirs(str(tmp_path / "data"), exist_ok=True)
+
+        raw_xml = """<?xml version="1.0" encoding="utf-8"?>
+<ComicInfo>
+  <Series>Hellboy</Series>
+  <Number>1</Number>
+</ComicInfo>"""
+
+        with zipfile.ZipFile(cbz_path, 'w') as zf:
+            zf.writestr("page_001.png", b"fake image data")
+            zf.writestr("ComicInfo.xml", raw_xml)
+
+        resp = client.get('/cbz-metadata', query_string={"path": cbz_path})
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["comicinfo"]["Series"] == "Hellboy"
+        assert data["comicinfo_xml_text"] == raw_xml
 
 
 class TestUpdateXmlFileIndexSync:

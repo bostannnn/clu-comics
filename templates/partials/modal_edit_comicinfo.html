@@ -10,7 +10,31 @@
         <p class="text-muted small mb-3">
           Edit the main ComicInfo fields for this archive. If ComicInfo.xml does not exist yet, it will be created when you save.
         </p>
-        <div id="editComicInfoForm"></div>
+        <ul class="nav nav-tabs mb-3" id="editComicInfoTabs" role="tablist">
+          <li class="nav-item" role="presentation">
+            <button class="nav-link active" id="editComicInfoFieldsTab" type="button" data-tab="fields">
+              Fields
+            </button>
+          </li>
+          <li class="nav-item" role="presentation">
+            <button class="nav-link" id="editComicInfoRawTab" type="button" data-tab="raw">
+              Raw XML (Advanced)
+            </button>
+          </li>
+        </ul>
+
+        <div id="editComicInfoFieldsPane">
+          <div id="editComicInfoForm"></div>
+        </div>
+
+        <div id="editComicInfoRawPane" class="d-none">
+          <div class="alert alert-warning py-2 small" role="alert">
+            Raw XML is validated before save. Invalid XML or a non-<code>ComicInfo</code> root tag will be rejected.
+            Unsaved field edits are not copied into this tab automatically.
+          </div>
+          <label for="editComicInfoRawXml" class="form-label small text-muted">ComicInfo.xml</label>
+          <textarea id="editComicInfoRawXml" class="form-control font-monospace" rows="18" spellcheck="false"></textarea>
+        </div>
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>

@@ -32,6 +32,7 @@
   var _currentFileList = [];
   var _currentIndex = -1;
   var _currentComicInfo = {};
+  var _currentComicInfoXml = '';
 
   // Page viewer state
   var _viewerPath = null;
@@ -467,8 +468,36 @@
     container.innerHTML = html;
   }
 
+  function _getMinimalComicInfoXmlTemplate() {
+    return '<?xml version="1.0" encoding="utf-8"?>\n<ComicInfo></ComicInfo>';
+  }
+
+  function _setEditTab(tabName) {
+    var fieldsTab = document.getElementById('editComicInfoFieldsTab');
+    var rawTab = document.getElementById('editComicInfoRawTab');
+    var fieldsPane = document.getElementById('editComicInfoFieldsPane');
+    var rawPane = document.getElementById('editComicInfoRawPane');
+    if (!fieldsTab || !rawTab || !fieldsPane || !rawPane) return;
+
+    var isRaw = tabName === 'raw';
+    fieldsTab.classList.toggle('active', !isRaw);
+    rawTab.classList.toggle('active', isRaw);
+    fieldsPane.classList.toggle('d-none', isRaw);
+    rawPane.classList.toggle('d-none', !isRaw);
+  }
+
+  function _getActiveEditTab() {
+    var rawTab = document.getElementById('editComicInfoRawTab');
+    return rawTab && rawTab.classList.contains('active') ? 'raw' : 'fields';
+  }
+
   function _openEditComicInfoModal() {
     _renderEditorForm(_currentComicInfo || {});
+    var rawXmlField = document.getElementById('editComicInfoRawXml');
+    if (rawXmlField) {
+      rawXmlField.value = _currentComicInfoXml || _getMinimalComicInfoXmlTemplate();
+    }
+    _setEditTab('fields');
     var modal = bootstrap.Modal.getOrCreateInstance(document.getElementById('editComicInfoModal'));
     modal.show();
   }
@@ -481,9 +510,64 @@
     return payload;
   }
 
+  function _saveRawComicInfoXml() {
+    var rawXmlField = document.getElementById('editComicInfoRawXml');
+    var comicinfoXmlText = rawXmlField ? rawXmlField.value : '';
+
+    if (!comicinfoXmlText || !comicinfoXmlText.trim()) {
+      CLU.showToast('Validation Error', 'Please enter ComicInfo.xml content.', 'warning');
+      return;
+    }
+
+    fetch('/cbz-save-comicinfo-xml', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        path: _currentFilePath,
+        comicinfo_xml: comicinfoXmlText
+      })
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (result) {
+        if (!result.success) {
+          CLU.showError(result.error || 'Failed to save ComicInfo.xml');
+          return;
+        }
+
+        _currentComicInfo = result.comicinfo || {};
+        _currentComicInfoXml = result.comicinfo_xml_text || comicinfoXmlText;
+        CLU.showSuccess('ComicInfo.xml saved successfully.');
+
+        var editModal = bootstrap.Modal.getInstance(document.getElementById('editComicInfoModal'));
+        if (editModal) editModal.hide();
+
+        var fn = _currentFilePath.split('/').pop();
+        var opts = {};
+        if (_currentDirectory && _currentFileList.length > 0) {
+          opts.directoryPath = _currentDirectory;
+          opts.fileList = _currentFileList;
+        }
+        CLU.showCBZInfo(_currentFilePath, fn, opts);
+
+        var contract = _getContract();
+        if (typeof contract.onEditComplete === 'function') {
+          contract.onEditComplete(_currentFilePath, _currentComicInfo);
+        }
+      })
+      .catch(function (err) {
+        console.error('Error saving raw ComicInfo.xml:', err);
+        CLU.showError('An error occurred while saving ComicInfo.xml.');
+      });
+  }
+
   function _saveComicInfoEdits() {
     if (!_currentFilePath) {
       CLU.showError('No CBZ file is currently selected.');
+      return;
+    }
+
+    if (_getActiveEditTab() === 'raw') {
+      _saveRawComicInfoXml();
       return;
     }
 
@@ -513,6 +597,7 @@
         }
 
         _currentComicInfo = result.comicinfo || {};
+        _currentComicInfoXml = result.comicinfo_xml_text || _currentComicInfoXml;
         CLU.showSuccess('ComicInfo.xml saved successfully.');
 
         var editModal = bootstrap.Modal.getInstance(document.getElementById('editComicInfoModal'));
@@ -583,6 +668,7 @@
 
     _currentFilePath = filePath;
     _currentComicInfo = {};
+    _currentComicInfoXml = '';
 
     // Navigation context
     if (options.directoryPath && options.fileList && options.fileList.length > 0) {
@@ -613,6 +699,7 @@
       .then(function (res) { return res.json(); })
       .then(function (data) {
         _currentComicInfo = data.comicinfo || {};
+        _currentComicInfoXml = data.comicinfo_xml_text || _getMinimalComicInfoXmlTemplate();
         var html = '<div class="row"><div class="col-md-7">';
 
         if (data.comicinfo) {
@@ -781,6 +868,12 @@
     if (saveComicInfoBtn) {
       saveComicInfoBtn.addEventListener('click', _saveComicInfoEdits);
     }
+
+    document.querySelectorAll('#editComicInfoTabs .nav-link').forEach(function (tabBtn) {
+      tabBtn.addEventListener('click', function () {
+        _setEditTab(tabBtn.dataset.tab || 'fields');
+      });
+    });
   });
 
 })();
