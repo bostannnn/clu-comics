@@ -37,6 +37,43 @@ let filterHistory = { source: {}, destination: {} };
 let sourceScrollHistory = {};  // { path: scrollTop }
 let destinationScrollHistory = {};
 
+function bindFloatingDropdown(dropdownContainer, dropdownBtn, dropdownMenu) {
+  if (!dropdownContainer || !dropdownBtn || !dropdownMenu || dropdownMenu.dataset.cluFloatingBound === '1') {
+    return;
+  }
+
+  dropdownMenu.dataset.cluFloatingBound = '1';
+
+  let originalParent = dropdownContainer;
+  let originalNextSibling = dropdownMenu.nextSibling;
+
+  function moveMenuToBody() {
+    originalParent = dropdownContainer;
+    originalNextSibling = dropdownMenu.nextSibling;
+    document.body.appendChild(dropdownMenu);
+  }
+
+  function restoreMenu() {
+    if (dropdownMenu.parentNode === originalParent) {
+      return;
+    }
+
+    if (originalNextSibling && originalNextSibling.parentNode === originalParent) {
+      originalParent.insertBefore(dropdownMenu, originalNextSibling);
+    } else {
+      originalParent.appendChild(dropdownMenu);
+    }
+  }
+
+  dropdownBtn.addEventListener('show.bs.dropdown', function () {
+    moveMenuToBody();
+  });
+
+  dropdownBtn.addEventListener('hidden.bs.dropdown', function () {
+    restoreMenu();
+  });
+}
+
 // Global variable to track GCD MySQL availability (legacy - kept for backwards compatibility)
 let gcdMysqlAvailable = false;
 
@@ -655,6 +692,7 @@ function createListItem(itemName, fullPath, type, panel, isDraggable) {
 
       dropdownContainer.appendChild(dropdownBtn);
       dropdownContainer.appendChild(dropdownMenu);
+      bindFloatingDropdown(dropdownContainer, dropdownBtn, dropdownMenu);
       // Store for later - will be appended after trash button
       li.folderDropdown = dropdownContainer;
     }
@@ -775,6 +813,7 @@ function createListItem(itemName, fullPath, type, panel, isDraggable) {
 
       dropdownContainer.appendChild(dropdownBtn);
       dropdownContainer.appendChild(dropdownMenu);
+      bindFloatingDropdown(dropdownContainer, dropdownBtn, dropdownMenu);
       iconContainer.appendChild(dropdownContainer);
     }
   }
@@ -1586,6 +1625,7 @@ function loadRecentFiles(panel) {
 
           dropdownContainer.appendChild(dropdownBtn);
           dropdownContainer.appendChild(dropdownMenu);
+          bindFloatingDropdown(dropdownContainer, dropdownBtn, dropdownMenu);
           iconContainer.appendChild(dropdownContainer);
 
           // Append containers to fileItem
@@ -1834,6 +1874,7 @@ function loadTrash(panel) {
 
         dropdownContainer.appendChild(dropdownBtn);
         dropdownContainer.appendChild(dropdownMenu);
+        bindFloatingDropdown(dropdownContainer, dropdownBtn, dropdownMenu);
         iconContainer.appendChild(dropdownContainer);
 
         fileItem.appendChild(leftContainer);
