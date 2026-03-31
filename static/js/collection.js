@@ -2212,7 +2212,7 @@ function renderPagination(totalItems) {
     // Page Info (e.g., "Page 1 of 5")
     const infoLi = document.createElement('li');
     infoLi.className = 'page-item disabled';
-    infoLi.innerHTML = `<span class="page-link text-dark">Page ${currentPage} of ${totalPages}</span>`;
+    infoLi.innerHTML = `<span class="page-link">Page ${currentPage} of ${totalPages}</span>`;
     paginationList.appendChild(infoLi);
 
     // Next Button
@@ -3314,8 +3314,8 @@ async function loadFavoritePublishers() {
                         </button>
                     </div>
                     <div class="dashboard-card-body">
-                        <div class="text-truncate text-dark item-name" title="${pub.name}">${pub.name}</div>
-                        <small class="text-muted item-meta${pub.folderCount === null ? ' metadata-loading' : ''}">${pub.folderCount === null ? 'Loading...' :
+                        <div class="text-truncate item-name" title="${pub.name}">${pub.name}</div>
+                        <small class="item-meta${pub.folderCount === null ? ' metadata-loading' : ''}">${pub.folderCount === null ? 'Loading...' :
                     [
                         pub.folderCount > 0 ? `${pub.folderCount} folder${pub.folderCount !== 1 ? 's' : ''}` : '',
                         pub.fileCount > 0 ? `${pub.fileCount} file${pub.fileCount !== 1 ? 's' : ''}` : ''
@@ -3514,8 +3514,8 @@ async function loadWantToRead() {
                         </button>
                     </div>
                     <div class="dashboard-card-body">
-                        <div class="text-truncate text-dark item-name" title="${name}">${name}</div>
-                        <small class="text-muted">${item.type === 'folder' ? 'Folder' : 'Comic'}</small>
+                        <div class="text-truncate item-name" title="${name}">${name}</div>
+                        <small class="item-meta">${item.type === 'folder' ? 'Folder' : 'Comic'}</small>
                     </div>
                 </div>
             </div>
@@ -3580,8 +3580,8 @@ async function loadRecentlyAddedSwiper() {
                         <img src="${thumbnailUrl}" alt="${name}" class="thumbnail">
                     </div>
                     <div class="dashboard-card-body">
-                        <div class="text-truncate text-dark item-name" title="${name}">${name}</div>
-                        <small class="text-muted">${timeAgo}</small>
+                        <div class="text-truncate item-name" title="${name}">${name}</div>
+                        <small class="item-meta">${timeAgo}</small>
                     </div>
                 </div>
             </div>
@@ -3651,8 +3651,8 @@ async function loadContinueReadingSwiper() {
                         </button>
                     </div>
                     <div class="dashboard-card-body">
-                        <div class="text-truncate text-dark item-name" title="${name}">${name}</div>
-                        <small class="text-muted">${pageInfo}<br/>${timeAgo}</small>
+                        <div class="text-truncate item-name" title="${name}">${name}</div>
+                        <small class="item-meta">${pageInfo}<br/>${timeAgo}</small>
                     </div>
                 </div>
             </div>
@@ -3713,8 +3713,8 @@ async function loadOnTheStackSwiper() {
                         <img src="${thumbnailUrl}" alt="${item.file_name}" class="thumbnail">
                     </div>
                     <div class="dashboard-card-body">
-                        <div class="text-truncate text-dark item-name" title="${item.file_name}">${item.file_name}</div>
-                        <small class="text-muted">${item.series_name} #${item.issue_number}<br/>${timeAgo}</small>
+                        <div class="text-truncate item-name" title="${item.file_name}">${item.file_name}</div>
+                        <small class="item-meta">${item.series_name} #${item.issue_number}<br/>${timeAgo}</small>
                     </div>
                 </div>
             </div>`;
