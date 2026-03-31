@@ -33,6 +33,7 @@
   var _currentIndex = -1;
   var _currentComicInfo = {};
   var _currentComicInfoXml = '';
+  var _isSavingComicInfo = false;
 
   // Page viewer state
   var _viewerPath = null;
@@ -510,7 +511,36 @@
     return payload;
   }
 
+  function _setComicInfoSavingState(isSaving, label) {
+    _isSavingComicInfo = isSaving;
+
+    var modal = document.getElementById('editComicInfoModal');
+    var saveBtn = document.getElementById('saveComicInfoBtn');
+    if (saveBtn) {
+      if (!saveBtn.dataset.defaultLabel) {
+        saveBtn.dataset.defaultLabel = saveBtn.textContent.trim() || 'Save ComicInfo';
+      }
+      saveBtn.disabled = isSaving;
+      saveBtn.innerHTML = isSaving
+        ? '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>' + (label || 'Saving...')
+        : saveBtn.dataset.defaultLabel;
+    }
+
+    if (modal) {
+      modal.querySelectorAll('[data-bs-dismiss="modal"], .btn-close, #editComicInfoTabs .nav-link').forEach(function (el) {
+        el.disabled = isSaving;
+      });
+      modal.querySelectorAll('.comicinfo-edit-field, #editComicInfoRawXml').forEach(function (el) {
+        el.disabled = isSaving;
+      });
+    }
+  }
+
   function _saveRawComicInfoXml() {
+    if (_isSavingComicInfo) {
+      return;
+    }
+
     var rawXmlField = document.getElementById('editComicInfoRawXml');
     var comicinfoXmlText = rawXmlField ? rawXmlField.value : '';
 
@@ -518,6 +548,8 @@
       CLU.showToast('Validation Error', 'Please enter ComicInfo.xml content.', 'warning');
       return;
     }
+
+    _setComicInfoSavingState(true, 'Saving Raw XML...');
 
     fetch('/cbz-save-comicinfo-xml', {
       method: 'POST',
@@ -557,10 +589,17 @@
       .catch(function (err) {
         console.error('Error saving raw ComicInfo.xml:', err);
         CLU.showError('An error occurred while saving ComicInfo.xml.');
+      })
+      .finally(function () {
+        _setComicInfoSavingState(false);
       });
   }
 
   function _saveComicInfoEdits() {
+    if (_isSavingComicInfo) {
+      return;
+    }
+
     if (!_currentFilePath) {
       CLU.showError('No CBZ file is currently selected.');
       return;
@@ -580,6 +619,8 @@
       CLU.showToast('Validation Error', 'Please fill at least one ComicInfo field.', 'warning');
       return;
     }
+
+    _setComicInfoSavingState(true, 'Saving ComicInfo...');
 
     fetch('/cbz-save-comicinfo', {
       method: 'POST',
@@ -619,6 +660,9 @@
       .catch(function (err) {
         console.error('Error saving ComicInfo.xml:', err);
         CLU.showError('An error occurred while saving ComicInfo.xml.');
+      })
+      .finally(function () {
+        _setComicInfoSavingState(false);
       });
   }
 
@@ -867,6 +911,13 @@
     var saveComicInfoBtn = document.getElementById('saveComicInfoBtn');
     if (saveComicInfoBtn) {
       saveComicInfoBtn.addEventListener('click', _saveComicInfoEdits);
+    }
+
+    var editComicInfoModal = document.getElementById('editComicInfoModal');
+    if (editComicInfoModal) {
+      editComicInfoModal.addEventListener('hidden.bs.modal', function () {
+        _setComicInfoSavingState(false);
+      });
     }
 
     document.querySelectorAll('#editComicInfoTabs .nav-link').forEach(function (tabBtn) {

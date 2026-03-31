@@ -16,12 +16,14 @@ import io
 import json
 import time
 import shutil
+import tempfile
 import zipfile
 import threading
 import traceback
 import xml.etree.ElementTree as ET
 import mysql.connector
 from datetime import datetime
+from contextlib import contextmanager
 from flask import (Blueprint, request, jsonify, Response,
                    stream_with_context, current_app)
 import core.app_state as app_state
@@ -32,6 +34,9 @@ from models import gcd, metron, comicvine
 from models.gcd import STOPWORDS
 
 metadata_bp = Blueprint('metadata', __name__)
+
+_comicinfo_write_locks = {}
+_comicinfo_write_locks_guard = threading.Lock()
 
 
 # =============================================================================
@@ -45,6 +50,38 @@ def _as_text(val):
         # ComicInfo expects comma-separated for multi-credits
         return ", ".join(str(x) for x in val if x is not None and str(x).strip())
     return str(val)
+
+
+class ComicInfoSaveInProgressError(RuntimeError):
+    """Raised when another ComicInfo write is already in progress for a file."""
+
+
+class CorruptedArchiveError(RuntimeError):
+    """Raised when a CBZ cannot be safely rewritten due to archive corruption."""
+
+
+def _get_comicinfo_write_lock(file_path):
+    normalized_path = os.path.abspath(file_path)
+    with _comicinfo_write_locks_guard:
+        lock = _comicinfo_write_locks.get(normalized_path)
+        if lock is None:
+            lock = threading.RLock()
+            _comicinfo_write_locks[normalized_path] = lock
+        return lock
+
+
+@contextmanager
+def _acquire_comicinfo_write_lock(file_path):
+    lock = _get_comicinfo_write_lock(file_path)
+    acquired = lock.acquire(blocking=False)
+    if not acquired:
+        raise ComicInfoSaveInProgressError(
+            "A ComicInfo save is already in progress for this file. Please wait for it to finish."
+        )
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 def _resolve_comicvine_volume_data(
@@ -241,13 +278,14 @@ def generate_comicinfo_xml(issue_data, series_data=None):
     return buf.getvalue()  # BYTES
 
 
-def add_comicinfo_to_cbz(file_path, comicinfo_xml_bytes):
+def add_comicinfo_to_cbz(file_path, comicinfo_xml_bytes, fail_on_corruption=False):
     """
     Writes ComicInfo.xml at the ROOT of the CBZ.
     - Removes any existing ComicInfo.xml (case-insensitive)
     - Uses UTF-8 bytes for content
     - Rebuilds the entire ZIP by extracting and recompressing (matches single_file.py approach)
     - Handles RAR files incorrectly named as CBZ
+    - Optionally fails early on corrupted members for manual edit flows
     """
     from cbz_ops.single_file import convert_single_rar_file
 
@@ -259,134 +297,138 @@ def add_comicinfo_to_cbz(file_path, comicinfo_xml_bytes):
     file_dir = os.path.dirname(file_path) or '.'
     base_name = os.path.splitext(os.path.basename(file_path))[0]
 
-    # Create temporary extraction directory
-    temp_extract_dir = os.path.join(file_dir, f".tmp_extract_{base_name}_{os.getpid()}")
-    temp_zip_path = os.path.join(file_dir, f".tmp_{base_name}_{os.getpid()}.cbz")
+    with _acquire_comicinfo_write_lock(file_path):
+        temp_extract_dir = None
+        temp_zip_path = None
 
-    try:
-        # Step 1: Extract all files to temporary directory
-        os.makedirs(temp_extract_dir, exist_ok=True)
-        corrupted_files = []
+        try:
+            temp_extract_dir = tempfile.mkdtemp(prefix=f".tmp_extract_{base_name}_", dir=file_dir)
+            fd, temp_zip_path = tempfile.mkstemp(prefix=f".tmp_{base_name}_", suffix=".cbz", dir=file_dir)
+            os.close(fd)
 
-        with zipfile.ZipFile(file_path, 'r') as src:
-            for filename in src.namelist():
-                # Skip any existing ComicInfo.xml
-                if os.path.basename(filename).lower() == "comicinfo.xml":
-                    continue
-                try:
-                    src.extract(filename, temp_extract_dir)
-                except zipfile.BadZipFile as crc_error:
-                    # Handle corrupted files with bad CRC
-                    app_logger.warning(f"Corrupted file in archive (bad CRC): {filename} - attempting raw copy")
-                    corrupted_files.append(filename)
-                    try:
-                        # Try to copy the file data without CRC verification
-                        # Get the ZipInfo object
-                        info = src.getinfo(filename)
-                        # Create the target path
-                        target_path = os.path.join(temp_extract_dir, filename)
-                        os.makedirs(os.path.dirname(target_path), exist_ok=True)
-                        # Read raw data (may be corrupted but we'll preserve what we can)
-                        with src.open(filename) as zf:
-                            # Read in chunks to handle large files
-                            with open(target_path, 'wb') as out:
-                                while True:
-                                    try:
-                                        chunk = zf.read(8192)
-                                        if not chunk:
-                                            break
-                                        out.write(chunk)
-                                    except zipfile.BadZipFile:
-                                        # Write what we have and stop
-                                        app_logger.warning(f"Partial extraction for corrupted file: {filename}")
-                                        break
-                    except Exception as copy_error:
-                        app_logger.error(f"Failed to copy corrupted file {filename}: {copy_error}")
-                        # Skip this file entirely
+            # Step 1: Extract all files to temporary directory
+            corrupted_files = []
+
+            with zipfile.ZipFile(file_path, 'r') as src:
+                for filename in src.namelist():
+                    # Skip any existing ComicInfo.xml
+                    if os.path.basename(filename).lower() == "comicinfo.xml":
                         continue
+                    try:
+                        src.extract(filename, temp_extract_dir)
+                    except zipfile.BadZipFile:
+                        if fail_on_corruption:
+                            corrupted_files.append(filename)
+                            continue
 
-        if corrupted_files:
-            app_logger.warning(f"Archive had {len(corrupted_files)} corrupted file(s), processed with best effort")
+                        app_logger.warning(f"Corrupted file in archive (bad CRC): {filename} - attempting raw copy")
+                        corrupted_files.append(filename)
+                        try:
+                            target_path = os.path.join(temp_extract_dir, filename)
+                            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                            with src.open(filename) as zf:
+                                with open(target_path, 'wb') as out:
+                                    while True:
+                                        try:
+                                            chunk = zf.read(8192)
+                                            if not chunk:
+                                                break
+                                            out.write(chunk)
+                                        except zipfile.BadZipFile:
+                                            app_logger.warning(f"Partial extraction for corrupted file: {filename}")
+                                            break
+                        except Exception as copy_error:
+                            app_logger.error(f"Failed to copy corrupted file {filename}: {copy_error}")
+                            continue
 
-        # Step 2: Write ComicInfo.xml to temp directory
-        comicinfo_path = os.path.join(temp_extract_dir, "ComicInfo.xml")
-        with open(comicinfo_path, 'wb') as f:
-            f.write(comicinfo_xml_bytes)
+            if corrupted_files and fail_on_corruption:
+                preview = ", ".join(corrupted_files[:3])
+                if len(corrupted_files) > 3:
+                    preview += ", ..."
+                app_logger.warning(
+                    "Refusing ComicInfo save for corrupted archive %s (%d bad entries: %s)",
+                    file_path,
+                    len(corrupted_files),
+                    preview,
+                )
+                raise CorruptedArchiveError(
+                    f"Archive contains {len(corrupted_files)} corrupted file(s) and cannot be safely updated. "
+                    "Restore or rebuild the CBZ first."
+                )
 
-        # Step 3: Recompress everything into new CBZ (sorted for consistency)
-        with zipfile.ZipFile(temp_zip_path, 'w', zipfile.ZIP_DEFLATED) as dst:
-            # Get all files and sort them
-            all_files = []
-            for root_dir, dirs, files in os.walk(temp_extract_dir):
-                for file in files:
-                    file_path_full = os.path.join(root_dir, file)
-                    arcname = os.path.relpath(file_path_full, temp_extract_dir)
-                    all_files.append((file_path_full, arcname))
+            if corrupted_files and not fail_on_corruption:
+                app_logger.warning(f"Archive had {len(corrupted_files)} corrupted file(s), processed with best effort")
 
-            # Sort by arcname for consistent ordering
-            all_files.sort(key=lambda x: x[1])
+            # Step 2: Write ComicInfo.xml to temp directory
+            comicinfo_path = os.path.join(temp_extract_dir, "ComicInfo.xml")
+            with open(comicinfo_path, 'wb') as f:
+                f.write(comicinfo_xml_bytes)
 
-            # Write all files
-            for file_path_full, arcname in all_files:
-                dst.write(file_path_full, arcname)
+            # Step 3: Recompress everything into new CBZ (sorted for consistency)
+            with zipfile.ZipFile(temp_zip_path, 'w', zipfile.ZIP_DEFLATED) as dst:
+                all_files = []
+                for root_dir, dirs, files in os.walk(temp_extract_dir):
+                    for file in files:
+                        file_path_full = os.path.join(root_dir, file)
+                        arcname = os.path.relpath(file_path_full, temp_extract_dir)
+                        all_files.append((file_path_full, arcname))
 
-        # Step 4: Replace original file
-        os.replace(temp_zip_path, file_path)
+                all_files.sort(key=lambda x: x[1])
 
-    except zipfile.BadZipFile as e:
-        # Handle the case where a .cbz file is actually a RAR file
-        if "File is not a zip file" in str(e) or "BadZipFile" in str(e):
-            app_logger.warning(f"Detected that {os.path.basename(file_path)} is not a valid ZIP file. Attempting to convert from RAR...")
+                for file_path_full, arcname in all_files:
+                    dst.write(file_path_full, arcname)
 
-            # Clean up any partial extraction
-            if os.path.exists(temp_extract_dir):
+            # Step 4: Replace original file
+            os.replace(temp_zip_path, file_path)
+
+        except zipfile.BadZipFile as e:
+            # Handle the case where a .cbz file is actually a RAR file
+            if "File is not a zip file" in str(e) or "BadZipFile" in str(e):
+                app_logger.warning(
+                    f"Detected that {os.path.basename(file_path)} is not a valid ZIP file. Attempting to convert from RAR..."
+                )
+
+                if temp_extract_dir and os.path.exists(temp_extract_dir):
+                    shutil.rmtree(temp_extract_dir, ignore_errors=True)
+                if temp_zip_path and os.path.exists(temp_zip_path):
+                    try:
+                        os.unlink(temp_zip_path)
+                    except OSError:
+                        pass
+
+                rar_file = os.path.join(file_dir, base_name + ".rar")
+                shutil.move(file_path, rar_file)
+
+                app_logger.info(f"Converting {base_name}.rar to CBZ format...")
+                temp_conversion_dir = tempfile.mkdtemp(prefix=f"temp_{base_name}_", dir=file_dir)
+                success = convert_single_rar_file(rar_file, file_path, temp_conversion_dir)
+
+                if success:
+                    if os.path.exists(rar_file):
+                        os.remove(rar_file)
+                    if os.path.exists(temp_conversion_dir):
+                        shutil.rmtree(temp_conversion_dir, ignore_errors=True)
+
+                    app_logger.info(f"Successfully converted RAR to CBZ. Now adding ComicInfo.xml...")
+                    add_comicinfo_to_cbz(file_path, comicinfo_xml_bytes, fail_on_corruption=fail_on_corruption)
+                else:
+                    app_logger.error(f"Failed to convert {base_name}.rar to CBZ")
+                    if os.path.exists(rar_file):
+                        shutil.move(rar_file, file_path)
+                    raise Exception("File is actually a RAR archive and conversion failed")
+            else:
+                raise CorruptedArchiveError(
+                    "Archive is corrupted and cannot be safely updated. Restore or rebuild the CBZ first."
+                ) from e
+
+        finally:
+            if temp_extract_dir and os.path.exists(temp_extract_dir):
                 shutil.rmtree(temp_extract_dir, ignore_errors=True)
-            if os.path.exists(temp_zip_path):
+            if temp_zip_path and os.path.exists(temp_zip_path):
                 try:
                     os.unlink(temp_zip_path)
-                except:
+                except OSError:
                     pass
-
-            # Rename to .rar for conversion
-            rar_file = os.path.join(file_dir, base_name + ".rar")
-            shutil.move(file_path, rar_file)
-
-            # Convert RAR to CBZ
-            app_logger.info(f"Converting {base_name}.rar to CBZ format...")
-            temp_conversion_dir = os.path.join(file_dir, f"temp_{base_name}")
-            success = convert_single_rar_file(rar_file, file_path, temp_conversion_dir)
-
-            if success:
-                # Delete the RAR file
-                if os.path.exists(rar_file):
-                    os.remove(rar_file)
-                # Clean up temp directory
-                if os.path.exists(temp_conversion_dir):
-                    shutil.rmtree(temp_conversion_dir, ignore_errors=True)
-
-                app_logger.info(f"Successfully converted RAR to CBZ. Now adding ComicInfo.xml...")
-
-                # Now recursively call this function to add ComicInfo.xml to the newly converted CBZ
-                add_comicinfo_to_cbz(file_path, comicinfo_xml_bytes)
-            else:
-                app_logger.error(f"Failed to convert {base_name}.rar to CBZ")
-                # Move the RAR file back to original CBZ name
-                if os.path.exists(rar_file):
-                    shutil.move(rar_file, file_path)
-                raise Exception(f"File is actually a RAR archive and conversion failed")
-        else:
-            raise
-
-    finally:
-        # Clean up temp directory
-        if os.path.exists(temp_extract_dir):
-            shutil.rmtree(temp_extract_dir, ignore_errors=True)
-        # Clean up temp zip if it still exists
-        if os.path.exists(temp_zip_path):
-            try:
-                os.unlink(temp_zip_path)
-            except:
-                pass
 
 
 # =============================================================================
@@ -504,7 +546,7 @@ def cbz_save_comicinfo():
             return jsonify({"success": False, "error": "At least one ComicInfo field is required"}), 400
 
         xml_bytes = generate_comicinfo_xml_from_dict(merged_comicinfo)
-        add_comicinfo_to_cbz(file_path, xml_bytes)
+        add_comicinfo_to_cbz(file_path, xml_bytes, fail_on_corruption=True)
         set_has_comicinfo(file_path)
         update_file_index_from_comicinfo(file_path, merged_comicinfo)
 
@@ -515,6 +557,11 @@ def cbz_save_comicinfo():
             "comicinfo_xml_text": xml_bytes.decode('utf-8', errors='replace'),
         })
 
+    except ComicInfoSaveInProgressError as e:
+        return jsonify({"success": False, "error": str(e)}), 409
+    except CorruptedArchiveError as e:
+        app_logger.warning(f"Refused ComicInfo.xml save for {file_path}: {e}")
+        return jsonify({"success": False, "error": str(e)}), 409
     except Exception as e:
         app_logger.error(f"Error saving ComicInfo.xml for {file_path}: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
@@ -554,7 +601,7 @@ def cbz_save_comicinfo_xml():
             tag_name = child.tag.split('}')[-1] if '}' in child.tag else child.tag
             parsed_comicinfo[tag_name] = child.text if child.text else ""
 
-        add_comicinfo_to_cbz(file_path, xml_bytes)
+        add_comicinfo_to_cbz(file_path, xml_bytes, fail_on_corruption=True)
         set_has_comicinfo(file_path)
         update_file_index_from_comicinfo(file_path, parsed_comicinfo)
 
@@ -567,6 +614,11 @@ def cbz_save_comicinfo_xml():
 
     except ET.ParseError as e:
         return jsonify({"success": False, "error": f"Invalid XML: {e}"}), 400
+    except ComicInfoSaveInProgressError as e:
+        return jsonify({"success": False, "error": str(e)}), 409
+    except CorruptedArchiveError as e:
+        app_logger.warning(f"Refused raw ComicInfo.xml save for {file_path}: {e}")
+        return jsonify({"success": False, "error": str(e)}), 409
     except Exception as e:
         app_logger.error(f"Error saving raw ComicInfo.xml for {file_path}: {e}")
         return jsonify({"success": False, "error": str(e)}), 500

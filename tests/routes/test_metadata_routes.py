@@ -230,6 +230,35 @@ class TestSaveComicInfoEndpoint:
     @patch("routes.metadata.is_valid_library_path", return_value=True)
     @patch("core.database.update_file_index_from_comicinfo")
     @patch("core.database.set_has_comicinfo")
+    @patch("routes.metadata.add_comicinfo_to_cbz")
+    def test_manual_save_uses_strict_corruption_mode(
+        self,
+        mock_add,
+        mock_set,
+        mock_update_index,
+        mock_valid,
+        client,
+        tmp_path,
+    ):
+        cbz_path = str(tmp_path / "data" / "strict.cbz")
+        os.makedirs(str(tmp_path / "data"), exist_ok=True)
+        _make_cbz(cbz_path, with_comicinfo=False)
+
+        resp = client.post('/cbz-save-comicinfo', json={
+            "path": cbz_path,
+            "comicinfo": {
+                "Series": "Batman",
+                "Number": "1",
+            }
+        })
+
+        assert resp.status_code == 200
+        mock_add.assert_called_once()
+        assert mock_add.call_args.kwargs["fail_on_corruption"] is True
+
+    @patch("routes.metadata.is_valid_library_path", return_value=True)
+    @patch("core.database.update_file_index_from_comicinfo")
+    @patch("core.database.set_has_comicinfo")
     def test_creates_comicinfo_when_missing(self, mock_set, mock_update_index, mock_valid, client, tmp_path):
         cbz_path = str(tmp_path / "data" / "new.cbz")
         os.makedirs(str(tmp_path / "data"), exist_ok=True)
@@ -304,8 +333,71 @@ class TestSaveComicInfoEndpoint:
         data = resp.get_json()
         assert data["success"] is False
 
+    @patch("routes.metadata.is_valid_library_path", return_value=True)
+    @patch("core.database.update_file_index_from_comicinfo")
+    @patch("core.database.set_has_comicinfo")
+    @patch("routes.metadata.add_comicinfo_to_cbz")
+    def test_rejects_corrupted_archive(
+        self,
+        mock_add,
+        mock_set,
+        mock_update_index,
+        mock_valid,
+        client,
+        tmp_path,
+    ):
+        from routes.metadata import CorruptedArchiveError
+
+        cbz_path = str(tmp_path / "data" / "corrupt.cbz")
+        os.makedirs(str(tmp_path / "data"), exist_ok=True)
+        _make_cbz(cbz_path, with_comicinfo=False)
+        mock_add.side_effect = CorruptedArchiveError(
+            "Archive contains 2 corrupted file(s) and cannot be safely updated. Restore or rebuild the CBZ first."
+        )
+
+        resp = client.post('/cbz-save-comicinfo', json={
+            "path": cbz_path,
+            "comicinfo": {
+                "Series": "Batman",
+                "Number": "1",
+            }
+        })
+
+        assert resp.status_code == 409
+        data = resp.get_json()
+        assert data["success"] is False
+        assert "cannot be safely updated" in data["error"]
+        mock_set.assert_not_called()
+        mock_update_index.assert_not_called()
+
 
 class TestSaveComicInfoRawXmlEndpoint:
+
+    @patch("routes.metadata.is_valid_library_path", return_value=True)
+    @patch("core.database.update_file_index_from_comicinfo")
+    @patch("core.database.set_has_comicinfo")
+    @patch("routes.metadata.add_comicinfo_to_cbz")
+    def test_raw_save_uses_strict_corruption_mode(
+        self,
+        mock_add,
+        mock_set,
+        mock_update_index,
+        mock_valid,
+        client,
+        tmp_path,
+    ):
+        cbz_path = str(tmp_path / "data" / "raw-strict.cbz")
+        os.makedirs(str(tmp_path / "data"), exist_ok=True)
+        _make_cbz(cbz_path, with_comicinfo=False)
+
+        resp = client.post('/cbz-save-comicinfo-xml', json={
+            "path": cbz_path,
+            "comicinfo_xml": "<ComicInfo><Series>Sandman</Series></ComicInfo>",
+        })
+
+        assert resp.status_code == 200
+        mock_add.assert_called_once()
+        assert mock_add.call_args.kwargs["fail_on_corruption"] is True
 
     @patch("routes.metadata.is_valid_library_path", return_value=True)
     @patch("core.database.update_file_index_from_comicinfo")
@@ -369,6 +461,40 @@ class TestSaveComicInfoRawXmlEndpoint:
         data = resp.get_json()
         assert data["success"] is False
         assert "Root element must be ComicInfo" in data["error"]
+
+    @patch("routes.metadata.is_valid_library_path", return_value=True)
+    @patch("core.database.update_file_index_from_comicinfo")
+    @patch("core.database.set_has_comicinfo")
+    @patch("routes.metadata.add_comicinfo_to_cbz")
+    def test_rejects_save_when_another_write_is_in_progress(
+        self,
+        mock_add,
+        mock_set,
+        mock_update_index,
+        mock_valid,
+        client,
+        tmp_path,
+    ):
+        from routes.metadata import ComicInfoSaveInProgressError
+
+        cbz_path = str(tmp_path / "data" / "busy.cbz")
+        os.makedirs(str(tmp_path / "data"), exist_ok=True)
+        _make_cbz(cbz_path, with_comicinfo=False)
+        mock_add.side_effect = ComicInfoSaveInProgressError(
+            "A ComicInfo save is already in progress for this file. Please wait for it to finish."
+        )
+
+        resp = client.post('/cbz-save-comicinfo-xml', json={
+            "path": cbz_path,
+            "comicinfo_xml": "<ComicInfo><Series>Busy</Series></ComicInfo>",
+        })
+
+        assert resp.status_code == 409
+        data = resp.get_json()
+        assert data["success"] is False
+        assert "already in progress" in data["error"]
+        mock_set.assert_not_called()
+        mock_update_index.assert_not_called()
 
 
 class TestCbzMetadataRawXmlText:
