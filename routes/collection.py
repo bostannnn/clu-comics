@@ -22,7 +22,12 @@ from flask import (Blueprint, request, jsonify, render_template, redirect,
 from PIL import Image
 from core.app_logging import app_logger
 from core.config import config
-from helpers.library import get_library_roots, get_default_library, is_valid_library_path
+from helpers.library import (
+    get_library_roots,
+    get_default_library,
+    is_valid_library_path,
+    is_path_in_any_root,
+)
 from core.database import (
     get_directory_children, get_path_counts_batch, get_recent_files,
     invalidate_browse_cache, add_file_index_entry, delete_file_index_entry,
@@ -711,9 +716,7 @@ def list_directories():
         current_path = default_lib['path'] if default_lib else DATA_DIR
 
     target_dir = current_app.config.get('TARGET', '/downloads/processed')
-    normalized_path = os.path.normpath(current_path)
-    normalized_target = os.path.normpath(target_dir)
-    is_in_target = normalized_path == normalized_target or normalized_path.startswith(normalized_target + os.sep)
+    is_in_target = is_path_in_any_root(current_path, [target_dir])
 
     if not is_valid_library_path(current_path) and not is_in_target:
         return jsonify({"error": "Access denied - path not in any library"}), 403
@@ -723,7 +726,7 @@ def list_directories():
 
     library_roots = get_library_roots()
     all_roots = [os.path.normpath(r) for r in library_roots]
-    all_roots.append(normalized_target)
+    all_roots.append(os.path.normpath(target_dir))
 
     def get_parent_dir(path):
         normalized = os.path.normpath(path)

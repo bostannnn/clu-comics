@@ -36,27 +36,27 @@ class TestGetTimestamp:
 
 class TestIsValidLibraryPath:
 
-    @patch("routes.opds.get_library_roots", return_value=["/data"])
+    @patch("helpers.library.get_library_roots", return_value=["/data"])
     def test_valid_path(self, mock_roots):
         from routes.opds import is_valid_library_path
         assert is_valid_library_path("/data/Comics/Batman") is True
 
-    @patch("routes.opds.get_library_roots", return_value=["/data"])
+    @patch("helpers.library.get_library_roots", return_value=["/data"])
     def test_exact_root(self, mock_roots):
         from routes.opds import is_valid_library_path
         assert is_valid_library_path("/data") is True
 
-    @patch("routes.opds.get_library_roots", return_value=["/data"])
+    @patch("helpers.library.get_library_roots", return_value=["/data"])
     def test_invalid_path(self, mock_roots):
         from routes.opds import is_valid_library_path
         assert is_valid_library_path("/etc/passwd") is False
 
-    @patch("routes.opds.get_library_roots", return_value=["/data"])
+    @patch("helpers.library.get_library_roots", return_value=["/data"])
     def test_empty_path(self, mock_roots):
         from routes.opds import is_valid_library_path
         assert is_valid_library_path("") is False
 
-    @patch("routes.opds.get_library_roots", return_value=["/data"])
+    @patch("helpers.library.get_library_roots", return_value=["/data"])
     def test_none_path(self, mock_roots):
         from routes.opds import is_valid_library_path
         assert is_valid_library_path(None) is False

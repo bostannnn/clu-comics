@@ -37,135 +37,177 @@ let filterHistory = { source: {}, destination: {} };
 let sourceScrollHistory = {};  // { path: scrollTop }
 let destinationScrollHistory = {};
 
-function bindFloatingDropdown(dropdownContainer, dropdownBtn, dropdownMenu) {
-  if (!dropdownContainer || !dropdownBtn || !dropdownMenu || dropdownMenu.dataset.cluFloatingBound === '1') {
+let filesFloatingMenu = null;
+let filesFloatingMenuTrigger = null;
+let filesFloatingMenuOutsideHandler = null;
+let filesFloatingMenuScrollHandler = null;
+let filesFloatingMenuKeyHandler = null;
+
+function ensureFilesFloatingMenu() {
+  if (filesFloatingMenu) {
+    return filesFloatingMenu;
+  }
+
+  const menu = document.createElement('ul');
+  menu.className = 'dropdown-menu shadow';
+  menu.style.position = 'fixed';
+  menu.style.zIndex = '1300';
+  menu.style.display = 'none';
+
+  menu.addEventListener('click', function (event) {
+    if (event.target.closest('.dropdown-item')) {
+      hideFilesFloatingMenu();
+    }
+  });
+
+  document.body.appendChild(menu);
+  filesFloatingMenu = menu;
+  return menu;
+}
+
+function positionFilesFloatingMenu(triggerBtn) {
+  if (!filesFloatingMenu || !triggerBtn) {
     return;
   }
 
-  dropdownMenu.dataset.cluFloatingBound = '1';
-  const dropdown = bootstrap.Dropdown.getOrCreateInstance(dropdownBtn);
-  let repositionHandler = null;
-  let originalParent = dropdownContainer;
-  let originalNextSibling = dropdownMenu.nextSibling;
-  const originalStyles = {
-    position: dropdownMenu.style.position,
-    top: dropdownMenu.style.top,
-    left: dropdownMenu.style.left,
-    right: dropdownMenu.style.right,
-    bottom: dropdownMenu.style.bottom,
-    zIndex: dropdownMenu.style.zIndex,
-    maxHeight: dropdownMenu.style.maxHeight,
-    overflowY: dropdownMenu.style.overflowY,
-    transform: dropdownMenu.style.transform,
-    inset: dropdownMenu.style.inset
-  };
+  const btnRect = triggerBtn.getBoundingClientRect();
+  const menuRect = filesFloatingMenu.getBoundingClientRect();
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+  const gutter = 8;
+  const belowAvailable = Math.max(0, viewportHeight - btnRect.bottom - gutter);
+  const aboveAvailable = Math.max(0, btnRect.top - gutter);
+  const openBelow = belowAvailable >= menuRect.height || belowAvailable >= aboveAvailable;
+  const availableHeight = openBelow ? belowAvailable : aboveAvailable;
 
-  function moveMenuToBody() {
-    originalParent = dropdownContainer;
-    originalNextSibling = dropdownMenu.nextSibling;
+  let top = openBelow
+    ? btnRect.bottom
+    : Math.max(gutter, btnRect.top - Math.min(menuRect.height, availableHeight));
 
-    if (dropdownMenu.parentNode !== document.body) {
-      document.body.appendChild(dropdownMenu);
-    }
+  let left = btnRect.right - menuRect.width;
+  if (left < gutter) {
+    left = Math.min(Math.max(gutter, btnRect.left), viewportWidth - gutter - menuRect.width);
+  } else if (left + menuRect.width > viewportWidth - gutter) {
+    left = Math.max(gutter, viewportWidth - gutter - menuRect.width);
   }
 
-  function restoreMenu() {
-    if (dropdownMenu.parentNode === originalParent) {
+  filesFloatingMenu.style.top = `${top}px`;
+  filesFloatingMenu.style.left = `${left}px`;
+
+  if (menuRect.height > availableHeight) {
+    filesFloatingMenu.style.maxHeight = `${Math.max(1, availableHeight)}px`;
+    filesFloatingMenu.style.overflowY = 'auto';
+  } else {
+    filesFloatingMenu.style.maxHeight = '';
+    filesFloatingMenu.style.overflowY = '';
+  }
+}
+
+function hideFilesFloatingMenu() {
+  if (!filesFloatingMenu) {
+    return;
+  }
+
+  if (filesFloatingMenuTrigger) {
+    filesFloatingMenuTrigger.setAttribute('aria-expanded', 'false');
+  }
+
+  filesFloatingMenu.classList.remove('show');
+  filesFloatingMenu.style.display = 'none';
+  filesFloatingMenu.style.visibility = '';
+  filesFloatingMenu.style.maxHeight = '';
+  filesFloatingMenu.style.overflowY = '';
+  filesFloatingMenu.innerHTML = '';
+  filesFloatingMenuTrigger = null;
+
+  if (filesFloatingMenuOutsideHandler) {
+    document.removeEventListener('pointerdown', filesFloatingMenuOutsideHandler, true);
+    filesFloatingMenuOutsideHandler = null;
+  }
+
+  if (filesFloatingMenuScrollHandler) {
+    document.removeEventListener('scroll', filesFloatingMenuScrollHandler, true);
+    window.removeEventListener('resize', filesFloatingMenuScrollHandler);
+    filesFloatingMenuScrollHandler = null;
+  }
+
+  if (filesFloatingMenuKeyHandler) {
+    document.removeEventListener('keydown', filesFloatingMenuKeyHandler, true);
+    filesFloatingMenuKeyHandler = null;
+  }
+}
+
+function openFilesFloatingMenu(triggerBtn, populateMenu) {
+  const menu = ensureFilesFloatingMenu();
+
+  if (filesFloatingMenuTrigger === triggerBtn && menu.classList.contains('show')) {
+    hideFilesFloatingMenu();
+    return;
+  }
+
+  hideFilesFloatingMenu();
+  filesFloatingMenuTrigger = triggerBtn;
+  populateMenu(menu);
+  triggerBtn.setAttribute('aria-expanded', 'true');
+
+  menu.classList.add('show');
+  menu.style.display = 'block';
+  menu.style.visibility = 'hidden';
+
+  requestAnimationFrame(function () {
+    if (filesFloatingMenuTrigger !== triggerBtn) {
       return;
     }
+    positionFilesFloatingMenu(triggerBtn);
+    menu.style.visibility = '';
+  });
 
-    if (originalNextSibling && originalNextSibling.parentNode === originalParent) {
-      originalParent.insertBefore(dropdownMenu, originalNextSibling);
-    } else {
-      originalParent.appendChild(dropdownMenu);
+  filesFloatingMenuOutsideHandler = function (event) {
+    if (!menu.contains(event.target) && !triggerBtn.contains(event.target)) {
+      hideFilesFloatingMenu();
     }
+  };
+
+  filesFloatingMenuScrollHandler = function (event) {
+    if (event && event.target instanceof Node && menu.contains(event.target)) {
+      return;
+    }
+    hideFilesFloatingMenu();
+  };
+
+  filesFloatingMenuKeyHandler = function (event) {
+    if (event.key === 'Escape') {
+      hideFilesFloatingMenu();
+    }
+  };
+
+  document.addEventListener('pointerdown', filesFloatingMenuOutsideHandler, true);
+  document.addEventListener('scroll', filesFloatingMenuScrollHandler, true);
+  window.addEventListener('resize', filesFloatingMenuScrollHandler);
+  document.addEventListener('keydown', filesFloatingMenuKeyHandler, true);
+}
+
+function createFilesActionMenuButton(className, title, populateMenu) {
+  const button = document.createElement('button');
+  button.className = className;
+  button.setAttribute('type', 'button');
+  button.setAttribute('aria-haspopup', 'menu');
+  button.setAttribute('aria-expanded', 'false');
+  button.innerHTML = '<i class="bi bi-three-dots-vertical"></i>';
+  if (title) {
+    button.title = title;
   }
 
-  function resetMenuPosition() {
-    dropdownMenu.style.position = originalStyles.position;
-    dropdownMenu.style.top = originalStyles.top;
-    dropdownMenu.style.left = originalStyles.left;
-    dropdownMenu.style.right = originalStyles.right;
-    dropdownMenu.style.bottom = originalStyles.bottom;
-    dropdownMenu.style.zIndex = originalStyles.zIndex;
-    dropdownMenu.style.maxHeight = originalStyles.maxHeight;
-    dropdownMenu.style.overflowY = originalStyles.overflowY;
-    dropdownMenu.style.transform = originalStyles.transform;
-    dropdownMenu.style.inset = originalStyles.inset;
-  }
-
-  function positionMenu() {
-    const btnRect = dropdownBtn.getBoundingClientRect();
-    const menuRect = dropdownMenu.getBoundingClientRect();
-    const viewportWidth = window.innerWidth;
-    const viewportHeight = window.innerHeight;
-    const gutter = 8;
-    const belowAvailable = Math.max(0, viewportHeight - btnRect.bottom - gutter);
-    const aboveAvailable = Math.max(0, btnRect.top - gutter);
-    const openBelow = belowAvailable >= menuRect.height || belowAvailable >= aboveAvailable;
-    const availableHeight = openBelow ? belowAvailable : aboveAvailable;
-
-    let top = openBelow
-      ? btnRect.bottom
-      : Math.max(gutter, btnRect.top - Math.min(menuRect.height, availableHeight));
-
-    let left = btnRect.right - menuRect.width;
-    if (left < gutter) {
-      left = gutter;
-    } else if (left + menuRect.width > viewportWidth - gutter) {
-      left = Math.max(gutter, viewportWidth - gutter - menuRect.width);
-    }
-
-    dropdownMenu.style.position = 'fixed';
-    dropdownMenu.style.top = `${top}px`;
-    dropdownMenu.style.left = `${left}px`;
-    dropdownMenu.style.right = 'auto';
-    dropdownMenu.style.bottom = 'auto';
-    dropdownMenu.style.zIndex = '1200';
-    dropdownMenu.style.transform = 'none';
-    dropdownMenu.style.inset = 'auto';
-
-    if (menuRect.height > availableHeight) {
-      dropdownMenu.style.maxHeight = `${Math.max(1, availableHeight)}px`;
-      dropdownMenu.style.overflowY = 'auto';
-    } else {
-      dropdownMenu.style.maxHeight = '';
-      dropdownMenu.style.overflowY = '';
-    }
-  }
-
-  dropdownMenu.addEventListener('click', function (event) {
-    const actionItem = event.target.closest('.dropdown-item');
-    if (actionItem) {
-      dropdown.hide();
-    }
+  button.addEventListener('click', function (event) {
+    event.preventDefault();
     event.stopPropagation();
+    openFilesFloatingMenu(button, function (menu) {
+      menu.innerHTML = '';
+      populateMenu(menu);
+    });
   });
 
-  dropdownContainer.addEventListener('show.bs.dropdown', function () {
-    moveMenuToBody();
-  });
-
-  dropdownContainer.addEventListener('shown.bs.dropdown', function () {
-    requestAnimationFrame(positionMenu);
-
-    repositionHandler = function () {
-      positionMenu();
-    };
-
-    window.addEventListener('resize', repositionHandler);
-    document.addEventListener('scroll', repositionHandler, true);
-  });
-
-  dropdownContainer.addEventListener('hidden.bs.dropdown', function () {
-    if (repositionHandler) {
-      window.removeEventListener('resize', repositionHandler);
-      document.removeEventListener('scroll', repositionHandler, true);
-      repositionHandler = null;
-    }
-    resetMenuPosition();
-    restoreMenu();
-  });
+  return button;
 }
 
 function isFilesActionTarget(target) {
@@ -760,40 +802,26 @@ function createListItem(itemName, fullPath, type, panel, isDraggable) {
       iconContainer.appendChild(renameBtn);
 
       // Add three-dot dropdown menu for directory operations
-      const dropdownContainer = document.createElement("div");
-      dropdownContainer.className = "dropdown d-inline-block";
-
-      const dropdownBtn = document.createElement("button");
-      dropdownBtn.className = "btn btn-sm";
-      dropdownBtn.setAttribute("type", "button");
-      dropdownBtn.setAttribute("data-bs-toggle", "dropdown");
-      dropdownBtn.setAttribute("aria-expanded", "false");
-      dropdownBtn.innerHTML = '<i class="bi bi-three-dots-vertical"></i>';
-
-      const dropdownMenu = document.createElement("ul");
-      dropdownMenu.className = "dropdown-menu";
-      CLU.populateFolderActionMenu(dropdownMenu, {
-        onConvertCbrToCbz: function () { executeScriptOnDirectory('convert', fullPath, panel); },
-        onRebuildAllFiles: function () { executeScriptOnDirectory('rebuild', fullPath, panel); },
-        onConvertPdfToCbz: function () { executeScriptOnDirectory('pdf', fullPath, panel); },
-        onEnhanceImages: function () { executeScriptOnDirectory('enhance_dir', fullPath, panel); },
-        onFetchAllMetadata: function () { fetchDirectoryMetadataForPanel(fullPath, fileData.name, panel); },
-        onForceComicVine: hasProvider(panel, 'comicvine')
-          ? function () { fetchDirectoryMetadataForPanel(fullPath, fileData.name, panel, 'comicvine'); }
-          : null,
-        onForceMetron: hasProvider(panel, 'metron')
-          ? function () { fetchDirectoryMetadataForPanel(fullPath, fileData.name, panel, 'metron'); }
-          : null,
-        onMissingFileCheck: function () { executeScriptOnDirectory('missing', fullPath, panel); },
-        onUpdateXml: function () { CLU.openUpdateXmlModal(fullPath, fileData.name); },
-        onRemoveAllXml: function () { bulkRemoveXmlFromDirectory(fullPath, panel); }
+      const dropdownBtn = createFilesActionMenuButton("btn btn-sm", "More options", function (menu) {
+        CLU.populateFolderActionMenu(menu, {
+          onConvertCbrToCbz: function () { executeScriptOnDirectory('convert', fullPath, panel); },
+          onRebuildAllFiles: function () { executeScriptOnDirectory('rebuild', fullPath, panel); },
+          onConvertPdfToCbz: function () { executeScriptOnDirectory('pdf', fullPath, panel); },
+          onEnhanceImages: function () { executeScriptOnDirectory('enhance_dir', fullPath, panel); },
+          onFetchAllMetadata: function () { fetchDirectoryMetadataForPanel(fullPath, fileData.name, panel); },
+          onForceComicVine: hasProvider(panel, 'comicvine')
+            ? function () { fetchDirectoryMetadataForPanel(fullPath, fileData.name, panel, 'comicvine'); }
+            : null,
+          onForceMetron: hasProvider(panel, 'metron')
+            ? function () { fetchDirectoryMetadataForPanel(fullPath, fileData.name, panel, 'metron'); }
+            : null,
+          onMissingFileCheck: function () { executeScriptOnDirectory('missing', fullPath, panel); },
+          onUpdateXml: function () { CLU.openUpdateXmlModal(fullPath, fileData.name); },
+          onRemoveAllXml: function () { bulkRemoveXmlFromDirectory(fullPath, panel); }
+        });
       });
-
-      dropdownContainer.appendChild(dropdownBtn);
-      dropdownContainer.appendChild(dropdownMenu);
-      bindFloatingDropdown(dropdownContainer, dropdownBtn, dropdownMenu);
       // Store for later - will be appended after trash button
-      li.folderDropdown = dropdownContainer;
+      li.folderDropdown = dropdownBtn;
     }
   }
 
@@ -863,56 +891,41 @@ function createListItem(itemName, fullPath, type, panel, isDraggable) {
       type === "file" &&
       ['.cbz', '.cbr', '.zip'].some(ext => fileData.name.toLowerCase().endsWith(ext))
     ) {
-      const dropdownContainer = document.createElement("div");
-      dropdownContainer.className = "dropdown d-inline-block";
-
-      const dropdownBtn = document.createElement("button");
-      dropdownBtn.className = "btn btn-sm";
-      dropdownBtn.setAttribute("type", "button");
-      dropdownBtn.setAttribute("data-bs-toggle", "dropdown");
-      dropdownBtn.setAttribute("aria-expanded", "false");
-      dropdownBtn.innerHTML = '<i class="bi bi-three-dots-vertical"></i>';
-      dropdownBtn.title = "More options";
-
-      const dropdownMenu = document.createElement("ul");
-      dropdownMenu.className = "dropdown-menu dropdown-menu-end shadow";
-      CLU.populateIssueActionMenu(dropdownMenu, {
-        onCropCover: function () { executeScriptOnFile('crop', fullPath, panel); },
-        onRemoveFirstImage: function () { executeScriptOnFile('remove', fullPath, panel); },
-        onEditFile: function () { openEditModal(fullPath); },
-        onApplyRenamePattern: filesUiConfig.enableCustomRename
-          ? function () { applyRenamePatternToFile(fullPath, panel); }
-          : null,
-        onApplyFolderRenamePattern: (
-          filesUiConfig.enableCustomRename &&
-          filesUiConfig.hasCustomMovePattern &&
-          isPathInConfiguredLibrary(fullPath)
-        ) ? function () { applyFolderRenamePatternToFile(fullPath, panel); } : null,
-        onRebuild: function () { executeScriptOnFile('single_file', fullPath, panel); },
-        onEnhance: function () { executeScriptOnFile('enhance_single', fullPath, panel); },
-        extraFileOps: [{
-          label: 'Add Blank to End',
-          icon: 'bi bi-file-plus',
-          onClick: function () { executeScriptOnFile('add', fullPath, panel); },
-          className: 'dropdown-item'
-        }],
-        onFetchMetadata: hasAnyProvider
-          ? function () { searchMetadataForFile(fullPath, fileData.name, panel); }
-          : null,
-        onForceComicVine: hasProvider(panel, 'comicvine')
-          ? function () { searchMetadataForFile(fullPath, fileData.name, panel, { forceProvider: 'comicvine' }); }
-          : null,
-        onForceMetron: hasProvider(panel, 'metron')
-          ? function () { searchMetadataForFile(fullPath, fileData.name, panel, { forceProvider: 'metron' }); }
-          : null,
-        onAddToReadingList: function () { openAddToReadingListModal(fullPath); },
-        onDelete: function () { showDeletePrompt(fullPath, fileData.name, panel); }
+      const dropdownBtn = createFilesActionMenuButton("btn btn-sm", "More options", function (menu) {
+        CLU.populateIssueActionMenu(menu, {
+          onCropCover: function () { executeScriptOnFile('crop', fullPath, panel); },
+          onRemoveFirstImage: function () { executeScriptOnFile('remove', fullPath, panel); },
+          onEditFile: function () { openEditModal(fullPath); },
+          onApplyRenamePattern: filesUiConfig.enableCustomRename
+            ? function () { applyRenamePatternToFile(fullPath, panel); }
+            : null,
+          onApplyFolderRenamePattern: (
+            filesUiConfig.enableCustomRename &&
+            filesUiConfig.hasCustomMovePattern &&
+            isPathInConfiguredLibrary(fullPath)
+          ) ? function () { applyFolderRenamePatternToFile(fullPath, panel); } : null,
+          onRebuild: function () { executeScriptOnFile('single_file', fullPath, panel); },
+          onEnhance: function () { executeScriptOnFile('enhance_single', fullPath, panel); },
+          extraFileOps: [{
+            label: 'Add Blank to End',
+            icon: 'bi bi-file-plus',
+            onClick: function () { executeScriptOnFile('add', fullPath, panel); },
+            className: 'dropdown-item'
+          }],
+          onFetchMetadata: hasAnyProvider
+            ? function () { searchMetadataForFile(fullPath, fileData.name, panel); }
+            : null,
+          onForceComicVine: hasProvider(panel, 'comicvine')
+            ? function () { searchMetadataForFile(fullPath, fileData.name, panel, { forceProvider: 'comicvine' }); }
+            : null,
+          onForceMetron: hasProvider(panel, 'metron')
+            ? function () { searchMetadataForFile(fullPath, fileData.name, panel, { forceProvider: 'metron' }); }
+            : null,
+          onAddToReadingList: function () { openAddToReadingListModal(fullPath); },
+          onDelete: function () { showDeletePrompt(fullPath, fileData.name, panel); }
+        });
       });
-
-      dropdownContainer.appendChild(dropdownBtn);
-      dropdownContainer.appendChild(dropdownMenu);
-      bindFloatingDropdown(dropdownContainer, dropdownBtn, dropdownMenu);
-      iconContainer.appendChild(dropdownContainer);
+      iconContainer.appendChild(dropdownBtn);
     }
   }
 
@@ -1266,6 +1279,7 @@ function restoreScrollPosition(panel, path) {
 // Updated loadDirectories function.
 function loadDirectories(path, panel) {
   console.log("loadDirectories called with path:", path, "panel:", panel);
+  hideFilesFloatingMenu();
 
   // Route virtual paths to their dedicated loaders
   if (path === 'trash') { loadTrash(panel); return; }
@@ -1359,6 +1373,7 @@ function loadDirectories(path, panel) {
 
 // Function to render the directory listing.
 function renderDirectoryListing(data, panel) {
+  hideFilesFloatingMenu();
   let container = panel === 'source' ? document.getElementById("source-list")
     : document.getElementById("destination-list");
   container.innerHTML = "";
@@ -1455,6 +1470,7 @@ function filterDirectories(letter, panel) {
 // New loadDownloads function to fetch downloads data.
 function loadDownloads(path, panel) {
   console.log("loadDownloads called with path:", path, "panel:", panel);
+  hideFilesFloatingMenu();
   const btnDownloads = document.getElementById('btnDownloads');
   if (btnDownloads) btnDownloads.classList.add('active');
   const btnRecentFiles = document.getElementById('btnRecentFiles');
@@ -1533,6 +1549,7 @@ function loadDownloads(path, panel) {
 // Function to load recent files from the file watcher
 function loadRecentFiles(panel) {
   console.log("loadRecentFiles called for panel:", panel);
+  hideFilesFloatingMenu();
 
   // Update button states
   const btnRecentFiles = document.getElementById('btnRecentFiles');
@@ -1640,23 +1657,11 @@ function loadRecentFiles(panel) {
           const hasGCD = providers.some(p => p.provider_type === 'gcd');
           const hasAnyProvider = providers.length > 0;
 
-          const dropdownContainer = document.createElement('div');
-          dropdownContainer.className = 'dropdown d-inline-block';
-
-          const dropdownBtn = document.createElement('button');
-          dropdownBtn.className = 'btn btn-sm btn-outline-secondary';
-          dropdownBtn.setAttribute('type', 'button');
-          dropdownBtn.setAttribute('data-bs-toggle', 'dropdown');
-          dropdownBtn.setAttribute('aria-expanded', 'false');
-          dropdownBtn.innerHTML = '<i class="bi bi-three-dots-vertical"></i>';
-          dropdownBtn.title = 'More options';
-
-          const dropdownMenu = document.createElement('ul');
-          dropdownMenu.className = 'dropdown-menu dropdown-menu-end shadow';
-          CLU.populateIssueActionMenu(dropdownMenu, {
-            onCropCover: function () { executeScriptOnFile('crop', file.file_path, panel); },
-            onRemoveFirstImage: function () { executeScriptOnFile('remove', file.file_path, panel); },
-            onEditFile: function () {
+          const dropdownBtn = createFilesActionMenuButton('btn btn-sm btn-outline-secondary', 'More options', function (menu) {
+            CLU.populateIssueActionMenu(menu, {
+              onCropCover: function () { executeScriptOnFile('crop', file.file_path, panel); },
+              onRemoveFirstImage: function () { executeScriptOnFile('remove', file.file_path, panel); },
+              onEditFile: function () {
               const nameDiv = leftContainer.querySelector('.fw-medium');
               const oldPath = file.file_path;
 
@@ -1681,57 +1686,54 @@ function loadRecentFiles(panel) {
               nameDiv.innerHTML = '';
               nameDiv.appendChild(input);
               input.focus();
-            },
-            onApplyRenamePattern: filesUiConfig.enableCustomRename
-              ? function () { applyRenamePatternToFile(file.file_path, panel); }
-              : null,
-            onApplyFolderRenamePattern: (
-              filesUiConfig.enableCustomRename &&
-              filesUiConfig.hasCustomMovePattern &&
-              isPathInConfiguredLibrary(file.file_path)
-            ) ? function () { applyFolderRenamePatternToFile(file.file_path, panel); } : null,
-            onRebuild: function () { executeScriptOnFile('single_file', file.file_path, panel); },
-            onEnhance: function () { executeScriptOnFile('enhance_single', file.file_path, panel); },
-            extraFileOps: [{
-              label: 'Add Blank to End',
-              icon: 'bi bi-file-plus',
-              onClick: function () { executeScriptOnFile('add', file.file_path, panel); },
-              className: 'dropdown-item'
-            }],
-            onFetchMetadata: hasAnyProvider
-              ? function () { searchMetadataForFile(file.file_path, file.file_name, panel); }
-              : null,
-            onForceComicVine: hasProvider(panel, 'comicvine')
-              ? function () { searchMetadataForFile(file.file_path, file.file_name, panel, { forceProvider: 'comicvine' }); }
-              : null,
-            onForceMetron: hasProvider(panel, 'metron')
-              ? function () { searchMetadataForFile(file.file_path, file.file_name, panel, { forceProvider: 'metron' }); }
-              : null,
-            extraMetadataActions: hasGCD || (!hasAnyProvider && typeof gcdMysqlAvailable !== 'undefined' && gcdMysqlAvailable)
-              ? [{
-                  label: hasGCD ? 'Search GCD Database Only' : 'Search GCD for Metadata',
-                  icon: 'bi bi-database-down',
-                  onClick: function () { searchGCDMetadata(file.file_path, file.file_name); },
-                  className: 'dropdown-item'
-                }]
-              : null,
-            extraPostReadingActions: [{
-              label: 'Info',
-              icon: 'bi bi-info-circle',
-              onClick: function () {
-                const directoryPath = file.file_path.substring(0, file.file_path.lastIndexOf('/'));
-                showCBZInfo(file.file_path, file.file_name, directoryPath, []);
               },
-              className: 'dropdown-item'
-            }],
-            onAddToReadingList: function () { openAddToReadingListModal(file.file_path); },
-            onDelete: function () { showDeletePrompt(file.file_path, file.file_name, panel); }
+              onApplyRenamePattern: filesUiConfig.enableCustomRename
+                ? function () { applyRenamePatternToFile(file.file_path, panel); }
+                : null,
+              onApplyFolderRenamePattern: (
+                filesUiConfig.enableCustomRename &&
+                filesUiConfig.hasCustomMovePattern &&
+                isPathInConfiguredLibrary(file.file_path)
+              ) ? function () { applyFolderRenamePatternToFile(file.file_path, panel); } : null,
+              onRebuild: function () { executeScriptOnFile('single_file', file.file_path, panel); },
+              onEnhance: function () { executeScriptOnFile('enhance_single', file.file_path, panel); },
+              extraFileOps: [{
+                label: 'Add Blank to End',
+                icon: 'bi bi-file-plus',
+                onClick: function () { executeScriptOnFile('add', file.file_path, panel); },
+                className: 'dropdown-item'
+              }],
+              onFetchMetadata: hasAnyProvider
+                ? function () { searchMetadataForFile(file.file_path, file.file_name, panel); }
+                : null,
+              onForceComicVine: hasProvider(panel, 'comicvine')
+                ? function () { searchMetadataForFile(file.file_path, file.file_name, panel, { forceProvider: 'comicvine' }); }
+                : null,
+              onForceMetron: hasProvider(panel, 'metron')
+                ? function () { searchMetadataForFile(file.file_path, file.file_name, panel, { forceProvider: 'metron' }); }
+                : null,
+              extraMetadataActions: hasGCD || (!hasAnyProvider && typeof gcdMysqlAvailable !== 'undefined' && gcdMysqlAvailable)
+                ? [{
+                    label: hasGCD ? 'Search GCD Database Only' : 'Search GCD for Metadata',
+                    icon: 'bi bi-database-down',
+                    onClick: function () { searchGCDMetadata(file.file_path, file.file_name); },
+                    className: 'dropdown-item'
+                  }]
+                : null,
+              extraPostReadingActions: [{
+                label: 'Info',
+                icon: 'bi bi-info-circle',
+                onClick: function () {
+                  const directoryPath = file.file_path.substring(0, file.file_path.lastIndexOf('/'));
+                  showCBZInfo(file.file_path, file.file_name, directoryPath, []);
+                },
+                className: 'dropdown-item'
+              }],
+              onAddToReadingList: function () { openAddToReadingListModal(file.file_path); },
+              onDelete: function () { showDeletePrompt(file.file_path, file.file_name, panel); }
+            });
           });
-
-          dropdownContainer.appendChild(dropdownBtn);
-          dropdownContainer.appendChild(dropdownMenu);
-          bindFloatingDropdown(dropdownContainer, dropdownBtn, dropdownMenu);
-          iconContainer.appendChild(dropdownContainer);
+          iconContainer.appendChild(dropdownBtn);
 
           // Append containers to fileItem
           fileItem.appendChild(leftContainer);
@@ -1844,6 +1846,7 @@ document.addEventListener('DOMContentLoaded', updateTrashBadge);
 
 function loadTrash(panel) {
   console.log("loadTrash called for panel:", panel);
+  hideFilesFloatingMenu();
 
   // Update button states
   const btnTrash = document.getElementById('btnTrash');
@@ -1944,42 +1947,27 @@ function loadTrash(panel) {
         iconContainer.className = 'btn-group';
         iconContainer.setAttribute('role', 'group');
 
-        const dropdownContainer = document.createElement('div');
-        dropdownContainer.className = 'dropdown d-inline-block';
-
-        const dropdownBtn = document.createElement('button');
-        dropdownBtn.className = 'btn btn-sm btn-outline-secondary';
-        dropdownBtn.setAttribute('type', 'button');
-        dropdownBtn.setAttribute('data-bs-toggle', 'dropdown');
-        dropdownBtn.setAttribute('aria-expanded', 'false');
-        dropdownBtn.innerHTML = '<i class="bi bi-three-dots-vertical"></i>';
-        dropdownBtn.title = 'More options';
-
-        const dropdownMenu = document.createElement('ul');
-        dropdownMenu.className = 'dropdown-menu dropdown-menu-end shadow';
-        if (item.is_dir) {
-          CLU.populateFolderActionMenu(dropdownMenu, {
-            onDelete: function () { permanentlyDeleteTrashItem(item.name, dropdownBtn); }
-          });
-        } else {
-          CLU.populateIssueActionMenu(dropdownMenu, {
-            extraPostReadingActions: [{
-              label: 'Info',
-              icon: 'bi bi-info-circle',
-              onClick: function () {
-                const dirPath = item.path.substring(0, item.path.lastIndexOf('/'));
-                showCBZInfo(item.path, item.name, dirPath, []);
-              },
-              className: 'dropdown-item'
-            }],
-            onDelete: function () { permanentlyDeleteTrashItem(item.name, dropdownBtn); }
-          });
-        }
-
-        dropdownContainer.appendChild(dropdownBtn);
-        dropdownContainer.appendChild(dropdownMenu);
-        bindFloatingDropdown(dropdownContainer, dropdownBtn, dropdownMenu);
-        iconContainer.appendChild(dropdownContainer);
+        const dropdownBtn = createFilesActionMenuButton('btn btn-sm btn-outline-secondary', 'More options', function (menu) {
+          if (item.is_dir) {
+            CLU.populateFolderActionMenu(menu, {
+              onDelete: function () { permanentlyDeleteTrashItem(item.name, dropdownBtn); }
+            });
+          } else {
+            CLU.populateIssueActionMenu(menu, {
+              extraPostReadingActions: [{
+                label: 'Info',
+                icon: 'bi bi-info-circle',
+                onClick: function () {
+                  const dirPath = item.path.substring(0, item.path.lastIndexOf('/'));
+                  showCBZInfo(item.path, item.name, dirPath, []);
+                },
+                className: 'dropdown-item'
+              }],
+              onDelete: function () { permanentlyDeleteTrashItem(item.name, dropdownBtn); }
+            });
+          }
+        });
+        iconContainer.appendChild(dropdownBtn);
 
         fileItem.appendChild(leftContainer);
         fileItem.appendChild(iconContainer);

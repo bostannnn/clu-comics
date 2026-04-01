@@ -8,33 +8,13 @@ and downloading comics from OPDS-compatible readers like Panels, Chunky, etc.
 from flask import Blueprint, render_template, request, url_for, Response
 from core.database import get_to_read_items, get_libraries
 from core.app_logging import app_logger
+from helpers.library import get_library_roots, is_valid_library_path
 import os
 import hashlib
 from datetime import datetime
 from urllib.parse import quote
 
 opds_bp = Blueprint('opds', __name__, url_prefix='/opds')
-
-
-def get_library_roots():
-    """Get list of all enabled library root paths."""
-    libraries = get_libraries(enabled_only=True)
-    if libraries:
-        return [lib['path'] for lib in libraries]
-    # Fallback for backwards compatibility
-    return ['/data'] if os.path.exists('/data') else []
-
-
-def is_valid_library_path(path):
-    """Check if a path is within any enabled library."""
-    if not path:
-        return False
-    normalized = os.path.normpath(path)
-    for root in get_library_roots():
-        root_normalized = os.path.normpath(root)
-        if normalized == root_normalized or normalized.startswith(root_normalized + os.sep):
-            return True
-    return False
 
 # MIME types for comic files
 COMIC_MIME_TYPES = {

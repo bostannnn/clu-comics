@@ -21,7 +21,12 @@ import threading
 import zipfile
 from flask import Blueprint, request, jsonify, render_template_string, Response
 from core.app_logging import app_logger
-from helpers.library import is_critical_path, get_critical_path_error_message, is_valid_library_path
+from helpers.library import (
+    is_critical_path,
+    get_critical_path_error_message,
+    is_valid_library_path,
+    is_path_in_any_root,
+)
 from helpers.trash import move_to_trash, is_trash_path, get_trash_dir, get_trash_size, get_trash_max_size_bytes, get_trash_contents, empty_trash as do_empty_trash, permanently_delete_from_trash
 from helpers import is_hidden
 from core.config import config
@@ -294,15 +299,11 @@ def combine_cbz():
     if not directory:
         return jsonify({"error": "Directory not specified"}), 400
 
-    # Security: Validate all paths
-    watch_dir = config.get("SETTINGS", "WATCH", fallback="/temp")
-    target_dir = config.get("SETTINGS", "TARGET", fallback="/processed")
-
     for f in files:
-        normalized = os.path.normpath(f)
-        if not (is_valid_library_path(normalized) or
-                normalized.startswith(os.path.normpath(watch_dir)) or
-                normalized.startswith(os.path.normpath(target_dir))):
+        if not (is_valid_library_path(f) or is_path_in_any_root(f, [
+                config.get("SETTINGS", "WATCH", fallback="/temp"),
+                config.get("SETTINGS", "TARGET", fallback="/processed"),
+        ])):
             return jsonify({"error": "Access denied"}), 403
 
     temp_dir = None

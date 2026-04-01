@@ -10,6 +10,7 @@ import os
 import shutil
 import time
 from core.app_logging import app_logger
+from helpers.library import path_is_within_root
 
 
 def get_trash_dir():
@@ -50,10 +51,7 @@ def is_trash_path(path):
         cache_dir = current_app.config.get("CACHE_DIR", "/cache")
         trash_dir = os.path.join(cache_dir, "trash")
 
-    normalized_path = os.path.normpath(path)
-    normalized_trash = os.path.normpath(trash_dir)
-
-    return normalized_path == normalized_trash or normalized_path.startswith(normalized_trash + os.sep)
+    return path_is_within_root(path, trash_dir)
 
 
 def get_trash_size():
@@ -298,10 +296,8 @@ def permanently_delete_from_trash(item_name):
     if not os.path.exists(item_path):
         return {"success": False, "size_freed": 0, "error": "Item not found in trash"}
 
-    # Ensure the item is actually within the trash dir (prevent path traversal)
-    normalized_item = os.path.normpath(item_path)
-    normalized_trash = os.path.normpath(trash_dir)
-    if not normalized_item.startswith(normalized_trash + os.sep):
+    # Ensure the item is actually within the trash dir (prevent traversal or symlink escape)
+    if not path_is_within_root(item_path, trash_dir):
         return {"success": False, "size_freed": 0, "error": "Invalid item path"}
 
     try:

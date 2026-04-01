@@ -191,6 +191,21 @@ class TestPermanentlyDeleteFromTrash:
         assert result["success"] is False
         assert "not found" in result["error"].lower()
 
+    def test_rejects_path_traversal(self, app, trash_dir, tmp_path):
+        """Traversal outside trash is rejected."""
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        outside_file = outside_dir / "escape.cbz"
+        outside_file.write_bytes(b"data")
+
+        with app.app_context():
+            from helpers.trash import permanently_delete_from_trash
+            result = permanently_delete_from_trash("../outside/escape.cbz")
+
+        assert result["success"] is False
+        assert result["error"] == "Invalid item path"
+        assert outside_file.exists()
+
 
 class TestIsTrashPath:
 
@@ -208,6 +223,16 @@ class TestIsTrashPath:
         with disabled_app.app_context():
             from helpers.trash import is_trash_path
             assert is_trash_path("/cache/trash/file.cbz") is False
+
+    def test_rejects_sibling_prefix(self, app, trash_dir, tmp_path):
+        """Sibling prefix paths are not treated as trash descendants."""
+        sibling = tmp_path / f"{trash_dir.name}_else" / "file.cbz"
+        sibling.parent.mkdir(parents=True)
+        sibling.write_bytes(b"data")
+
+        with app.app_context():
+            from helpers.trash import is_trash_path
+            assert is_trash_path(str(sibling)) is False
 
 
 class TestGetTrashContents:

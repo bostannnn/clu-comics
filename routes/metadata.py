@@ -29,7 +29,7 @@ from flask import (Blueprint, request, jsonify, Response,
 import core.app_state as app_state
 from core.app_logging import app_logger
 from core.config import config
-from helpers.library import is_valid_library_path
+from helpers.library import is_path_in_any_root, is_valid_library_path
 from models import gcd, metron, comicvine
 from models.gcd import STOPWORDS
 
@@ -821,9 +821,7 @@ def save_cvinfo():
         return jsonify({"error": "Missing directory or content parameter"}), 400
 
     # Security: Ensure the directory path is within allowed directories
-    normalized_path = os.path.normpath(directory)
-    if not (is_valid_library_path(normalized_path) or
-            normalized_path.startswith(os.path.normpath(TARGET_DIR))):
+    if not (is_valid_library_path(directory) or is_path_in_any_root(directory, [TARGET_DIR])):
         return jsonify({"error": "Access denied"}), 403
 
     if not os.path.exists(directory) or not os.path.isdir(directory):
@@ -1155,9 +1153,7 @@ def update_xml():
             return jsonify({"error": "Missing required parameters"}), 400
 
         # Security check - ensure path is within allowed directories
-        normalized_path = os.path.normpath(directory)
-        if not (is_valid_library_path(normalized_path) or
-                normalized_path.startswith(os.path.normpath(TARGET_DIR))):
+        if not (is_valid_library_path(directory) or is_path_in_any_root(directory, [TARGET_DIR])):
             return jsonify({"error": "Access denied"}), 403
 
         if not os.path.exists(directory) or not os.path.isdir(directory):
@@ -1256,9 +1252,7 @@ def batch_metadata():
             return jsonify({"error": "Missing directory parameter"}), 400
 
         # Security: Ensure the directory path is within allowed directories
-        normalized_path = os.path.normpath(directory)
-        if not (is_valid_library_path(normalized_path) or
-                normalized_path.startswith(os.path.normpath(TARGET_DIR))):
+        if not (is_valid_library_path(directory) or is_path_in_any_root(directory, [TARGET_DIR])):
             return jsonify({"error": "Access denied"}), 403
 
         if not os.path.exists(directory) or not os.path.isdir(directory):

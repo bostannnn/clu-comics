@@ -213,6 +213,20 @@ class TestListRecentFiles:
         assert data["date_range"] is None
 
 
+class TestListDirectories:
+
+    @patch("routes.collection.is_valid_library_path", return_value=False)
+    def test_rejects_target_prefix_sibling_path(self, mock_is_valid, client, app, tmp_path):
+        sibling = tmp_path / "processed_evil"
+        sibling.mkdir()
+
+        with patch("routes.collection.get_default_library", return_value=None):
+            resp = client.get(f"/list-directories?path={sibling}")
+
+        assert resp.status_code == 403
+        assert resp.get_json()["error"] == "Access denied - path not in any library"
+
+
 class TestFolderThumbnail:
 
     def test_missing_path(self, client):

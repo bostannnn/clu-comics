@@ -1909,6 +1909,7 @@ from helpers.library import (
     get_default_library,
     is_valid_library_path,
     get_library_for_path,
+    is_path_in_any_root,
 )
 
 #########################
@@ -2950,7 +2951,7 @@ def scan_filesystem_for_sync():
             common_path = os.path.commonpath([normalized_path, normalized_target_dir])
             return os.path.samefile(common_path, normalized_target_dir)
         except (ValueError, OSError):
-            return normalized_path.startswith(normalized_target_dir)
+            return is_path_in_any_root(normalized_path, [normalized_target_dir])
 
     def check_has_thumbnail(folder_path):
         for ext in [".png", ".jpg", ".jpeg"]:
@@ -3070,8 +3071,8 @@ def update_index_on_move(old_path, new_path):
                 common_path = os.path.commonpath([path, normalized_target_dir])
                 return os.path.samefile(common_path, normalized_target_dir)
             except (ValueError, OSError):
-                # Fallback: Check if normalized path starts with TARGET folder
-                return path.startswith(normalized_target_dir)
+                # Fallback for platforms/filesystems where commonpath/samefile fails.
+                return is_path_in_any_root(path, [normalized_target_dir])
 
         # Check if old and new paths are in DATA_DIR using robust comparison
         # Same logic as log_file_if_in_data() for consistency
@@ -3080,8 +3081,8 @@ def update_index_on_move(old_path, new_path):
                 common_path = os.path.commonpath([path, normalized_data_dir])
                 return os.path.samefile(common_path, normalized_data_dir)
             except (ValueError, OSError):
-                # Fallback: Check if normalized path starts with DATA_DIR
-                return path.startswith(normalized_data_dir)
+                # Fallback for platforms/filesystems where commonpath/samefile fails.
+                return is_path_in_any_root(path, [normalized_data_dir])
 
         old_in_data = is_in_data_dir(normalized_old)
         new_in_data = is_in_data_dir(normalized_new)
@@ -5251,11 +5252,7 @@ def download_file():
         return jsonify({"error": "Missing path parameter"}), 400
 
     # Security: Ensure the file path is within allowed directories
-    normalized_path = os.path.normpath(file_path)
-    if not (
-        is_valid_library_path(normalized_path)
-        or normalized_path.startswith(os.path.normpath(TARGET_DIR))
-    ):
+    if not (is_valid_library_path(file_path) or is_path_in_any_root(file_path, [TARGET_DIR])):
         return jsonify({"error": "Access denied"}), 403
 
     if not os.path.exists(file_path) or not os.path.isfile(file_path):
@@ -5287,11 +5284,7 @@ def read_text_file():
         return "Missing path parameter", 400
 
     # Security: Ensure the file path is within allowed directories
-    normalized_path = os.path.normpath(file_path)
-    if not (
-        is_valid_library_path(normalized_path)
-        or normalized_path.startswith(os.path.normpath(TARGET_DIR))
-    ):
+    if not (is_valid_library_path(file_path) or is_path_in_any_root(file_path, [TARGET_DIR])):
         return "Access denied", 403
 
     if not os.path.exists(file_path) or not os.path.isfile(file_path):
