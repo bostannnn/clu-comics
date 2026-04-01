@@ -43,6 +43,7 @@ function bindFloatingDropdown(dropdownContainer, dropdownBtn, dropdownMenu) {
   }
 
   dropdownMenu.dataset.cluFloatingBound = '1';
+  const dropdown = bootstrap.Dropdown.getOrCreateInstance(dropdownBtn);
   let repositionHandler = null;
   const originalStyles = {
     position: dropdownMenu.style.position,
@@ -110,8 +111,22 @@ function bindFloatingDropdown(dropdownContainer, dropdownBtn, dropdownMenu) {
     }
   }
 
-  dropdownBtn.addEventListener('shown.bs.dropdown', function () {
-    positionMenu();
+  dropdownBtn.addEventListener('click', function (event) {
+    event.preventDefault();
+    event.stopPropagation();
+    dropdown.toggle();
+  });
+
+  dropdownMenu.addEventListener('click', function (event) {
+    const actionItem = event.target.closest('.dropdown-item');
+    if (actionItem) {
+      dropdown.hide();
+    }
+    event.stopPropagation();
+  });
+
+  dropdownContainer.addEventListener('shown.bs.dropdown', function () {
+    requestAnimationFrame(positionMenu);
 
     repositionHandler = function () {
       positionMenu();
@@ -121,7 +136,7 @@ function bindFloatingDropdown(dropdownContainer, dropdownBtn, dropdownMenu) {
     document.addEventListener('scroll', repositionHandler, true);
   });
 
-  dropdownBtn.addEventListener('hidden.bs.dropdown', function () {
+  dropdownContainer.addEventListener('hidden.bs.dropdown', function () {
     if (repositionHandler) {
       window.removeEventListener('resize', repositionHandler);
       document.removeEventListener('scroll', repositionHandler, true);
