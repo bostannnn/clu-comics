@@ -111,12 +111,6 @@ function bindFloatingDropdown(dropdownContainer, dropdownBtn, dropdownMenu) {
     }
   }
 
-  dropdownBtn.addEventListener('click', function (event) {
-    event.preventDefault();
-    event.stopPropagation();
-    dropdown.toggle();
-  });
-
   dropdownMenu.addEventListener('click', function (event) {
     const actionItem = event.target.closest('.dropdown-item');
     if (actionItem) {
@@ -144,6 +138,12 @@ function bindFloatingDropdown(dropdownContainer, dropdownBtn, dropdownMenu) {
     }
     resetMenuPosition();
   });
+}
+
+function isFilesActionTarget(target) {
+  return Boolean(
+    target && target.closest('button, a, input, select, textarea, label, .dropdown, .dropdown-menu, .dropdown-item')
+  );
 }
 
 // Global variable to track GCD MySQL availability (legacy - kept for backwards compatibility)
@@ -741,7 +741,6 @@ function createListItem(itemName, fullPath, type, panel, isDraggable) {
       dropdownBtn.setAttribute("data-bs-toggle", "dropdown");
       dropdownBtn.setAttribute("aria-expanded", "false");
       dropdownBtn.innerHTML = '<i class="bi bi-three-dots-vertical"></i>';
-      dropdownBtn.onclick = (e) => e.stopPropagation();
 
       const dropdownMenu = document.createElement("ul");
       dropdownMenu.className = "dropdown-menu";
@@ -846,7 +845,6 @@ function createListItem(itemName, fullPath, type, panel, isDraggable) {
       dropdownBtn.setAttribute("aria-expanded", "false");
       dropdownBtn.innerHTML = '<i class="bi bi-three-dots-vertical"></i>';
       dropdownBtn.title = "More options";
-      dropdownBtn.onclick = (e) => e.stopPropagation();
 
       const dropdownMenu = document.createElement("ul");
       dropdownMenu.className = "dropdown-menu dropdown-menu-end shadow";
@@ -896,6 +894,10 @@ function createListItem(itemName, fullPath, type, panel, isDraggable) {
   if (type === "file") {
     li.setAttribute("data-fullpath", fullPath);
     li.addEventListener("click", function (e) {
+      if (isFilesActionTarget(e.target)) {
+        return;
+      }
+
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
         if (selectedFiles.has(fullPath)) {
@@ -960,7 +962,11 @@ function createListItem(itemName, fullPath, type, panel, isDraggable) {
     // Set data-fullpath for directories so they can be found during deletion
     li.setAttribute("data-fullpath", fullPath);
 
-    li.onclick = function () {
+    li.onclick = function (e) {
+      if (isFilesActionTarget(e.target)) {
+        return;
+      }
+
       // Store current filter for current path before navigating
       const currentPath = panel === 'source' ? currentSourcePath : currentDestinationPath;
       if (currentFilter[panel] !== 'all') {
@@ -1616,7 +1622,6 @@ function loadRecentFiles(panel) {
           dropdownBtn.setAttribute('aria-expanded', 'false');
           dropdownBtn.innerHTML = '<i class="bi bi-three-dots-vertical"></i>';
           dropdownBtn.title = 'More options';
-          dropdownBtn.onclick = function (e) { e.stopPropagation(); };
 
           const dropdownMenu = document.createElement('ul');
           dropdownMenu.className = 'dropdown-menu dropdown-menu-end shadow';
@@ -1921,7 +1926,6 @@ function loadTrash(panel) {
         dropdownBtn.setAttribute('aria-expanded', 'false');
         dropdownBtn.innerHTML = '<i class="bi bi-three-dots-vertical"></i>';
         dropdownBtn.title = 'More options';
-        dropdownBtn.onclick = function (e) { e.stopPropagation(); };
 
         const dropdownMenu = document.createElement('ul');
         dropdownMenu.className = 'dropdown-menu dropdown-menu-end shadow';

@@ -389,7 +389,12 @@ function renderTable() {
         const tr = document.createElement('tr');
         tr.className = 'sw-directory-row';
         tr.dataset.name = dir.name;
-        tr.addEventListener('click', () => loadPath(dir.path));
+        tr.addEventListener('click', (e) => {
+            if (e.target.closest('button, a, input, select, textarea, label, .dropdown, .dropdown-menu, .dropdown-item')) {
+                return;
+            }
+            loadPath(dir.path);
+        });
 
         // Checkbox column (empty for directories)
         const tdCb = document.createElement('td');
@@ -405,9 +410,6 @@ function renderTable() {
             ' id="' + dirDropdownId + '" data-bs-toggle="dropdown" aria-expanded="false">' +
             '<i class="bi bi-three-dots-vertical"></i></button>' +
             '<ul class="dropdown-menu dropdown-menu-end" aria-labelledby="' + dirDropdownId + '"></ul></div>';
-        tdActions.querySelector('.dropdown-toggle').addEventListener('click', (e) => {
-            e.stopPropagation();
-        });
         CLU.populateFolderActionMenu(tdActions.querySelector('.dropdown-menu'), {
             onFetchAllMetadata: function () { fetchDirMetadataSW(dir.path, dir.name); },
             onForceComicVine: hasSourceWallProvider('comicvine')
