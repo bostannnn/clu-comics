@@ -45,6 +45,8 @@ function bindFloatingDropdown(dropdownContainer, dropdownBtn, dropdownMenu) {
   dropdownMenu.dataset.cluFloatingBound = '1';
   const dropdown = bootstrap.Dropdown.getOrCreateInstance(dropdownBtn);
   let repositionHandler = null;
+  let originalParent = dropdownContainer;
+  let originalNextSibling = dropdownMenu.nextSibling;
   const originalStyles = {
     position: dropdownMenu.style.position,
     top: dropdownMenu.style.top,
@@ -57,6 +59,27 @@ function bindFloatingDropdown(dropdownContainer, dropdownBtn, dropdownMenu) {
     transform: dropdownMenu.style.transform,
     inset: dropdownMenu.style.inset
   };
+
+  function moveMenuToBody() {
+    originalParent = dropdownContainer;
+    originalNextSibling = dropdownMenu.nextSibling;
+
+    if (dropdownMenu.parentNode !== document.body) {
+      document.body.appendChild(dropdownMenu);
+    }
+  }
+
+  function restoreMenu() {
+    if (dropdownMenu.parentNode === originalParent) {
+      return;
+    }
+
+    if (originalNextSibling && originalNextSibling.parentNode === originalParent) {
+      originalParent.insertBefore(dropdownMenu, originalNextSibling);
+    } else {
+      originalParent.appendChild(dropdownMenu);
+    }
+  }
 
   function resetMenuPosition() {
     dropdownMenu.style.position = originalStyles.position;
@@ -119,6 +142,10 @@ function bindFloatingDropdown(dropdownContainer, dropdownBtn, dropdownMenu) {
     event.stopPropagation();
   });
 
+  dropdownContainer.addEventListener('show.bs.dropdown', function () {
+    moveMenuToBody();
+  });
+
   dropdownContainer.addEventListener('shown.bs.dropdown', function () {
     requestAnimationFrame(positionMenu);
 
@@ -137,6 +164,7 @@ function bindFloatingDropdown(dropdownContainer, dropdownBtn, dropdownMenu) {
       repositionHandler = null;
     }
     resetMenuPosition();
+    restoreMenu();
   });
 }
 
