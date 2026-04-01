@@ -43,34 +43,91 @@ function bindFloatingDropdown(dropdownContainer, dropdownBtn, dropdownMenu) {
   }
 
   dropdownMenu.dataset.cluFloatingBound = '1';
+  let repositionHandler = null;
+  const originalStyles = {
+    position: dropdownMenu.style.position,
+    top: dropdownMenu.style.top,
+    left: dropdownMenu.style.left,
+    right: dropdownMenu.style.right,
+    bottom: dropdownMenu.style.bottom,
+    zIndex: dropdownMenu.style.zIndex,
+    maxHeight: dropdownMenu.style.maxHeight,
+    overflowY: dropdownMenu.style.overflowY,
+    transform: dropdownMenu.style.transform,
+    inset: dropdownMenu.style.inset
+  };
 
-  let originalParent = dropdownContainer;
-  let originalNextSibling = dropdownMenu.nextSibling;
-
-  function moveMenuToBody() {
-    originalParent = dropdownContainer;
-    originalNextSibling = dropdownMenu.nextSibling;
-    document.body.appendChild(dropdownMenu);
+  function resetMenuPosition() {
+    dropdownMenu.style.position = originalStyles.position;
+    dropdownMenu.style.top = originalStyles.top;
+    dropdownMenu.style.left = originalStyles.left;
+    dropdownMenu.style.right = originalStyles.right;
+    dropdownMenu.style.bottom = originalStyles.bottom;
+    dropdownMenu.style.zIndex = originalStyles.zIndex;
+    dropdownMenu.style.maxHeight = originalStyles.maxHeight;
+    dropdownMenu.style.overflowY = originalStyles.overflowY;
+    dropdownMenu.style.transform = originalStyles.transform;
+    dropdownMenu.style.inset = originalStyles.inset;
   }
 
-  function restoreMenu() {
-    if (dropdownMenu.parentNode === originalParent) {
-      return;
+  function positionMenu() {
+    const btnRect = dropdownBtn.getBoundingClientRect();
+    const menuRect = dropdownMenu.getBoundingClientRect();
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    const gutter = 8;
+    const belowAvailable = Math.max(0, viewportHeight - btnRect.bottom - gutter);
+    const aboveAvailable = Math.max(0, btnRect.top - gutter);
+    const openBelow = belowAvailable >= menuRect.height || belowAvailable >= aboveAvailable;
+    const availableHeight = openBelow ? belowAvailable : aboveAvailable;
+
+    let top = openBelow
+      ? btnRect.bottom
+      : Math.max(gutter, btnRect.top - Math.min(menuRect.height, availableHeight));
+
+    let left = btnRect.right - menuRect.width;
+    if (left < gutter) {
+      left = gutter;
+    } else if (left + menuRect.width > viewportWidth - gutter) {
+      left = Math.max(gutter, viewportWidth - gutter - menuRect.width);
     }
 
-    if (originalNextSibling && originalNextSibling.parentNode === originalParent) {
-      originalParent.insertBefore(dropdownMenu, originalNextSibling);
+    dropdownMenu.style.position = 'fixed';
+    dropdownMenu.style.top = `${top}px`;
+    dropdownMenu.style.left = `${left}px`;
+    dropdownMenu.style.right = 'auto';
+    dropdownMenu.style.bottom = 'auto';
+    dropdownMenu.style.zIndex = '1200';
+    dropdownMenu.style.transform = 'none';
+    dropdownMenu.style.inset = 'auto';
+
+    if (menuRect.height > availableHeight) {
+      dropdownMenu.style.maxHeight = `${Math.max(1, availableHeight)}px`;
+      dropdownMenu.style.overflowY = 'auto';
     } else {
-      originalParent.appendChild(dropdownMenu);
+      dropdownMenu.style.maxHeight = '';
+      dropdownMenu.style.overflowY = '';
     }
   }
 
-  dropdownBtn.addEventListener('show.bs.dropdown', function () {
-    moveMenuToBody();
+  dropdownBtn.addEventListener('shown.bs.dropdown', function () {
+    positionMenu();
+
+    repositionHandler = function () {
+      positionMenu();
+    };
+
+    window.addEventListener('resize', repositionHandler);
+    document.addEventListener('scroll', repositionHandler, true);
   });
 
   dropdownBtn.addEventListener('hidden.bs.dropdown', function () {
-    restoreMenu();
+    if (repositionHandler) {
+      window.removeEventListener('resize', repositionHandler);
+      document.removeEventListener('scroll', repositionHandler, true);
+      repositionHandler = null;
+    }
+    resetMenuPosition();
   });
 }
 
