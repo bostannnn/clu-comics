@@ -3275,6 +3275,33 @@ def _try_metron_single(cvinfo_path, series_name, issue_number, year):
         return None, None
 
 
+def _try_metron_single_selection(series_name, year):
+    """Return Metron candidate matches for forced single-file manual selection."""
+    try:
+        metron_api = metron.get_flask_api()
+        if not metron_api or not series_name:
+            return None
+
+        matches = metron.search_series_candidates_by_name(metron_api, series_name, year)
+        if not matches:
+            return None
+
+        return {
+            "requires_selection": True,
+            "provider": "metron",
+            "possible_matches": [{
+                "id": match.get("id"),
+                "name": match.get("name"),
+                "publisher_name": match.get("publisher_name"),
+                "start_year": match.get("year_began"),
+                "cv_id": match.get("cv_id"),
+            } for match in matches],
+        }
+    except Exception as e:
+        app_logger.warning(f"[search-metadata] Metron candidate lookup failed: {e}")
+        return None
+
+
 def _try_comicvine_single(cvinfo_path, series_name, issue_number, year):
     """Try ComicVine provider for a single file.
     Returns (metadata_dict, image_url, volume_data, None) on success,
@@ -3358,6 +3385,30 @@ def _try_comicvine_single(cvinfo_path, series_name, issue_number, year):
     except Exception as e:
         app_logger.warning(f"[search-metadata] ComicVine lookup failed: {e}")
         return None, None, None, None
+
+
+def _try_comicvine_single_selection(series_name, year):
+    """Return ComicVine candidates for forced single-file manual selection."""
+    try:
+        api_key = current_app.config.get("COMICVINE_API_KEY", "").strip()
+        if not api_key or not comicvine.is_simyan_available() or not series_name:
+            return None
+
+        normalized_series = re.sub(r'[:\-\u2013\u2014\'\"\.\,\!\?]', ' ', series_name)
+        normalized_series = re.sub(r'\s+', ' ', normalized_series).strip()
+
+        volumes = comicvine.search_volumes(api_key, normalized_series, year)
+        if not volumes:
+            return None
+
+        return {
+            "requires_selection": True,
+            "provider": "comicvine",
+            "possible_matches": volumes,
+        }
+    except Exception as e:
+        app_logger.warning(f"[search-metadata] ComicVine candidate lookup failed: {e}")
+        return None
 
 
 def _try_gcd_single(series_name, issue_number, year):
@@ -3582,6 +3633,7 @@ def search_metadata():
         search_term_override = data.get('search_term')
         gcd_api_start_year = data.get('gcd_api_start_year')  # User-provided series start year for GCD API
         force_provider = (data.get('force_provider') or '').strip().lower()
+        force_manual_selection = bool(data.get('force_manual_selection'))
 
         if not file_path or not file_name:
             return jsonify({"success": False, "error": "Missing file_path or file_name"}), 400
@@ -3684,6 +3736,18 @@ def search_metadata():
                         if img_url and not isinstance(img_url, str):
                             img_url = str(img_url)
 
+            elif provider == 'metron':
+                series_id = selected_match.get('series_id')
+                metron_api = metron.get_flask_api()
+                if series_id and metron_api:
+                    issue_data = metron.get_issue_metadata(metron_api, series_id, issue_number)
+                    if issue_data:
+                        metadata = metron.map_to_comicinfo(issue_data)
+                        if isinstance(issue_data, dict):
+                            image = issue_data.get('image')
+                            if image:
+                                img_url = str(image) if not isinstance(image, str) else image
+
             elif provider == 'gcd':
                 series_id = selected_match.get('series_id')
                 if series_id:
@@ -3769,11 +3833,6 @@ def search_metadata():
             app_logger.info(f"[search-metadata] {provider} returned metadata for {file_name} (via selection)")
             return jsonify(response_data)
 
-        # Check for cvinfo file in parent folder
-        update_single_metadata_progress(2, "Preparing provider search...")
-        folder_path = os.path.dirname(file_path)
-        cvinfo_path = comicvine.find_cvinfo_in_folder(folder_path)
-
         # Look up library provider priorities
         if library_id:
             library_providers = get_library_providers(library_id)
@@ -3808,6 +3867,46 @@ def search_metadata():
                     detail=f"{force_provider} is not enabled",
                 )
             provider_order = [force_provider]
+
+        if force_manual_selection and force_provider in {'comicvine', 'metron'}:
+            update_single_metadata_progress(2, f"Preparing forced {force_provider} selection...")
+
+            if force_provider == 'comicvine':
+                selection_data = _try_comicvine_single_selection(series_name, year)
+                provider_error = f"No ComicVine volumes found for '{series_name}'"
+            else:
+                selection_data = _try_metron_single_selection(series_name, year)
+                provider_error = f"No Metron series found for '{series_name}'"
+
+            if selection_data:
+                selection_data["parsed_filename"] = {
+                    "series_name": series_name,
+                    "issue_number": issue_number,
+                    "year": year
+                }
+                update_single_metadata_progress(4, f"{force_provider} requires selection")
+                app_logger.info(f"[search-metadata] forced {force_provider} selection required for {file_name}")
+                return jsonify(selection_data)
+
+            return fail_single_metadata(
+                404,
+                {
+                    "success": False,
+                    "error": provider_error,
+                    "parsed_filename": {
+                        "series_name": series_name,
+                        "issue_number": issue_number,
+                        "year": year
+                    }
+                },
+                current=4,
+                detail=f"No {force_provider} candidates found",
+            )
+
+        # Check for cvinfo file in parent folder
+        update_single_metadata_progress(2, "Preparing provider search...")
+        folder_path = os.path.dirname(file_path)
+        cvinfo_path = comicvine.find_cvinfo_in_folder(folder_path)
 
         app_logger.info(f"[search-metadata] Provider order: {provider_order}")
 

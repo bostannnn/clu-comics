@@ -347,6 +347,10 @@
   }
 
   function _showCVVolumeModal(data, filePath, fileName) {
+    var providerType = data.provider || 'comicvine';
+    var providerLabel = providerType === 'metron' ? 'Metron' : 'ComicVine';
+    var resultLabel = providerType === 'metron' ? 'Series' : 'Volume(s)';
+
     _removeGCDApiLangFilter();
     // Show the inline refine row for single-file context
     var refineRow = document.getElementById('cvRefineSearchRow');
@@ -354,7 +358,7 @@
 
     var modalTitle = document.getElementById('comicVineVolumeModalLabel');
     if (modalTitle) {
-      modalTitle.textContent = 'Select correct match (via ComicVine) - ' + data.possible_matches.length + ' Volume(s)';
+      modalTitle.textContent = 'Select correct match (via ' + providerLabel + ') - ' + data.possible_matches.length + ' ' + resultLabel;
     }
 
     // Populate parsed info
@@ -371,11 +375,15 @@
       var modal = bootstrap.Modal.getInstance(document.getElementById('comicVineVolumeModal'));
       modal.hide();
 
-      CLU.searchMetadataWithSelection(filePath, fileName, {
-        provider: 'comicvine',
-        volume_id: volume.id,
-        publisher_name: volume.publisher_name
-      });
+      var selectedMatch = { provider: providerType };
+      if (providerType === 'metron') {
+        selectedMatch.series_id = volume.id;
+      } else {
+        selectedMatch.volume_id = volume.id;
+        selectedMatch.publisher_name = volume.publisher_name;
+      }
+
+      CLU.searchMetadataWithSelection(filePath, fileName, selectedMatch);
     };
 
     _wireCVSortAndFilter();
@@ -396,7 +404,13 @@
         newRefineBtn.disabled = true;
         newRefineBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status"></span>Searching...';
 
-        var requestBody = { file_path: filePath, file_name: fileName, search_term: refinedTerm };
+        var requestBody = {
+          file_path: filePath,
+          file_name: fileName,
+          search_term: refinedTerm,
+          force_provider: providerType,
+          force_manual_selection: true
+        };
         var libraryId = _getLibraryId();
         if (libraryId) requestBody.library_id = libraryId;
 
@@ -410,7 +424,7 @@
             newRefineBtn.disabled = false;
             newRefineBtn.innerHTML = '<i class="bi bi-search me-1"></i>Refine';
 
-            if (newData.requires_selection && newData.provider === 'comicvine') {
+            if (newData.requires_selection && (newData.provider === 'comicvine' || newData.provider === 'metron')) {
               // Re-populate volume list in-place
               _showCVVolumeModal(newData, filePath, fileName);
             } else if (newData.success) {
@@ -718,6 +732,7 @@
     var contract = _getContract();
     var searchTerm = null;
     var forceProvider = null;
+    var forceManualSelection = false;
     var progressToast = _buildProgressToast('Searching Metadata', '0/5', 'Starting request...');
     var stopProgressWatcher = _startSingleFileProgressWatcher(filePath, fileName, progressToast);
 
@@ -726,6 +741,7 @@
     } else if (searchTermOrOptions && typeof searchTermOrOptions === 'object') {
       searchTerm = searchTermOrOptions.searchTerm || null;
       forceProvider = searchTermOrOptions.forceProvider || null;
+      forceManualSelection = !!searchTermOrOptions.forceManualSelection;
     }
 
     var requestBody = { file_path: filePath, file_name: fileName };
@@ -737,6 +753,9 @@
     }
     if (forceProvider) {
       requestBody.force_provider = forceProvider;
+    }
+    if (forceManualSelection) {
+      requestBody.force_manual_selection = true;
     }
 
     fetch('/api/search-metadata', {
@@ -750,7 +769,7 @@
         _removeToast(progressToast);
 
         if (data.requires_selection) {
-          if (data.provider === 'comicvine') {
+          if (data.provider === 'comicvine' || data.provider === 'metron') {
             _showCVVolumeModal(data, filePath, fileName);
           } else if (data.provider === 'gcd') {
             // Use page-level GCD modal if available, otherwise show info
@@ -806,7 +825,10 @@
   };
 
   CLU.forceSearchMetadata = function (filePath, fileName, forceProvider) {
-    return CLU.searchMetadata(filePath, fileName, { forceProvider: forceProvider });
+    return CLU.searchMetadata(filePath, fileName, {
+      forceProvider: forceProvider,
+      forceManualSelection: true
+    });
   };
 
   // ── Public API: Single-file with user selection ───────────────────────

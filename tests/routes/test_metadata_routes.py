@@ -697,6 +697,68 @@ class TestSearchMetadataParsedFilename:
         mock_try_comicvine.assert_called_once()
         mock_try_metron.assert_not_called()
 
+    @patch("routes.metadata.comicvine.search_volumes", return_value=[
+        {"id": 4050, "name": "Batman", "start_year": 2016, "publisher_name": "DC Comics"}
+    ])
+    @patch("routes.metadata.comicvine.is_simyan_available", return_value=True)
+    @patch("models.comicvine.find_cvinfo_in_folder")
+    @patch("core.database.set_has_comicinfo")
+    def test_force_provider_requires_manual_selection_for_single_comicvine(
+        self,
+        mock_set,
+        mock_find_cvinfo,
+        mock_simyan_available,
+        mock_search_volumes,
+        client,
+    ):
+        client.application.config["COMICVINE_API_KEY"] = "test-key"
+
+        resp = client.post('/api/search-metadata', json={
+            'file_path': '/data/Batman 001 (2020).cbz',
+            'file_name': 'Batman 001 (2020).cbz',
+            'force_provider': 'comicvine',
+            'force_manual_selection': True,
+        })
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["requires_selection"] is True
+        assert data["provider"] == "comicvine"
+        assert data["possible_matches"][0]["id"] == 4050
+        mock_search_volumes.assert_called_once_with("test-key", "Batman", 2020)
+        mock_find_cvinfo.assert_not_called()
+
+    @patch("routes.metadata.metron.search_series_candidates_by_name", return_value=[
+        {"id": 501, "name": "Batman", "cv_id": 4050, "publisher_name": "DC Comics", "year_began": 2016}
+    ])
+    @patch("routes.metadata.metron.get_flask_api", return_value=MagicMock())
+    @patch("routes.metadata.metron.is_metron_configured", return_value=True)
+    @patch("models.comicvine.find_cvinfo_in_folder")
+    @patch("core.database.set_has_comicinfo")
+    def test_force_provider_requires_manual_selection_for_single_metron(
+        self,
+        mock_set,
+        mock_find_cvinfo,
+        mock_metron_configured,
+        mock_get_flask_api,
+        mock_search_candidates,
+        client,
+    ):
+        resp = client.post('/api/search-metadata', json={
+            'file_path': '/data/Batman 001 (2020).cbz',
+            'file_name': 'Batman 001 (2020).cbz',
+            'force_provider': 'metron',
+            'force_manual_selection': True,
+        })
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["requires_selection"] is True
+        assert data["provider"] == "metron"
+        assert data["possible_matches"][0]["id"] == 501
+        mock_search_candidates.assert_called_once()
+        mock_find_cvinfo.assert_not_called()
+
     @patch("models.comicvine.find_cvinfo_in_folder", return_value=None)
     @patch("core.database.get_library_providers", return_value=[
         {"provider_type": "metron", "enabled": True},
@@ -971,7 +1033,47 @@ class TestComicVineVolumeYearHandling:
             1,
         )
         mock_add_xml.assert_called_once()
-        assert mock_add_xml.call_args.args[0] == "/data/Batman (2016)/Batman 001 (2020).cbz"
+
+    @patch("core.database.set_has_comicinfo")
+    @patch("routes.metadata.add_comicinfo_to_cbz")
+    @patch("routes.metadata.metron.map_to_comicinfo", return_value={
+        "Series": "Batman",
+        "Number": "1",
+        "Volume": 2016,
+        "Year": 2020,
+    })
+    @patch("routes.metadata.metron.get_issue_metadata", return_value={
+        "id": 9001,
+        "image": "https://example.com/cover.jpg",
+    })
+    @patch("routes.metadata.metron.get_flask_api", return_value=MagicMock())
+    def test_search_metadata_selection_supports_metron_series_choice(
+        self,
+        mock_get_flask_api,
+        mock_get_issue_metadata,
+        mock_map_to_comicinfo,
+        mock_add_xml,
+        mock_set_has_comicinfo,
+        client,
+    ):
+        resp = client.post("/api/search-metadata", json={
+            "file_path": "/data/Batman 001 (2020).cbz",
+            "file_name": "Batman 001 (2020).cbz",
+            "selected_match": {
+                "provider": "metron",
+                "series_id": 501,
+            },
+        })
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["success"] is True
+        assert data["source"] == "metron"
+        assert data["image_url"] == "https://example.com/cover.jpg"
+        mock_get_issue_metadata.assert_called_once()
+        mock_map_to_comicinfo.assert_called_once()
+        mock_add_xml.assert_called_once()
+        assert mock_add_xml.call_args.args[0] == "/data/Batman 001 (2020).cbz"
 
     @patch("core.database.set_has_comicinfo")
     @patch("routes.metadata.add_comicinfo_to_cbz")
