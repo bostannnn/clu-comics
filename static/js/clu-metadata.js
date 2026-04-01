@@ -220,23 +220,60 @@
   var _cvSortNameAsc = true;
   var _cvSortYearAsc = true;
   var _cvFilterFn = null;  // Override for custom filtering (e.g., GCD API language filter)
+  var _cvSelectionMode = 'volume';
+  var _cvSelectionContext = null;
+
+  function _isCVIssueSelectionMode() {
+    return _cvSelectionMode === 'issue';
+  }
+
+  function _compareCVIssueNumbers(a, b) {
+    function parseIssueNumber(value) {
+      var raw = (value || '').trim();
+      var match = raw.match(/^(\d+)(?:\.(\d+))?$/);
+      if (match) {
+        return {
+          type: 0,
+          major: parseInt(match[1], 10),
+          minor: parseInt(match[2] || '0', 10),
+          raw: raw.toLowerCase()
+        };
+      }
+      return { type: 1, major: 0, minor: 0, raw: raw.toLowerCase() };
+    }
+
+    var left = parseIssueNumber(a);
+    var right = parseIssueNumber(b);
+    if (left.type !== right.type) return left.type - right.type;
+    if (left.major !== right.major) return left.major - right.major;
+    if (left.minor !== right.minor) return left.minor - right.minor;
+    return left.raw.localeCompare(right.raw);
+  }
 
   function _renderCVVolumeList(volumes) {
     var volumeList = document.getElementById('cvVolumeList');
     volumeList.innerHTML = '';
+    var isIssueMode = _isCVIssueSelectionMode();
 
     volumes.forEach(function (volume) {
       var volumeItem = document.createElement('div');
       volumeItem.className = 'list-group-item list-group-item-action d-flex align-items-start';
       volumeItem.style.cursor = 'pointer';
 
-      var yearDisplay = volume.start_year || 'Unknown';
+      var yearDisplay = isIssueMode ? (volume.cover_date || volume.year || 'Unknown') : (volume.start_year || 'Unknown');
       var issueCount = volume.count_of_issues || 'Unknown';
+      var titleHtml = isIssueMode
+        ? '<div class="fw-bold">#' + CLU.escapeHtml(volume.issue_number || '?') + ' ' + CLU.escapeHtml(volume.name || 'Untitled Issue') + '</div>'
+        : '<div class="fw-bold">' + CLU.escapeHtml(volume.name) + '</div>';
+      var metaHtml = isIssueMode
+        ? '<small class="text-muted">Series: ' + CLU.escapeHtml(volume.volume_name || _cvSelectionContext && _cvSelectionContext.volume_name || 'Unknown') +
+          '<br>Cover Date: ' + CLU.escapeHtml(volume.cover_date || 'Unknown') + '</small>'
+        : '<small class="text-muted">Publisher: ' + CLU.escapeHtml(volume.publisher_name || 'Unknown') + '<br>Issues: ' + issueCount + '</small>';
       var descriptionPreview = volume.description ?
-        '<small class="text-muted d-block mt-1">' + volume.description + '</small>' : '';
+        '<small class="text-muted d-block mt-1">' + CLU.escapeHtml(volume.description) + '</small>' : '';
 
       var thumbnailHtml = volume.image_url ?
-        '<img src="' + volume.image_url + '" class="img-thumbnail me-3" style="width: 80px; height: 120px; object-fit: cover;" alt="' + CLU.escapeHtml(volume.name) + ' cover">' :
+        '<img src="' + volume.image_url + '" class="img-thumbnail me-3" style="width: 80px; height: 120px; object-fit: cover;" alt="' + CLU.escapeHtml(volume.name || volume.issue_number || 'Issue') + ' cover">' :
         '<div class="me-3 d-flex align-items-center justify-content-center bg-secondary text-white" style="width: 80px; height: 120px; font-size: 10px;">No Cover</div>';
 
       var langBadge = volume.language ?
@@ -246,8 +283,8 @@
         thumbnailHtml +
         '<div class="flex-grow-1 d-flex justify-content-between align-items-start">' +
           '<div class="me-2">' +
-            '<div class="fw-bold">' + CLU.escapeHtml(volume.name) + '</div>' +
-            '<small class="text-muted">Publisher: ' + CLU.escapeHtml(volume.publisher_name || 'Unknown') + '<br>Issues: ' + issueCount + '</small>' +
+            titleHtml +
+            metaHtml +
             descriptionPreview +
           '</div>' +
           '<div class="text-end">' +
@@ -269,7 +306,10 @@
     var filterText = (filterInput && filterInput.value || '').toLowerCase();
     if (!filterText) return _cvVolumes;
     return _cvVolumes.filter(function (v) {
-      return (v.name || '').toLowerCase().indexOf(filterText) !== -1;
+      var searchable = _isCVIssueSelectionMode()
+        ? [v.issue_number, v.name, v.cover_date, v.volume_name]
+        : [v.name, v.publisher_name, v.start_year];
+      return searchable.join(' ').toLowerCase().indexOf(filterText) !== -1;
     });
   }
 
@@ -282,9 +322,11 @@
     if (filterInput) filterInput.value = '';
     if (nameBtn) {
       nameBtn.className = 'btn btn-outline-secondary btn-sm';
+      nameBtn.innerHTML = '<i class="bi bi-sort-alpha-down me-1"></i>' + (_isCVIssueSelectionMode() ? 'Issue' : 'Name');
     }
     if (yearBtn) {
       yearBtn.className = 'btn btn-outline-secondary btn-sm';
+      yearBtn.innerHTML = '<i class="bi bi-sort-numeric-down me-1"></i>' + (_isCVIssueSelectionMode() ? 'Date' : 'Year');
     }
 
     // Reset sort direction
@@ -296,16 +338,26 @@
       var newNameBtn = nameBtn.cloneNode(true);
       nameBtn.parentNode.replaceChild(newNameBtn, nameBtn);
       newNameBtn.addEventListener('click', function () {
-        var dir = _cvSortNameAsc ? 1 : -1;
-        _cvVolumes.sort(function (a, b) {
-          return dir * (a.name || '').toLowerCase().localeCompare((b.name || '').toLowerCase());
-        });
+        if (_isCVIssueSelectionMode()) {
+          _cvVolumes.sort(function (a, b) {
+            var result = _compareCVIssueNumbers(a.issue_number, b.issue_number);
+            if (result === 0) {
+              result = (a.name || '').toLowerCase().localeCompare((b.name || '').toLowerCase());
+            }
+            return _cvSortNameAsc ? result : -result;
+          });
+        } else {
+          var dir = _cvSortNameAsc ? 1 : -1;
+          _cvVolumes.sort(function (a, b) {
+            return dir * (a.name || '').toLowerCase().localeCompare((b.name || '').toLowerCase());
+          });
+        }
         newNameBtn.className = 'btn btn-secondary btn-sm';
-        newNameBtn.querySelector('i').className = _cvSortNameAsc ? 'bi bi-sort-alpha-down me-1' : 'bi bi-sort-alpha-up me-1';
+        newNameBtn.innerHTML = '<i class="' + (_cvSortNameAsc ? 'bi bi-sort-alpha-down me-1' : 'bi bi-sort-alpha-up me-1') + '"></i>' + (_isCVIssueSelectionMode() ? 'Issue' : 'Name');
         _cvSortNameAsc = !_cvSortNameAsc;
         var otherBtn = document.getElementById('cvSortByYear');
         otherBtn.className = 'btn btn-outline-secondary btn-sm';
-        otherBtn.querySelector('i').className = 'bi bi-sort-numeric-down me-1';
+        otherBtn.innerHTML = '<i class="bi bi-sort-numeric-down me-1"></i>' + (_isCVIssueSelectionMode() ? 'Date' : 'Year');
         _cvSortYearAsc = true;
         _renderCVVolumeList((_cvFilterFn || _getFilteredVolumes)());
       });
@@ -314,16 +366,28 @@
       var newYearBtn = yearBtn.cloneNode(true);
       yearBtn.parentNode.replaceChild(newYearBtn, yearBtn);
       newYearBtn.addEventListener('click', function () {
-        var dir = _cvSortYearAsc ? 1 : -1;
-        _cvVolumes.sort(function (a, b) {
-          return dir * ((parseInt(a.start_year) || 0) - (parseInt(b.start_year) || 0));
-        });
+        if (_isCVIssueSelectionMode()) {
+          _cvVolumes.sort(function (a, b) {
+            var aDate = Date.parse(a.cover_date || '') || 0;
+            var bDate = Date.parse(b.cover_date || '') || 0;
+            var result = aDate - bDate;
+            if (result === 0) {
+              result = _compareCVIssueNumbers(a.issue_number, b.issue_number);
+            }
+            return _cvSortYearAsc ? result : -result;
+          });
+        } else {
+          var dir = _cvSortYearAsc ? 1 : -1;
+          _cvVolumes.sort(function (a, b) {
+            return dir * ((parseInt(a.start_year) || 0) - (parseInt(b.start_year) || 0));
+          });
+        }
         newYearBtn.className = 'btn btn-secondary btn-sm';
-        newYearBtn.querySelector('i').className = _cvSortYearAsc ? 'bi bi-sort-numeric-down me-1' : 'bi bi-sort-numeric-up me-1';
+        newYearBtn.innerHTML = '<i class="' + (_cvSortYearAsc ? 'bi bi-sort-numeric-down me-1' : 'bi bi-sort-numeric-up me-1') + '"></i>' + (_isCVIssueSelectionMode() ? 'Date' : 'Year');
         _cvSortYearAsc = !_cvSortYearAsc;
         var otherBtn = document.getElementById('cvSortByName');
         otherBtn.className = 'btn btn-outline-secondary btn-sm';
-        otherBtn.querySelector('i').className = 'bi bi-sort-alpha-down me-1';
+        otherBtn.innerHTML = '<i class="bi bi-sort-alpha-down me-1"></i>' + (_isCVIssueSelectionMode() ? 'Issue' : 'Name');
         _cvSortNameAsc = true;
         _renderCVVolumeList((_cvFilterFn || _getFilteredVolumes)());
       });
@@ -349,16 +413,30 @@
   function _showCVVolumeModal(data, filePath, fileName) {
     var providerType = data.provider || 'comicvine';
     var providerLabel = providerType === 'metron' ? 'Metron' : 'ComicVine';
-    var resultLabel = providerType === 'metron' ? 'Series' : 'Volume(s)';
+    var isIssueMode = data.selection_type === 'issue';
+    var resultLabel = isIssueMode ? 'Issue(s)' : (providerType === 'metron' ? 'Series' : 'Volume(s)');
+    var prompt = document.getElementById('cvSelectionPrompt');
 
     _removeGCDApiLangFilter();
-    // Show the inline refine row for single-file context
+    _cvSelectionMode = isIssueMode ? 'issue' : 'volume';
+    _cvSelectionContext = data.selected_match_context || null;
+    // Show the inline refine row for single-file volume search only
     var refineRow = document.getElementById('cvRefineSearchRow');
-    if (refineRow) refineRow.style.display = '';
+    if (refineRow) refineRow.style.display = isIssueMode ? 'none' : '';
 
     var modalTitle = document.getElementById('comicVineVolumeModalLabel');
     if (modalTitle) {
       modalTitle.textContent = 'Select correct match (via ' + providerLabel + ') - ' + data.possible_matches.length + ' ' + resultLabel;
+    }
+    if (prompt) {
+      if (isIssueMode) {
+        var selectedVolumeName = _cvSelectionContext && _cvSelectionContext.volume_name;
+        prompt.innerHTML = '<strong>Please select the correct issue' +
+          (selectedVolumeName ? ' from ' + CLU.escapeHtml(selectedVolumeName) : '') +
+          ':</strong>';
+      } else {
+        prompt.innerHTML = '<strong>Please select the correct ' + (providerType === 'metron' ? 'series' : 'volume') + ':</strong>';
+      }
     }
 
     // Populate parsed info
@@ -376,10 +454,17 @@
       modal.hide();
 
       var selectedMatch = { provider: providerType };
-      if (providerType === 'metron') {
+      if (isIssueMode) {
+        selectedMatch.issue_id = volume.id;
+        selectedMatch.volume_id = _cvSelectionContext && _cvSelectionContext.volume_id;
+        selectedMatch.volume_name = _cvSelectionContext && _cvSelectionContext.volume_name;
+        selectedMatch.publisher_name = _cvSelectionContext && _cvSelectionContext.publisher_name;
+        selectedMatch.start_year = _cvSelectionContext && _cvSelectionContext.start_year;
+      } else if (providerType === 'metron') {
         selectedMatch.series_id = volume.id;
       } else {
         selectedMatch.volume_id = volume.id;
+        selectedMatch.volume_name = volume.name;
         selectedMatch.publisher_name = volume.publisher_name;
       }
 
@@ -392,10 +477,10 @@
     // Wire up inline refine search
     var cvRefineInput = document.getElementById('cvRefineSearchInput');
     var cvRefineBtn = document.getElementById('cvRefineSearchBtn');
-    if (cvRefineInput && data.parsed_filename) {
+    if (!isIssueMode && cvRefineInput && data.parsed_filename) {
       cvRefineInput.value = data.parsed_filename.series_name || '';
     }
-    if (cvRefineBtn) {
+    if (!isIssueMode && cvRefineBtn) {
       var newRefineBtn = cvRefineBtn.cloneNode(true);
       cvRefineBtn.parentNode.replaceChild(newRefineBtn, cvRefineBtn);
       newRefineBtn.addEventListener('click', function () {
@@ -457,6 +542,8 @@
   var _gcdApiLangFilter = '';
 
   function _showGCDApiVolumeModal(data, filePath, fileName) {
+    _cvSelectionMode = 'volume';
+    _cvSelectionContext = null;
     // Hide the inline refine row (not applicable for GCD API)
     var refineRow = document.getElementById('cvRefineSearchRow');
     if (refineRow) refineRow.style.display = 'none';
@@ -548,6 +635,8 @@
   // ── GCD API start year prompt ─────────────────────────────────────────
 
   function _showGCDApiStartYearPrompt(data, filePath, fileName) {
+    _cvSelectionMode = 'volume';
+    _cvSelectionContext = null;
     var seriesName = (data.parsed_filename && data.parsed_filename.series_name) || 'Unknown';
     var message = data.message || ('No series found for "' + seriesName + '". Enter the year the series started.');
 
@@ -675,6 +764,8 @@
 
   function _showBatchSeriesSelectionModal(data, dirPath, dirName) {
     _removeGCDApiLangFilter();
+    _cvSelectionMode = 'volume';
+    _cvSelectionContext = null;
     // Hide refine row for batch context
     var refineRow = document.getElementById('cvRefineSearchRow');
     if (refineRow) refineRow.style.display = 'none';
@@ -865,7 +956,9 @@
         stopProgressWatcher();
         _removeToast(progressToast);
 
-        if (data.success) {
+        if (data.requires_selection && (data.provider === 'comicvine' || data.provider === 'metron')) {
+          _showCVVolumeModal(data, filePath, fileName);
+        } else if (data.success) {
           CLU.showToast('Metadata Found', 'Metadata found via ' + data.source, 'success');
 
           if (typeof contract.onMetadataFound === 'function') {

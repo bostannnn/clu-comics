@@ -356,6 +356,113 @@ def get_issue_by_number(api_key: str, volume_id: int, issue_number: str, year: O
         raise
 
 
+def get_issue_by_id(api_key: str, issue_id: int) -> Optional[Dict[str, Any]]:
+    """
+    Get a specific ComicVine issue by id.
+
+    Args:
+        api_key: ComicVine API key
+        issue_id: ComicVine issue ID
+
+    Returns:
+        Issue dictionary with metadata, or None if not found
+    """
+    if not SIMYAN_AVAILABLE:
+        raise Exception("Simyan library not installed. Install with: pip install simyan")
+
+    try:
+        cv = Comicvine(api_key=api_key, cache=None)
+        issue = cv.get_issue(issue_id)
+        if not issue:
+            app_logger.info(f"No issue found for ComicVine issue id {issue_id}")
+            return None
+        return _issue_to_dict(issue)
+    except Exception as e:
+        app_logger.error(f"Error getting ComicVine issue by id: {str(e)}")
+        raise
+
+
+def list_issue_candidates_for_volume(api_key: str, volume_id: int, year: Optional[int] = None) -> List[Dict[str, Any]]:
+    """
+    List issue candidates for a specific ComicVine volume.
+
+    Args:
+        api_key: ComicVine API key
+        volume_id: ComicVine volume ID
+        year: Optional publication year used for ranking, not filtering
+
+    Returns:
+        List of lightweight issue candidate dictionaries
+    """
+    if not SIMYAN_AVAILABLE:
+        raise Exception("Simyan library not installed. Install with: pip install simyan")
+
+    try:
+        cv = Comicvine(api_key=api_key, cache=None)
+        issues = cv.list_issues(params={"filter": f"volume:{volume_id}"})
+        if not issues:
+            app_logger.info(f"No issue candidates found for volume {volume_id}")
+            return []
+
+        candidates = [_basic_issue_to_candidate(issue, volume_id) for issue in issues]
+        candidates.sort(key=lambda issue: _issue_candidate_sort_key(issue, year))
+        return candidates
+    except Exception as e:
+        app_logger.error(f"Error listing ComicVine issues for volume {volume_id}: {str(e)}")
+        raise
+
+
+def _issue_candidate_sort_key(issue: Dict[str, Any], target_year: Optional[int] = None):
+    issue_number = (issue.get("issue_number") or "").strip()
+    numeric_match = re.match(r'^(\d+)(?:\.(\d+))?$', issue_number)
+    if numeric_match:
+        major = int(numeric_match.group(1))
+        minor = int(numeric_match.group(2) or 0)
+        numeric_key = (0, major, minor)
+    else:
+        numeric_key = (1, issue_number.lower())
+
+    issue_year = issue.get("year")
+    year_distance = abs(issue_year - target_year) if target_year and issue_year else 9999
+    return (year_distance, numeric_key, (issue.get("name") or "").lower())
+
+
+def _basic_issue_to_candidate(issue: Any, fallback_volume_id: Optional[int] = None) -> Dict[str, Any]:
+    date_value = getattr(issue, 'cover_date', None) or getattr(issue, 'store_date', None)
+    cover_date = str(date_value) if date_value else None
+    volume = getattr(issue, 'volume', None)
+    publisher_name = None
+    if volume and hasattr(volume, 'publisher') and volume.publisher:
+        publisher_name = volume.publisher.name if hasattr(volume.publisher, 'name') else None
+
+    image_url = None
+    image = getattr(issue, 'image', None)
+    if image:
+        if hasattr(image, 'small_url') and image.small_url:
+            image_url = str(image.small_url)
+        elif hasattr(image, 'thumb_url') and image.thumb_url:
+            image_url = str(image.thumb_url)
+        elif hasattr(image, 'thumbnail') and image.thumbnail:
+            image_url = str(image.thumbnail)
+
+    issue_number = getattr(issue, 'number', None)
+    if issue_number is None and hasattr(issue, 'issue_number'):
+        issue_number = getattr(issue, 'issue_number')
+
+    return {
+        "id": getattr(issue, 'id', None),
+        "name": getattr(issue, 'name', None),
+        "issue_number": str(issue_number) if issue_number is not None else "",
+        "volume_name": volume.name if volume and hasattr(volume, 'name') else None,
+        "volume_id": volume.id if volume and hasattr(volume, 'id') else fallback_volume_id,
+        "publisher_name": publisher_name,
+        "cover_date": cover_date,
+        "year": _extract_year_from_date(cover_date),
+        "image_url": image_url,
+        "description": getattr(issue, 'description', None),
+    }
+
+
 def _extract_year_from_date(date_str: Optional[str]) -> Optional[int]:
     """
     Extract year from a date string.

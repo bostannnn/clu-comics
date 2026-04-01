@@ -1034,6 +1034,154 @@ class TestComicVineVolumeYearHandling:
         )
         mock_add_xml.assert_called_once()
 
+    @patch("routes.metadata.comicvine.list_issue_candidates_for_volume", return_value=[
+        {
+            "id": 1001,
+            "name": "Rebirth",
+            "issue_number": "1",
+            "volume_name": "Batman",
+            "volume_id": 4050,
+            "publisher_name": "DC Comics",
+            "cover_date": "2020-01-01",
+            "year": 2020,
+            "image_url": "https://example.com/issue-1.jpg",
+        },
+        {
+            "id": 1002,
+            "name": "I Am Gotham",
+            "issue_number": "2",
+            "volume_name": "Batman",
+            "volume_id": 4050,
+            "publisher_name": "DC Comics",
+            "cover_date": "2020-02-01",
+            "year": 2020,
+            "image_url": "https://example.com/issue-2.jpg",
+        },
+    ])
+    @patch("routes.metadata.comicvine.get_issue_by_number", return_value=None)
+    def test_search_metadata_selection_returns_issue_picker_when_selected_volume_lookup_fails(
+        self,
+        mock_get_issue,
+        mock_list_issue_candidates,
+        client,
+    ):
+        client.application.config["COMICVINE_API_KEY"] = "test-key"
+
+        resp = client.post("/api/search-metadata", json={
+            "file_path": "/data/Batman 001 (2020).cbz",
+            "file_name": "Batman 001 (2020).cbz",
+            "selected_match": {
+                "provider": "comicvine",
+                "volume_id": 4050,
+                "volume_name": "Batman",
+                "publisher_name": "DC Comics",
+                "start_year": 2016,
+            },
+        })
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["requires_selection"] is True
+        assert data["selection_type"] == "issue"
+        assert data["provider"] == "comicvine"
+        assert len(data["possible_matches"]) == 2
+        assert data["selected_match_context"]["volume_id"] == 4050
+        assert data["selected_match_context"]["volume_name"] == "Batman"
+        mock_get_issue.assert_called_once_with("test-key", 4050, "1", 2020)
+        mock_list_issue_candidates.assert_called_once_with("test-key", 4050, 2020)
+
+    @patch("core.database.set_has_comicinfo")
+    @patch("routes.metadata.add_comicinfo_to_cbz")
+    @patch("routes.metadata.comicvine.auto_move_file", return_value=None)
+    @patch("routes.metadata.comicvine.get_volume_details", return_value={"start_year": 2016, "publisher_name": "DC Comics"})
+    @patch("routes.metadata.comicvine.get_issue_by_id")
+    def test_search_metadata_selection_supports_comicvine_issue_choice(
+        self,
+        mock_get_issue_by_id,
+        mock_get_volume_details,
+        mock_auto_move,
+        mock_add_xml,
+        mock_set_has_comicinfo,
+        client,
+    ):
+        client.application.config["COMICVINE_API_KEY"] = "test-key"
+        mock_get_issue_by_id.return_value = {
+            "id": 1001,
+            "name": "Rebirth",
+            "issue_number": "1",
+            "volume_name": "Batman",
+            "volume_id": 4050,
+            "publisher": "DC Comics",
+            "year": 2020,
+            "image_url": "https://example.com/cover.jpg",
+        }
+
+        resp = client.post("/api/search-metadata", json={
+            "file_path": "/data/Batman 001 (2020).cbz",
+            "file_name": "Batman 001 (2020).cbz",
+            "selected_match": {
+                "provider": "comicvine",
+                "volume_id": 4050,
+                "issue_id": 1001,
+                "publisher_name": "DC Comics",
+                "start_year": 2016,
+            },
+        })
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["success"] is True
+        assert data["source"] == "comicvine"
+        assert data["image_url"] == "https://example.com/cover.jpg"
+        mock_get_issue_by_id.assert_called_once_with("test-key", 1001)
+        mock_add_xml.assert_called_once()
+
+    @patch("core.database.set_has_comicinfo")
+    @patch("routes.metadata.add_comicinfo_to_cbz")
+    @patch("routes.metadata.comicvine.auto_move_file", return_value=None)
+    @patch("routes.metadata.comicvine.get_volume_details", return_value={"start_year": 2016, "publisher_name": "DC Comics"})
+    @patch("routes.metadata.comicvine.get_issue_by_id")
+    def test_search_metadata_selection_uses_issue_volume_id_over_client_volume_id(
+        self,
+        mock_get_issue_by_id,
+        mock_get_volume_details,
+        mock_auto_move,
+        mock_add_xml,
+        mock_set_has_comicinfo,
+        client,
+    ):
+        client.application.config["COMICVINE_API_KEY"] = "test-key"
+        mock_get_issue_by_id.return_value = {
+            "id": 1001,
+            "name": "Rebirth",
+            "issue_number": "1",
+            "volume_name": "Batman",
+            "volume_id": 4050,
+            "publisher": "DC Comics",
+            "year": 2020,
+            "image_url": "https://example.com/cover.jpg",
+        }
+
+        resp = client.post("/api/search-metadata", json={
+            "file_path": "/data/Batman 001 (2020).cbz",
+            "file_name": "Batman 001 (2020).cbz",
+            "selected_match": {
+                "provider": "comicvine",
+                "volume_id": 9999,
+                "issue_id": 1001,
+                "publisher_name": "DC Comics",
+                "start_year": 2016,
+            },
+        })
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["success"] is True
+        mock_get_issue_by_id.assert_called_once_with("test-key", 1001)
+        mock_get_volume_details.assert_called_once_with("test-key", 4050)
+        volume_data = mock_auto_move.call_args.args[1]
+        assert volume_data["id"] == 4050
+
     @patch("core.database.set_has_comicinfo")
     @patch("routes.metadata.add_comicinfo_to_cbz")
     @patch("routes.metadata.metron.map_to_comicinfo", return_value={

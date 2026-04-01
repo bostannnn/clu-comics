@@ -3719,13 +3719,49 @@ def search_metadata():
             if provider == 'comicvine':
                 volume_id = selected_match.get('volume_id')
                 selected_start_year = selected_match.get('start_year')
+                selected_issue_id = selected_match.get('issue_id')
                 api_key = current_app.config.get("COMICVINE_API_KEY", "").strip()
-                if volume_id and api_key:
-                    issue_data = comicvine.get_issue_by_number(api_key, volume_id, issue_number, year)
+                if api_key and (volume_id or selected_issue_id):
+                    resolved_volume_id = volume_id
+                    if selected_issue_id:
+                        issue_data = comicvine.get_issue_by_id(api_key, selected_issue_id)
+                        if issue_data and issue_data.get('volume_id'):
+                            resolved_volume_id = issue_data.get('volume_id')
+                    elif volume_id:
+                        issue_data = comicvine.get_issue_by_number(api_key, volume_id, issue_number, year)
+                        if not issue_data:
+                            issue_candidates = comicvine.list_issue_candidates_for_volume(api_key, volume_id, year)
+                            if issue_candidates:
+                                selected_volume_name = (
+                                    selected_match.get('volume_name')
+                                    or issue_candidates[0].get('volume_name')
+                                )
+                                update_single_metadata_progress(4, "ComicVine requires issue selection")
+                                app_logger.info(
+                                    f"[search-metadata] comicvine issue selection required for {file_name} "
+                                    f"after volume {volume_id}"
+                                )
+                                return jsonify({
+                                    "requires_selection": True,
+                                    "selection_type": "issue",
+                                    "provider": "comicvine",
+                                    "possible_matches": issue_candidates,
+                                    "parsed_filename": {
+                                        "series_name": series_name,
+                                        "issue_number": issue_number,
+                                        "year": year,
+                                    },
+                                    "selected_match_context": {
+                                        "volume_id": volume_id,
+                                        "volume_name": selected_volume_name,
+                                        "publisher_name": selected_match.get('publisher_name'),
+                                        "start_year": selected_start_year,
+                                    },
+                                })
                     if issue_data:
                         volume_data = _resolve_comicvine_volume_data(
                             api_key,
-                            volume_id,
+                            resolved_volume_id,
                             issue_data,
                             publisher_name=selected_match.get('publisher_name', ''),
                             start_year=selected_start_year,
