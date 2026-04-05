@@ -636,26 +636,108 @@ def custom_rename():
 
 @files_bp.route('/apply-rename-pattern', methods=['POST'])
 def apply_rename_pattern():
-    """Apply the saved custom rename pattern to a single file using local data only."""
+    """Apply the saved custom rename pattern to a file, or all comic files directly in a folder."""
     data = request.get_json() or {}
-    file_path = data.get('path')
+    target_path = data.get('path')
 
-    if not file_path:
+    if not target_path:
         return jsonify({"error": "Missing file path"}), 400
 
-    if not os.path.exists(file_path):
+    if not os.path.exists(target_path):
         return jsonify({"error": "Source file does not exist"}), 404
 
-    if not os.path.isfile(file_path):
-        return jsonify({"error": "Path is not a file"}), 400
-
-    if is_critical_path(file_path):
-        app_logger.error(f"Attempted to apply rename pattern to critical path: {file_path}")
-        return jsonify({"error": get_critical_path_error_message(file_path, "rename")}), 403
+    if is_critical_path(target_path):
+        app_logger.error(f"Attempted to apply rename pattern to critical path: {target_path}")
+        return jsonify({"error": get_critical_path_error_message(target_path, "rename")}), 403
 
     try:
         from cbz_ops.rename import rename_file_using_custom_pattern
 
+        if os.path.isdir(target_path):
+            comic_extensions = {'.cbz', '.cbr', '.zip'}
+            candidate_paths = []
+            for entry in sorted(os.listdir(target_path)):
+                full_path = os.path.join(target_path, entry)
+                if not os.path.isfile(full_path) or is_hidden(full_path):
+                    continue
+                if os.path.splitext(entry)[1].lower() in comic_extensions:
+                    candidate_paths.append(full_path)
+
+            if not candidate_paths:
+                return jsonify({
+                    "success": True,
+                    "renamed": False,
+                    "bulk": True,
+                    "processed_count": 0,
+                    "renamed_count": 0,
+                    "skipped_count": 0,
+                    "failed_count": 0,
+                    "results": [],
+                    "message": "No comic files found directly inside this folder"
+                })
+
+            from app import update_index_on_move
+
+            results = []
+            renamed_count = 0
+            skipped_count = 0
+            failed_count = 0
+
+            for file_path in candidate_paths:
+                try:
+                    new_path, was_renamed = rename_file_using_custom_pattern(file_path)
+                    if was_renamed:
+                        update_index_on_move(file_path, new_path)
+                        renamed_count += 1
+                        results.append({
+                            "path": file_path,
+                            "new_path": new_path,
+                            "new_name": os.path.basename(new_path),
+                            "renamed": True
+                        })
+                    else:
+                        skipped_count += 1
+                        results.append({
+                            "path": file_path,
+                            "new_path": new_path,
+                            "new_name": os.path.basename(new_path),
+                            "renamed": False
+                        })
+                except ValueError as e:
+                    failed_count += 1
+                    results.append({
+                        "path": file_path,
+                        "renamed": False,
+                        "error": str(e)
+                    })
+                except Exception as e:
+                    failed_count += 1
+                    app_logger.error(f"Error applying rename pattern to {file_path}: {e}")
+                    results.append({
+                        "path": file_path,
+                        "renamed": False,
+                        "error": str(e)
+                    })
+
+            return jsonify({
+                "success": True,
+                "renamed": renamed_count > 0,
+                "bulk": True,
+                "processed_count": len(candidate_paths),
+                "renamed_count": renamed_count,
+                "skipped_count": skipped_count,
+                "failed_count": failed_count,
+                "results": results,
+                "message": (
+                    f"Processed {len(candidate_paths)} comic files: "
+                    f"{renamed_count} renamed, {skipped_count} skipped, {failed_count} failed"
+                )
+            })
+
+        if not os.path.isfile(target_path):
+            return jsonify({"error": "Path must be a file or folder"}), 400
+
+        file_path = target_path
         new_path, was_renamed = rename_file_using_custom_pattern(file_path)
 
         if was_renamed:

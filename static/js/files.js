@@ -804,6 +804,14 @@ function createListItem(itemName, fullPath, type, panel, isDraggable) {
       // Add three-dot dropdown menu for directory operations
       const dropdownBtn = createFilesActionMenuButton("btn btn-sm", "More options", function (menu) {
         CLU.populateFolderActionMenu(menu, {
+          onApplyRenamePattern: filesUiConfig.enableCustomRename
+            ? function () { applyRenamePatternToDirectory(fullPath, panel); }
+            : null,
+          onApplyFolderRenamePattern: (
+            filesUiConfig.enableCustomRename &&
+            filesUiConfig.hasCustomMovePattern &&
+            isPathInConfiguredLibrary(fullPath)
+          ) ? function () { applyFolderRenamePatternToDirectory(fullPath, panel); } : null,
           onConvertCbrToCbz: function () { executeScriptOnDirectory('convert', fullPath, panel); },
           onRebuildAllFiles: function () { executeScriptOnDirectory('rebuild', fullPath, panel); },
           onConvertPdfToCbz: function () { executeScriptOnDirectory('pdf', fullPath, panel); },
@@ -6146,6 +6154,19 @@ function applyFolderRenamePatternToDirectory(directoryPath, panel) {
     onError: function (error) {
       console.error('Apply folder + rename pattern to directory error:', error);
       CLU.showToast('Move Error', error.message, 'error');
+      refreshPanelForPath(directoryPath);
+    }
+  });
+}
+
+function applyRenamePatternToDirectory(directoryPath, panel) {
+  CLU.applyRenamePatternToDirectory(directoryPath, {
+    onSuccess: function () {
+      refreshPanelForPath(directoryPath);
+    },
+    onError: function (error) {
+      console.error('Apply rename pattern to directory error:', error);
+      CLU.showToast('Rename Error', error.message, 'error');
       refreshPanelForPath(directoryPath);
     }
   });

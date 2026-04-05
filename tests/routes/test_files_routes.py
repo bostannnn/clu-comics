@@ -195,6 +195,64 @@ class TestApplyRenamePattern:
         assert resp.status_code == 400
         assert "No usable local metadata found" in resp.get_json()["error"]
 
+    @patch("routes.files.is_critical_path", return_value=False)
+    @patch("cbz_ops.rename.rename_file_using_custom_pattern")
+    def test_directory_success_with_mixed_results(self, mock_rename, mock_crit, client, tmp_path):
+        folder = tmp_path / "incoming"
+        folder.mkdir()
+        file1 = folder / "one.cbz"
+        file2 = folder / "two.cbr"
+        file3 = folder / "three.zip"
+        ignored = folder / "notes.txt"
+        file1.write_bytes(b"1")
+        file2.write_bytes(b"2")
+        file3.write_bytes(b"3")
+        ignored.write_text("ignore")
+
+        renamed1 = folder / "Series A 001.cbz"
+        renamed3 = folder / "Series C 003.zip"
+        mock_rename.side_effect = [
+            (str(renamed1), True),
+            (str(file2), False),
+            ValueError("No usable local metadata found"),
+        ]
+
+        mock_app = MagicMock()
+        with patch.dict("sys.modules", {"app": mock_app}):
+            resp = client.post("/apply-rename-pattern", json={"path": str(folder)})
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["success"] is True
+        assert data["bulk"] is True
+        assert data["processed_count"] == 3
+        assert data["renamed_count"] == 1
+        assert data["skipped_count"] == 1
+        assert data["failed_count"] == 1
+        assert len(data["results"]) == 3
+        assert "1 renamed, 1 skipped, 1 failed" in data["message"]
+        assert mock_rename.call_count == 3
+        mock_app.update_index_on_move.assert_called_once_with(str(file1), str(renamed1))
+
+    @patch("routes.files.is_critical_path", return_value=False)
+    def test_directory_without_comics(self, mock_crit, client, tmp_path):
+        folder = tmp_path / "incoming"
+        folder.mkdir()
+        (folder / "notes.txt").write_text("ignore")
+
+        mock_app = MagicMock()
+        with patch.dict("sys.modules", {"app": mock_app}):
+            resp = client.post("/apply-rename-pattern", json={"path": str(folder)})
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["success"] is True
+        assert data["bulk"] is True
+        assert data["processed_count"] == 0
+        assert data["renamed_count"] == 0
+        assert data["failed_count"] == 0
+        assert "No comic files found" in data["message"]
+
 
 class TestApplyFolderRenamePattern:
 

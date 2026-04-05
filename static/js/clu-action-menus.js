@@ -120,6 +120,8 @@
     context = context || {};
 
     var processingOps = [];
+    _pushAction(processingOps, 'Apply Rename Pattern', 'bi bi-input-cursor-text', context.onApplyRenamePattern);
+    _pushAction(processingOps, 'Apply Folder + Rename Pattern', 'bi bi-folder-symlink', context.onApplyFolderRenamePattern);
     _pushAction(processingOps, 'Generate Thumbnail', 'bi bi-image', context.onGenerateThumbnail);
     _pushAction(processingOps, 'Generate All Missing Thumbnails', 'bi bi-images', context.onGenerateAllMissingThumbnails);
     _pushAction(processingOps, 'Convert CBR→CBZ', 'bi bi-arrow-repeat', context.onConvertCbrToCbz);
@@ -340,6 +342,69 @@
           hooks.onError(error);
         } else {
           CLU.showToast('Move Error', error.message, 'error');
+        }
+      });
+  };
+
+  CLU.applyRenamePatternToDirectory = function (directoryPath, hooks) {
+    hooks = hooks || {};
+
+    var loadingToast = document.createElement('div');
+    loadingToast.className = 'toast show position-fixed top-0 end-0 m-3';
+    loadingToast.style.zIndex = '1200';
+    loadingToast.innerHTML =
+      '<div class="toast-header bg-primary text-white">' +
+        '<strong class="me-auto">Applying Rename Pattern</strong>' +
+      '</div>' +
+      '<div class="toast-body">' +
+        '<div class="d-flex align-items-center">' +
+          '<div class="spinner-border spinner-border-sm me-2" role="status">' +
+            '<span class="visually-hidden">Loading...</span>' +
+          '</div>' +
+          'Renaming files in folder...' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(loadingToast);
+
+    fetch('/apply-rename-pattern', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ path: directoryPath })
+    })
+      .then(function (response) {
+        return response.json().then(function (data) {
+          return { ok: response.ok, data: data };
+        });
+      })
+      .then(function (result) {
+        if (document.body.contains(loadingToast)) {
+          document.body.removeChild(loadingToast);
+        }
+
+        if (!result.ok) {
+          throw new Error(result.data.error || 'Failed to apply rename pattern');
+        }
+
+        CLU.showToast(
+          result.data.renamed ? 'Folder Processed' : 'No Changes Applied',
+          result.data.message || 'Finished processing folder.',
+          result.data.failed_count > 0 ? 'warning' : (result.data.renamed ? 'success' : 'info')
+        );
+
+        if (_isFn(hooks.onSuccess)) {
+          hooks.onSuccess(result.data);
+        }
+      })
+      .catch(function (error) {
+        if (document.body.contains(loadingToast)) {
+          document.body.removeChild(loadingToast);
+        }
+        if (_isFn(hooks.onError)) {
+          hooks.onError(error);
+        } else {
+          CLU.showToast('Rename Error', error.message, 'error');
         }
       });
   };
