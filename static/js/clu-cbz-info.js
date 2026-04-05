@@ -361,6 +361,19 @@
   function _handleKeydown(e) {
     var modal = document.getElementById('cbzInfoModal');
     if (!modal || !modal.classList.contains('show')) return;
+    var editModal = document.getElementById('editComicInfoModal');
+    if (editModal && editModal.classList.contains('show')) return;
+
+    var target = e.target;
+    if (target) {
+      var tagName = (target.tagName || '').toLowerCase();
+      var isEditable = target.isContentEditable ||
+        tagName === 'input' ||
+        tagName === 'textarea' ||
+        tagName === 'select';
+      if (isEditable) return;
+    }
+
     if (e.key === 'ArrowLeft') { CLU.cbzPagePrev(); }
     else if (e.key === 'ArrowRight' || e.code === 'Space') { e.preventDefault(); CLU.cbzPageNext(); }
   }
