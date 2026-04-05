@@ -16,6 +16,87 @@ let swActiveFilter = null;
 let swReadIssuesSet = new Set();
 let swCurrentProviders = [];
 const swActionsConfig = window.CLU_ACTIONS_CONFIG || {};
+let swIndexStatusRequest = 0;
+
+function updateSourceWallIndexStatus(options = {}) {
+    const { silent = false } = options;
+    const statusEl = document.getElementById('swIndexStatusText');
+    const refreshBtn = document.getElementById('swRefreshIndexStatusBtn');
+    const requestId = ++swIndexStatusRequest;
+
+    if (statusEl && !silent) {
+        statusEl.textContent = 'Checking status...';
+    }
+    if (refreshBtn) {
+        refreshBtn.disabled = true;
+    }
+
+    return fetch('/api/file-index-status', {
+        headers: { 'Cache-Control': 'no-cache' }
+    })
+        .then(r => r.json())
+        .then(data => {
+            if (requestId !== swIndexStatusRequest) {
+                return data;
+            }
+            if (statusEl) {
+                const totalFiles = data.total_files || 0;
+                const totalDirectories = data.total_directories || 0;
+                const lastRebuild = data.last_rebuild || 'Never';
+                statusEl.textContent = `${totalFiles} files, ${totalDirectories} dirs • ${lastRebuild}`;
+            }
+            return data;
+        })
+        .catch(err => {
+            console.error('Failed to load source wall index status:', err);
+            if (requestId === swIndexStatusRequest && statusEl) {
+                statusEl.textContent = 'Status unavailable';
+            }
+            if (!silent) {
+                CLU.showError('Failed to load file index status');
+            }
+        })
+        .finally(() => {
+            if (requestId === swIndexStatusRequest && refreshBtn) {
+                refreshBtn.disabled = false;
+            }
+        });
+}
+
+function rebuildSourceWallIndex() {
+    const button = document.getElementById('swRebuildIndexBtn');
+    if (!button) return;
+
+    const originalHtml = button.innerHTML;
+    button.disabled = true;
+    button.innerHTML = '<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>Refreshing...';
+
+    fetch('/api/rebuild-file-index', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+    })
+        .then(r => r.json())
+        .then(data => {
+            if (!data.success) {
+                throw new Error(data.error || 'Failed to rebuild file index');
+            }
+            CLU.showSuccess(data.message || 'File index refreshed');
+            return updateSourceWallIndexStatus({ silent: true });
+        })
+        .then(() => {
+            if (swCurrentPath) {
+                loadPath(swCurrentPath);
+            }
+        })
+        .catch(err => {
+            console.error('Failed to rebuild source wall index:', err);
+            CLU.showError(err.message || 'Failed to rebuild file index');
+        })
+        .finally(() => {
+            button.disabled = false;
+            button.innerHTML = originalHtml;
+        });
+}
 
 // Load read issues for source wall
 fetch('/api/issues-read-paths')
@@ -1203,6 +1284,17 @@ function updateXmlSW() {
 // ── Initialization ──
 
 document.addEventListener('DOMContentLoaded', () => {
+    const refreshStatusBtn = document.getElementById('swRefreshIndexStatusBtn');
+    if (refreshStatusBtn) {
+        refreshStatusBtn.addEventListener('click', () => updateSourceWallIndexStatus());
+    }
+
+    const rebuildIndexBtn = document.getElementById('swRebuildIndexBtn');
+    if (rebuildIndexBtn) {
+        rebuildIndexBtn.addEventListener('click', rebuildSourceWallIndex);
+    }
+
+    updateSourceWallIndexStatus({ silent: true });
     loadLibraryDropdowns();
     loadColumnPreferences();
 

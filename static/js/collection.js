@@ -8,6 +8,18 @@
 // Update XML – field config and current path now in clu-update-xml.js
 
 document.addEventListener('DOMContentLoaded', () => {
+    const refreshStatusBtn = document.getElementById('collectionRefreshIndexStatusBtn');
+    if (refreshStatusBtn) {
+        refreshStatusBtn.addEventListener('click', () => updateCollectionIndexStatus());
+    }
+
+    const rebuildIndexBtn = document.getElementById('collectionRebuildIndexBtn');
+    if (rebuildIndexBtn) {
+        rebuildIndexBtn.addEventListener('click', rebuildCollectionIndex);
+    }
+
+    updateCollectionIndexStatus({ silent: true });
+
     // Initialize with path from URL: prefer clean URL path, fallback to query param
     const initialPath = window.INITIAL_PATH ||
         new URLSearchParams(window.location.search).get('path') ||
@@ -78,6 +90,83 @@ let collectionProviderCache = {};
 let currentCollectionProviders = [];
 let currentCollectionLibraryId = null;
 const collectionActionsConfig = window.CLU_ACTIONS_CONFIG || {};
+let collectionIndexStatusRequest = 0;
+
+function updateCollectionIndexStatus(options = {}) {
+    const { silent = false } = options;
+    const statusEl = document.getElementById('collectionIndexStatusText');
+    const refreshBtn = document.getElementById('collectionRefreshIndexStatusBtn');
+    const requestId = ++collectionIndexStatusRequest;
+
+    if (statusEl && !silent) {
+        statusEl.textContent = 'Checking status...';
+    }
+    if (refreshBtn) {
+        refreshBtn.disabled = true;
+    }
+
+    return fetch('/api/file-index-status', {
+        headers: { 'Cache-Control': 'no-cache' }
+    })
+        .then(r => r.json())
+        .then(data => {
+            if (requestId !== collectionIndexStatusRequest) {
+                return data;
+            }
+            if (statusEl) {
+                const totalFiles = data.total_files || 0;
+                const totalDirectories = data.total_directories || 0;
+                const lastRebuild = data.last_rebuild || 'Never';
+                statusEl.textContent = `${totalFiles} files, ${totalDirectories} dirs • ${lastRebuild}`;
+            }
+            return data;
+        })
+        .catch(err => {
+            console.error('Failed to load collection index status:', err);
+            if (requestId === collectionIndexStatusRequest && statusEl) {
+                statusEl.textContent = 'Status unavailable';
+            }
+            if (!silent) {
+                CLU.showError('Failed to load file index status');
+            }
+        })
+        .finally(() => {
+            if (requestId === collectionIndexStatusRequest && refreshBtn) {
+                refreshBtn.disabled = false;
+            }
+        });
+}
+
+function rebuildCollectionIndex() {
+    const button = document.getElementById('collectionRebuildIndexBtn');
+    if (!button) return;
+
+    const originalHtml = button.innerHTML;
+    button.disabled = true;
+    button.innerHTML = '<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>Refreshing...';
+
+    fetch('/api/rebuild-file-index', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+    })
+        .then(r => r.json())
+        .then(data => {
+            if (!data.success) {
+                throw new Error(data.error || 'Failed to rebuild file index');
+            }
+            CLU.showSuccess(data.message || 'File index refreshed');
+            return updateCollectionIndexStatus({ silent: true });
+        })
+        .then(() => refreshCurrentView(true, true))
+        .catch(err => {
+            console.error('Failed to rebuild collection index:', err);
+            CLU.showError(err.message || 'Failed to rebuild file index');
+        })
+        .finally(() => {
+            button.disabled = false;
+            button.innerHTML = originalHtml;
+        });
+}
 
 async function loadCollectionLibraries() {
     try {
