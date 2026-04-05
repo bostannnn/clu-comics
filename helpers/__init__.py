@@ -108,6 +108,59 @@ def unzip_file(file_path):
     return base_dir
 
 
+#########################
+#  Ownership Handling   #
+#########################
+
+def capture_file_ownership(path):
+    """
+    Capture uid/gid/mode from an existing file so rewritten outputs can restore it.
+    Returns None when the file does not exist or cannot be stat'ed.
+    """
+    if not path:
+        return None
+
+    try:
+        st = os.stat(path)
+        return {
+            "uid": st.st_uid,
+            "gid": st.st_gid,
+            "mode": stat.S_IMODE(st.st_mode),
+        }
+    except OSError as exc:
+        app_logger.warning(f"Failed to capture ownership for {path}: {exc}")
+        return None
+
+
+def restore_file_ownership(path, ownership):
+    """
+    Restore uid/gid/mode captured with capture_file_ownership().
+    Best effort: chmod is always attempted, chown only where supported.
+    """
+    if not path or not ownership:
+        return
+
+    try:
+        mode = ownership.get("mode")
+        if mode is not None:
+            os.chmod(path, mode)
+    except OSError as exc:
+        app_logger.warning(f"Failed to restore mode for {path}: {exc}")
+
+    if os.name == "nt" or not hasattr(os, "chown"):
+        return
+
+    try:
+        uid = ownership.get("uid")
+        gid = ownership.get("gid")
+        if uid is not None and gid is not None:
+            os.chown(path, uid, gid)
+    except PermissionError as exc:
+        app_logger.warning(f"Failed to restore ownership for {path}: {exc}")
+    except OSError as exc:
+        app_logger.warning(f"Failed to restore ownership for {path}: {exc}")
+
+
 def _count_unar_failures(stdout_bytes):
     """Count files that failed during unar extraction from its stdout."""
     try:

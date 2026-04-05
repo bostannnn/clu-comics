@@ -4,7 +4,7 @@ import zipfile
 from pdf2image import convert_from_path, pdfinfo_from_path
 from core.app_logging import app_logger
 from PIL import Image
-from helpers import is_hidden
+from helpers import is_hidden, capture_file_ownership, restore_file_ownership
 import gc
 import tempfile
 import shutil
@@ -49,6 +49,7 @@ def process_pdf_file(pdf_path):
     app_logger.info(f"Processing: {pdf_path}")
     
     try:
+        ownership = capture_file_ownership(pdf_path)
         # Get PDF info first
         pdf_info = pdfinfo_from_path(pdf_path)
         total_pages = pdf_info["Pages"]
@@ -85,7 +86,7 @@ def process_pdf_file(pdf_path):
             gc.collect()
         
         # Create CBZ file using streaming approach
-        create_cbz_file(output_folder, cbz_path)
+        create_cbz_file(output_folder, cbz_path, ownership=ownership)
         
         # Clean up source PDF
         try:
@@ -135,7 +136,7 @@ def process_single_page(page, page_number, pdf_name, output_folder):
         app_logger.error(f"Error processing page {page_number}: {e}")
 
 
-def create_cbz_file(output_folder, cbz_path):
+def create_cbz_file(output_folder, cbz_path, ownership=None):
     """
     Create CBZ file using streaming approach to avoid loading all files into memory.
     """
@@ -149,6 +150,7 @@ def create_cbz_file(output_folder, cbz_path):
                     
                     # Add file to zip without loading it entirely into memory
                     cbz.write(file_path_in_folder, arcname)
+        restore_file_ownership(cbz_path, ownership)
         
         app_logger.info(f"CBZ file created: {cbz_path}")
         

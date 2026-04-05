@@ -8,6 +8,7 @@ from PIL import Image
 from core.app_logging import app_logger
 from core.config import config, load_config
 from helpers import create_thumbnail_streaming, safe_image_open
+from helpers import capture_file_ownership, restore_file_ownership
 import gc
 
 load_config()
@@ -220,6 +221,7 @@ def save_cbz():
         return "Missing required data", 400
 
     try:
+        ownership = capture_file_ownership(original_file_path)
         # Step 6: Rename the original .zip file to .bak.
         bak_file_path = zip_file_path + '.bak'
         os.rename(zip_file_path, bak_file_path)
@@ -245,6 +247,7 @@ def save_cbz():
                 except Exception as e:
                     app_logger.warning(f"Failed to add {rel_path} to CBZ: {e}")
                     continue
+        restore_file_ownership(original_file_path, ownership)
         
         # Step 8: Delete the .bak file.
         try:

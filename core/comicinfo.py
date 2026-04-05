@@ -6,6 +6,7 @@ import xml.etree.ElementTree as ET
 import defusedxml.ElementTree as SafeET
 from core.app_logging import app_logger
 from core.config import config, load_config
+from helpers import capture_file_ownership, restore_file_ownership
 
 load_config()
 
@@ -360,6 +361,7 @@ def update_comicinfo_in_zip(zip_path: str, updates: dict):
         raise ValueError("Only .zip or .cbz files are supported by this function.")
     
     temp_zip_path = zip_path + ".tmpzip"
+    ownership = capture_file_ownership(zip_path)
 
     with zipfile.ZipFile(zip_path, 'r') as old_zip, \
          zipfile.ZipFile(temp_zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as new_zip:
@@ -382,6 +384,7 @@ def update_comicinfo_in_zip(zip_path: str, updates: dict):
 
     # Replace the original ZIP/CBZ with the updated one
     os.replace(temp_zip_path, zip_path)
+    restore_file_ownership(zip_path, ownership)
 
 
 if __name__ == "__main__":

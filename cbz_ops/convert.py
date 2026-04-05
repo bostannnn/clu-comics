@@ -6,7 +6,7 @@ import shutil
 import time
 from core.app_logging import app_logger
 from core.config import config, load_config
-from helpers import is_hidden, extract_rar_with_unar
+from helpers import is_hidden, extract_rar_with_unar, capture_file_ownership, restore_file_ownership
 from cbz_ops.single_file import _flatten_single_wrapper_dir
 
 load_config()
@@ -76,6 +76,7 @@ def convert_single_rar_file(rar_path, zip_path, temp_extraction_dir):
         app_logger.info("This may take several minutes. Progress updates will be provided.")
     
     try:
+        ownership = capture_file_ownership(rar_path)
         # Create temp directory
         os.makedirs(temp_extraction_dir, exist_ok=True)
         
@@ -132,6 +133,7 @@ def convert_single_rar_file(rar_path, zip_path, temp_extraction_dir):
                     if is_large_file and processed_files % max(1, total_files // 10) == 0:
                         progress_percent = (processed_files / total_files) * 100
                         app_logger.info(f"Compression progress: {progress_percent:.1f}% ({processed_files}/{total_files} files)")
+        restore_file_ownership(zip_path, ownership)
         
         app_logger.info(f"Successfully converted: {os.path.basename(rar_path)}")
         return True

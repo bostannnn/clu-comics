@@ -6,6 +6,7 @@ import shutil
 from core.app_logging import app_logger
 import sys
 from core.config import config, load_config
+from helpers import capture_file_ownership, restore_file_ownership
 import gc
 
 load_config()
@@ -39,6 +40,7 @@ def enhance_cbz_file(file_path):
     # Determine the backup file path (with .bak extension).
     bak_file_path = os.path.splitext(file_path)[0] + '.bak'
     base_cbz_path = os.path.splitext(file_path)[0] + '.cbz'
+    ownership = capture_file_ownership(file_path)
     
     try:
         # Check if the original .cbz file exists.
@@ -123,7 +125,7 @@ def enhance_cbz_file(file_path):
         
         # Compress the enhanced files back into a ZIP archive with a .cbz extension.
         enhanced_cbz_path = base_cbz_path
-        create_enhanced_cbz(extracted_dir, enhanced_cbz_path)
+        create_enhanced_cbz(extracted_dir, enhanced_cbz_path, ownership=ownership)
         
         # Clean up the extracted directory.
         cleanup_extracted_dir(extracted_dir)
@@ -175,7 +177,7 @@ def enhance_single_image(file_path):
         app_logger.error(f"Error enhancing single image {file_path}: {e}")
 
 
-def create_enhanced_cbz(extracted_dir, enhanced_cbz_path):
+def create_enhanced_cbz(extracted_dir, enhanced_cbz_path, ownership=None):
     """
     Create enhanced CBZ file using streaming approach.
     """
@@ -199,6 +201,7 @@ def create_enhanced_cbz(extracted_dir, enhanced_cbz_path):
                 except Exception as e:
                     app_logger.warning(f"Failed to add {relative_path} to CBZ: {e}")
                     continue
+        restore_file_ownership(enhanced_cbz_path, ownership)
         
         app_logger.info(f"Compressed to: {enhanced_cbz_path}")
         if not os.path.exists(enhanced_cbz_path):

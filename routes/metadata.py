@@ -28,6 +28,7 @@ from flask import (Blueprint, request, jsonify, Response,
                    stream_with_context, current_app)
 import core.app_state as app_state
 from core.app_logging import app_logger
+from helpers import capture_file_ownership, restore_file_ownership
 from core.config import config
 from helpers.library import is_path_in_any_root, is_valid_library_path
 from models import gcd, metron, comicvine
@@ -480,6 +481,7 @@ def add_comicinfo_to_cbz(file_path, comicinfo_xml_bytes, fail_on_corruption=Fals
     with _acquire_comicinfo_write_lock(file_path):
         temp_extract_dir = None
         temp_zip_path = None
+        ownership = capture_file_ownership(file_path)
 
         try:
             temp_extract_dir = tempfile.mkdtemp(prefix=f".tmp_extract_{base_name}_", dir=file_dir)
@@ -560,6 +562,7 @@ def add_comicinfo_to_cbz(file_path, comicinfo_xml_bytes, fail_on_corruption=Fals
 
             # Step 4: Replace original file
             os.replace(temp_zip_path, file_path)
+            restore_file_ownership(file_path, ownership)
 
         except zipfile.BadZipFile as e:
             # Handle the case where a .cbz file is actually a RAR file
@@ -819,6 +822,8 @@ def _remove_comicinfo_from_cbz(file_path):
         temp_zip_path = file_path + ".tmpzip"
         comicinfo_found = False
 
+        ownership = capture_file_ownership(file_path)
+
         with zipfile.ZipFile(file_path, 'r') as old_zip, \
              zipfile.ZipFile(temp_zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as new_zip:
 
@@ -834,6 +839,7 @@ def _remove_comicinfo_from_cbz(file_path):
             return {"success": False, "error": "ComicInfo.xml not found in CBZ"}
 
         os.replace(temp_zip_path, file_path)
+        restore_file_ownership(file_path, ownership)
 
         from core.database import set_has_comicinfo
         set_has_comicinfo(file_path, 0)

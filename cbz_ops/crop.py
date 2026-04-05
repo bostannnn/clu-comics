@@ -5,6 +5,7 @@ import shutil
 from PIL import Image, ImageFilter
 from core.app_logging import app_logger
 from core.config import config, load_config
+from helpers import capture_file_ownership, restore_file_ownership
 
 load_config()
 skipped_exts = config.get("SETTINGS", "SKIPPED_FILES", fallback="")
@@ -31,6 +32,7 @@ def handle_cbz_file(file_path):
     base_name = os.path.splitext(file_path)[0]  # Removes the .cbz extension
     zip_path = base_name + '.zip'
     folder_name = base_name + '_folder'
+    ownership = capture_file_ownership(file_path)
     
     app_logger.info(f"Processing CBZ: {file_path} --> {zip_path}")
 
@@ -67,6 +69,7 @@ def handle_cbz_file(file_path):
         with zipfile.ZipFile(file_path, 'w', zipfile.ZIP_DEFLATED) as zf:
             for arcname, file_path_in_folder in file_list:
                 zf.write(file_path_in_folder, arcname)
+        restore_file_ownership(file_path, ownership)
 
         app_logger.info(f"Successfully re-compressed: {file_path}")
 

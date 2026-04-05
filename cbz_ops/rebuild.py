@@ -6,7 +6,7 @@ import shutil
 import time
 from core.app_logging import app_logger
 from core.config import config, load_config
-from helpers import is_hidden, extract_rar_with_unar
+from helpers import is_hidden, extract_rar_with_unar, capture_file_ownership, restore_file_ownership
 
 load_config()
 
@@ -61,6 +61,7 @@ def convert_single_rar_file(rar_path, zip_path, temp_extraction_dir):
         app_logger.info("This may take several minutes. Progress updates will be provided.")
     
     try:
+        ownership = capture_file_ownership(rar_path)
         # Create temp directory
         os.makedirs(temp_extraction_dir, exist_ok=True)
         
@@ -125,6 +126,7 @@ def convert_single_rar_file(rar_path, zip_path, temp_extraction_dir):
                     if is_large_file and processed_files % max(1, total_files // 10) == 0:
                         progress_percent = (processed_files / total_files) * 100
                         app_logger.info(f"Compression progress: {progress_percent:.1f}% ({processed_files}/{total_files} files)")
+        restore_file_ownership(zip_path, ownership)
         
         app_logger.info(f"Successfully converted: {os.path.basename(rar_path)}")
         return True
@@ -152,6 +154,7 @@ def rebuild_single_cbz_file(cbz_path, directory):
         app_logger.info("This may take several minutes. Progress updates will be provided.")
     
     try:
+        ownership = capture_file_ownership(cbz_path)
         # Step 1: Rename CBZ to ZIP
         app_logger.info(f"Step 1/4: Preparing {filename} for rebuild...")
         new_zip_file = os.path.join(directory, base_name + ".zip")
@@ -224,6 +227,7 @@ def rebuild_single_cbz_file(cbz_path, directory):
                     if is_large_file and file_count % max(1, total_files // 10) == 0:
                         progress_percent = (file_count / total_files) * 100
                         app_logger.info(f"Compression progress: {progress_percent:.1f}% ({file_count}/{total_files} files)")
+        restore_file_ownership(cbz_file, ownership)
         
         # Clean up
         for root, dirs, files in os.walk(folder_path, topdown=False):

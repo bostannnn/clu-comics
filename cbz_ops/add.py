@@ -4,6 +4,7 @@ import zipfile
 import shutil
 from PIL import Image, ImageFilter
 from core.app_logging import app_logger
+from helpers import capture_file_ownership, restore_file_ownership
 
 
 def handle_cbz_file(file_path):
@@ -23,6 +24,7 @@ def handle_cbz_file(file_path):
     base_name = os.path.splitext(file_path)[0]  # Removes the .cbz extension
     zip_path = base_name + '.zip'
     folder_name = base_name + '_folder'
+    ownership = capture_file_ownership(file_path)
     
     app_logger.info(f"Processing CBZ: {file_path} -> {zip_path}")
 
@@ -51,6 +53,7 @@ def handle_cbz_file(file_path):
                     file_path_in_folder = os.path.join(root, file)
                     arcname = os.path.relpath(file_path_in_folder, folder_name)
                     zf.write(file_path_in_folder, arcname)
+        restore_file_ownership(file_path, ownership)
 
         app_logger.info(f"Successfully re-compressed: {file_path}")
 
