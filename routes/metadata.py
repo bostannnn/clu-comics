@@ -60,6 +60,107 @@ class CorruptedArchiveError(RuntimeError):
     """Raised when a CBZ cannot be safely rewritten due to archive corruption."""
 
 
+def _parse_cvinfo_content(content):
+    """Parse structured fields from cvinfo text while preserving unknown lines."""
+    result = {
+        "cv_url": "",
+        "cv_id": "",
+        "series_id": "",
+        "publisher_name": "",
+        "start_year": "",
+        "extra_lines": "",
+    }
+    extra_lines = []
+
+    for raw_line in (content or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        url_match = re.search(r"(https?://[^\s]*comicvine\.gamespot\.com/[^\s]*/4050-(\d+)/?)", line, re.IGNORECASE)
+        if url_match and not result["cv_url"]:
+            result["cv_url"] = url_match.group(1)
+            result["cv_id"] = url_match.group(2)
+            continue
+
+        lower = line.lower()
+        if lower.startswith("series_id:"):
+            result["series_id"] = line.split(":", 1)[1].strip()
+            continue
+        if lower.startswith("publisher_name:"):
+            result["publisher_name"] = line.split(":", 1)[1].strip()
+            continue
+        if lower.startswith("start_year:"):
+            result["start_year"] = line.split(":", 1)[1].strip()
+            continue
+
+        extra_lines.append(line)
+
+    result["extra_lines"] = "\n".join(extra_lines)
+    return result
+
+
+def _normalize_cvinfo_url(value):
+    """Normalize a ComicVine volume URL or numeric ID to a canonical URL."""
+    value = (value or "").strip()
+    if not value:
+        return ""
+
+    if re.fullmatch(r"\d+", value):
+        return f"https://comicvine.gamespot.com/volume/4050-{value}/"
+
+    match = re.search(r"4050-(\d+)", value)
+    if not match:
+        raise ValueError("ComicVine URL must contain a volume ID like 4050-167796")
+
+    return f"https://comicvine.gamespot.com/volume/4050-{match.group(1)}/"
+
+
+def _build_cvinfo_content(data):
+    """Build cvinfo text from structured fields."""
+    cv_url = _normalize_cvinfo_url(data.get("cv_url") or data.get("cv_id"))
+    series_id = str(data.get("series_id") or "").strip()
+    publisher_name = str(data.get("publisher_name") or "").strip()
+    start_year = str(data.get("start_year") or "").strip()
+    extra_lines_raw = str(data.get("extra_lines") or "")
+
+    if start_year and not re.fullmatch(r"\d{4}", start_year):
+        raise ValueError("Start year must be a 4-digit year")
+    if series_id and not re.fullmatch(r"\d+", series_id):
+        raise ValueError("Metron series ID must be numeric")
+
+    lines = []
+    if cv_url:
+        lines.append(cv_url)
+    if series_id:
+        lines.append(f"series_id: {series_id}")
+    if publisher_name:
+        lines.append(f"publisher_name: {publisher_name}")
+    if start_year:
+        lines.append(f"start_year: {start_year}")
+
+    for raw_line in extra_lines_raw.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        lower = line.lower()
+        if (
+            "comicvine.gamespot.com" in lower
+            or lower.startswith("series_id:")
+            or lower.startswith("publisher_name:")
+            or lower.startswith("start_year:")
+        ):
+            continue
+        lines.append(line)
+
+    if not lines:
+        raise ValueError(
+            "Provide at least one CVINFO field such as ComicVine URL/ID, Metron series ID, publisher, start year, or extra lines"
+        )
+
+    return "\n".join(lines).strip()
+
+
 def _resolve_existing_file_path(file_path, file_name=None, library_id=None):
     """Best-effort repair for stale file paths coming from indexed/library views."""
     if file_path and os.path.exists(file_path):
@@ -808,17 +909,61 @@ def cbz_bulk_clear_comicinfo():
 # Save CVInfo
 # =============================================================================
 
+@metadata_bp.route('/api/cvinfo', methods=['GET'])
+def get_cvinfo():
+    """Read a cvinfo file and return structured fields for UI editing."""
+    file_path = request.args.get('path', '').strip()
+
+    if not file_path:
+        return jsonify({"error": "Missing path parameter"}), 400
+
+    directory = os.path.dirname(file_path)
+    if not (is_valid_library_path(file_path) or is_valid_library_path(directory)):
+        return jsonify({"error": "Access denied"}), 403
+
+    if os.path.basename(file_path).lower() != 'cvinfo':
+        return jsonify({"error": "Path must point to a cvinfo file"}), 400
+
+    if not os.path.exists(file_path) or not os.path.isfile(file_path):
+        return jsonify({"error": "CVINFO file not found"}), 404
+
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        parsed = _parse_cvinfo_content(content)
+        return jsonify({
+            "success": True,
+            "path": file_path,
+            "directory": directory,
+            "content": content,
+            **parsed,
+        })
+    except Exception as e:
+        app_logger.error(f"Error reading cvinfo from {file_path}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @metadata_bp.route('/api/save-cvinfo', methods=['POST'])
 def save_cvinfo():
     """Save a cvinfo file in the specified directory."""
     from app import TARGET_DIR
 
-    data = request.get_json()
-    directory = data.get('directory')
+    data = request.get_json() or {}
+    file_path = (data.get('path') or '').strip()
+    directory = (data.get('directory') or '').strip()
     content = data.get('content') or data.get('url')  # Support both content and legacy url
 
-    if not directory or not content:
-        return jsonify({"error": "Missing directory or content parameter"}), 400
+    if file_path:
+        directory = os.path.dirname(file_path)
+    elif directory:
+        file_path = os.path.join(directory, 'cvinfo')
+
+    if not directory or not file_path:
+        return jsonify({"error": "Missing directory or path parameter"}), 400
+
+    if os.path.basename(file_path).lower() != 'cvinfo':
+        return jsonify({"error": "Path must point to a cvinfo file"}), 400
 
     # Security: Ensure the directory path is within allowed directories
     if not (is_valid_library_path(directory) or is_path_in_any_root(directory, [TARGET_DIR])):
@@ -828,12 +973,16 @@ def save_cvinfo():
         return jsonify({"error": "Directory not found"}), 404
 
     try:
-        cvinfo_path = os.path.join(directory, 'cvinfo')
-        with open(cvinfo_path, 'w', encoding='utf-8') as f:
+        if content is None:
+            content = _build_cvinfo_content(data)
+
+        with open(file_path, 'w', encoding='utf-8') as f:
             f.write(content.strip())
 
-        app_logger.info(f"Saved cvinfo to {cvinfo_path}")
-        return jsonify({"success": True, "path": cvinfo_path})
+        app_logger.info(f"Saved cvinfo to {file_path}")
+        return jsonify({"success": True, "path": file_path})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         app_logger.error(f"Error saving cvinfo to {directory}: {e}")
         return jsonify({"error": str(e)}), 500

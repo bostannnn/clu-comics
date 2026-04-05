@@ -596,17 +596,31 @@
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
       <div class="modal-body">
-        <p class="text-muted small mb-3">Enter the Comic Vine Volume ID for this series. This will be saved as a <code>cvinfo</code> file and used to auto-fetch metadata for comics in this folder.</p>
+        <p class="text-muted small mb-3" id="cvInfoModalDescription">Enter any available series identifiers or cached fields for this folder. This will be saved as a <code>cvinfo</code> file and used to auto-fetch metadata for comics in this folder.</p>
         <div class="mb-3">
-          <label for="cvInfoIdInput" class="form-label">Comic Vine Volume ID <span class="text-danger">*</span></label>
-          <input type="text" class="form-control" id="cvInfoIdInput" placeholder="167796" required>
-          <div class="form-text">Example: https://comicvine.gamespot.com/volume/4050-<strong>167796</strong> - the CV_ID is <strong>167796</strong></div>
+          <label for="cvInfoUrlInput" class="form-label">ComicVine URL or Volume ID <span class="text-muted">(optional)</span></label>
+          <input type="text" class="form-control" id="cvInfoUrlInput" placeholder="https://comicvine.gamespot.com/volume/4050-167796/">
+          <div class="form-text">You can paste the full ComicVine volume URL or just the numeric volume ID if you have it.</div>
         </div>
         <div class="mb-3">
           <label for="metronIdInput" class="form-label">Metron Series ID <span class="text-muted">(optional)</span></label>
           <input type="text" class="form-control" id="metronIdInput" placeholder="12345">
           <div class="form-text">If you have a Metron series ID, enter it here to enable Metron metadata fetching.</div>
         </div>
+        <div class="mb-3">
+          <label for="cvInfoPublisherInput" class="form-label">Publisher <span class="text-muted">(optional)</span></label>
+          <input type="text" class="form-control" id="cvInfoPublisherInput" placeholder="Image">
+        </div>
+        <div class="mb-3">
+          <label for="cvInfoStartYearInput" class="form-label">Start Year <span class="text-muted">(optional)</span></label>
+          <input type="text" class="form-control" id="cvInfoStartYearInput" placeholder="2015" inputmode="numeric" maxlength="4">
+        </div>
+        <div class="mb-3">
+          <label for="cvInfoExtraLinesInput" class="form-label">Additional Lines <span class="text-muted">(optional)</span></label>
+          <textarea class="form-control font-monospace" id="cvInfoExtraLinesInput" rows="4" placeholder="mangadex_id: abc123"></textarea>
+          <div class="form-text">Unknown lines are preserved here so cached provider fields are not lost.</div>
+        </div>
+        <input type="hidden" id="cvInfoFilePath">
         <input type="hidden" id="cvInfoDirectoryPath">
         <input type="hidden" id="cvInfoPanel">
       </div>

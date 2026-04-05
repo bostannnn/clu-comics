@@ -939,6 +939,14 @@ function createListItem(itemName, fullPath, type, panel, isDraggable) {
         return;
       }
 
+      const isCvInfoFile = String(fileData.name || '').toLowerCase() === 'cvinfo';
+      if (isCvInfoFile && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        openCVInfoEditor(fullPath, panel);
+        return;
+      }
+
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
         if (selectedFiles.has(fullPath)) {
@@ -6346,13 +6354,18 @@ function saveEditedCBZ() {
  * @param {string} panel - The panel ('source' or 'destination') to refresh after saving
  */
 function promptForCVInfo(directoryPath, panel) {
-  // Store the directory path and panel in hidden fields
+  document.getElementById('cvInfoModalLabel').innerHTML = '<i class="bi bi-link-45deg"></i> Add CVINFO';
+  document.getElementById('cvInfoModalDescription').innerHTML = 'Enter any available series identifiers or cached fields for this folder. This will be saved as a <code>cvinfo</code> file and used to auto-fetch metadata for comics in this folder.';
+  document.getElementById('cvInfoFilePath').value = '';
   document.getElementById('cvInfoDirectoryPath').value = directoryPath;
   document.getElementById('cvInfoPanel').value = panel;
 
   // Clear the input fields
-  document.getElementById('cvInfoIdInput').value = '';
+  document.getElementById('cvInfoUrlInput').value = '';
   document.getElementById('metronIdInput').value = '';
+  document.getElementById('cvInfoPublisherInput').value = '';
+  document.getElementById('cvInfoStartYearInput').value = '';
+  document.getElementById('cvInfoExtraLinesInput').value = '';
 
   // Show the modal
   const modal = new bootstrap.Modal(document.getElementById('cvInfoModal'));
@@ -6360,27 +6373,57 @@ function promptForCVInfo(directoryPath, panel) {
 
   // Focus the input field after modal is shown
   document.getElementById('cvInfoModal').addEventListener('shown.bs.modal', function () {
-    document.getElementById('cvInfoIdInput').focus();
+    document.getElementById('cvInfoUrlInput').focus();
   }, { once: true });
+}
+
+function openCVInfoEditor(filePath, panel) {
+  fetch(`/api/cvinfo?path=${encodeURIComponent(filePath)}`)
+    .then(response => response.json().then(data => ({ ok: response.ok, data })))
+    .then(result => {
+      if (!result.ok) {
+        throw new Error(result.data.error || 'Failed to load CVINFO');
+      }
+
+      const data = result.data;
+      document.getElementById('cvInfoModalLabel').innerHTML = '<i class="bi bi-pencil-square"></i> Edit CVINFO';
+      document.getElementById('cvInfoModalDescription').innerHTML = 'Edit the structured fields stored in this <code>cvinfo</code> file.';
+      document.getElementById('cvInfoFilePath').value = data.path || filePath;
+      document.getElementById('cvInfoDirectoryPath').value = data.directory || filePath.substring(0, filePath.lastIndexOf('/'));
+      document.getElementById('cvInfoPanel').value = panel;
+      document.getElementById('cvInfoUrlInput').value = data.cv_url || data.cv_id || '';
+      document.getElementById('metronIdInput').value = data.series_id || '';
+      document.getElementById('cvInfoPublisherInput').value = data.publisher_name || '';
+      document.getElementById('cvInfoStartYearInput').value = data.start_year || '';
+      document.getElementById('cvInfoExtraLinesInput').value = data.extra_lines || '';
+
+      const modal = new bootstrap.Modal(document.getElementById('cvInfoModal'));
+      modal.show();
+      document.getElementById('cvInfoModal').addEventListener('shown.bs.modal', function () {
+        document.getElementById('cvInfoUrlInput').focus();
+      }, { once: true });
+    })
+    .catch(error => {
+      console.error('Error loading CVINFO:', error);
+      CLU.showToast('Error', error.message || 'Failed to load CVINFO file', 'error');
+    });
 }
 
 /**
  * Save the ComicVine URL from the modal
  */
 function saveCVInfo() {
-  const cvId = document.getElementById('cvInfoIdInput').value.trim();
+  const cvUrl = document.getElementById('cvInfoUrlInput').value.trim();
   const metronId = document.getElementById('metronIdInput').value.trim();
+  const publisherName = document.getElementById('cvInfoPublisherInput').value.trim();
+  const startYear = document.getElementById('cvInfoStartYearInput').value.trim();
+  const extraLines = document.getElementById('cvInfoExtraLinesInput').value;
+  const filePath = document.getElementById('cvInfoFilePath').value;
   const directoryPath = document.getElementById('cvInfoDirectoryPath').value;
   const panel = document.getElementById('cvInfoPanel').value;
 
-  if (!cvId) {
-    CLU.showToast('Error', 'Please enter a Comic Vine Volume ID', 'error');
-    return;
-  }
-
-  // Validate that it's a number
-  if (!/^\d+$/.test(cvId)) {
-    CLU.showToast('Error', 'Comic Vine ID must be a number', 'error');
+  if (!cvUrl && !metronId && !publisherName && !startYear && !extraLines.trim()) {
+    CLU.showToast('Error', 'Enter at least one CVINFO field before saving', 'error');
     return;
   }
 
@@ -6389,11 +6432,9 @@ function saveCVInfo() {
     CLU.showToast('Error', 'Metron ID must be a number', 'error');
     return;
   }
-
-  // Build the file content
-  let content = `https://comicvine.gamespot.com/volume/4050-${cvId}`;
-  if (metronId) {
-    content += `\nseries_id: ${metronId}`;
+  if (startYear && !/^\d{4}$/.test(startYear)) {
+    CLU.showToast('Error', 'Start year must be a 4-digit year', 'error');
+    return;
   }
 
   // Hide the modal
@@ -6406,15 +6447,20 @@ function saveCVInfo() {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
+      path: filePath || undefined,
       directory: directoryPath,
-      content: content
+      cv_url: cvUrl,
+      series_id: metronId,
+      publisher_name: publisherName,
+      start_year: startYear,
+      extra_lines: extraLines
     })
   })
     .then(response => response.json())
     .then(data => {
       if (data.success) {
         CLU.showToast('Success', 'CVINFO file saved successfully!', 'success');
-        // Refresh the directory listing to show the new file
+        // Refresh the directory listing to show the new or updated file
         loadDirectories(directoryPath, panel);
       } else {
         CLU.showToast('Error', data.error || 'Failed to save CVINFO file', 'error');

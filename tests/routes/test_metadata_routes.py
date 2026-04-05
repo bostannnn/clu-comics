@@ -119,6 +119,134 @@ class TestAsText:
         assert _as_text(42) == "42"
 
 
+class TestCvinfoRoutes:
+
+    def test_get_cvinfo_returns_structured_fields(self, client, tmp_path):
+        folder = tmp_path / "Series"
+        folder.mkdir()
+        cvinfo = folder / "cvinfo"
+        cvinfo.write_text(
+            "https://comicvine.gamespot.com/volume/4050-167796/\n"
+            "series_id: 12345\n"
+            "publisher_name: Image\n"
+            "start_year: 2015\n"
+            "mangadex_id: abc123\n",
+            encoding="utf-8",
+        )
+
+        with patch("routes.metadata.is_valid_library_path", return_value=True):
+            resp = client.get(f"/api/cvinfo?path={cvinfo}")
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["success"] is True
+        assert data["cv_id"] == "167796"
+        assert data["series_id"] == "12345"
+        assert data["publisher_name"] == "Image"
+        assert data["start_year"] == "2015"
+        assert "mangadex_id: abc123" in data["extra_lines"]
+
+    def test_get_cvinfo_requires_cvinfo_path(self, client, tmp_path):
+        file_path = tmp_path / "not-cvinfo.txt"
+        file_path.write_text("x", encoding="utf-8")
+
+        with patch("routes.metadata.is_valid_library_path", return_value=True):
+            resp = client.get(f"/api/cvinfo?path={file_path}")
+
+        assert resp.status_code == 400
+        assert "cvinfo file" in resp.get_json()["error"]
+
+    def test_save_cvinfo_structured_preserves_extra_lines(self, client, tmp_path):
+        folder = tmp_path / "Series"
+        folder.mkdir()
+        cvinfo = folder / "cvinfo"
+        cvinfo.write_text("mangadex_id: abc123\n", encoding="utf-8")
+
+        with patch("routes.metadata.is_valid_library_path", return_value=True), \
+             patch("routes.metadata.is_path_in_any_root", return_value=False):
+            resp = client.post(
+                "/api/save-cvinfo",
+                json={
+                    "path": str(cvinfo),
+                    "cv_url": "167796",
+                    "series_id": "12345",
+                    "publisher_name": "Image",
+                    "start_year": "2015",
+                    "extra_lines": "mangadex_id: abc123\npublisher_name: ignore-me",
+                },
+            )
+
+        assert resp.status_code == 200
+        content = cvinfo.read_text(encoding="utf-8")
+        assert "https://comicvine.gamespot.com/volume/4050-167796/" in content
+        assert "series_id: 12345" in content
+        assert "publisher_name: Image" in content
+        assert "start_year: 2015" in content
+        assert "mangadex_id: abc123" in content
+        assert "ignore-me" not in content
+
+    def test_save_cvinfo_rejects_invalid_start_year(self, client, tmp_path):
+        folder = tmp_path / "Series"
+        folder.mkdir()
+        cvinfo = folder / "cvinfo"
+
+        with patch("routes.metadata.is_valid_library_path", return_value=True), \
+             patch("routes.metadata.is_path_in_any_root", return_value=False):
+            resp = client.post(
+                "/api/save-cvinfo",
+                json={
+                    "path": str(cvinfo),
+                    "cv_url": "167796",
+                    "start_year": "20A5",
+                },
+            )
+
+        assert resp.status_code == 400
+        assert "4-digit year" in resp.get_json()["error"]
+
+    def test_save_cvinfo_rejects_non_cvinfo_path(self, client, tmp_path):
+        folder = tmp_path / "Series"
+        folder.mkdir()
+        other_file = folder / "issue.cbz"
+
+        with patch("routes.metadata.is_valid_library_path", return_value=True), \
+             patch("routes.metadata.is_path_in_any_root", return_value=False):
+            resp = client.post(
+                "/api/save-cvinfo",
+                json={
+                    "path": str(other_file),
+                    "series_id": "12345",
+                },
+            )
+
+        assert resp.status_code == 400
+        assert "cvinfo file" in resp.get_json()["error"]
+
+    def test_save_cvinfo_allows_metron_only_structured_content(self, client, tmp_path):
+        folder = tmp_path / "Series"
+        folder.mkdir()
+        cvinfo = folder / "cvinfo"
+
+        with patch("routes.metadata.is_valid_library_path", return_value=True), \
+             patch("routes.metadata.is_path_in_any_root", return_value=False):
+            resp = client.post(
+                "/api/save-cvinfo",
+                json={
+                    "path": str(cvinfo),
+                    "series_id": "12345",
+                    "publisher_name": "Image",
+                    "start_year": "2015",
+                },
+            )
+
+        assert resp.status_code == 200
+        content = cvinfo.read_text(encoding="utf-8")
+        assert "series_id: 12345" in content
+        assert "publisher_name: Image" in content
+        assert "start_year: 2015" in content
+        assert "comicvine.gamespot.com" not in content
+
+
 def _make_cbz(path, with_comicinfo=True):
     """Helper to create a minimal CBZ file for testing."""
     with zipfile.ZipFile(path, 'w') as zf:
