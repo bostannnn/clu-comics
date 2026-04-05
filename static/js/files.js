@@ -2898,6 +2898,7 @@ function updateRenameButtonVisibility(panel) {
     let renameButton = renameRow.querySelector('.rename-files-btn');
     let replaceButton = renameRow.querySelector('.replace-text-btn');
     let seriesRenameButton = renameRow.querySelector('.series-rename-btn');
+    let folderPatternButton = renameRow.querySelector('.folder-pattern-btn');
     let forceComicVineButton = renameRow.querySelector('.force-metadata-comicvine-btn');
     let forceMetronButton = renameRow.querySelector('.force-metadata-metron-btn');
 
@@ -2965,6 +2966,36 @@ function updateRenameButtonVisibility(panel) {
         openRenameFilesModal(pathFromData, panelFromData);
       };
 
+      const canApplyFolderPattern = (
+        filesUiConfig.enableCustomRename &&
+        filesUiConfig.hasCustomMovePattern &&
+        isPathInConfiguredLibrary(currentPath)
+      );
+
+      if (canApplyFolderPattern) {
+        if (!folderPatternButton) {
+          folderPatternButton = document.createElement('button');
+          folderPatternButton.type = 'button';
+          folderPatternButton.className = 'btn btn-outline-primary btn-sm folder-pattern-btn';
+          folderPatternButton.innerHTML = '<i class="bi bi-folder-symlink me-2"></i>Apply Folder + Rename Pattern';
+          folderPatternButton.title = 'Apply the custom folder and rename pattern to comic files directly in this folder';
+          placeDirectoryAction(folderPatternButton, actionContainers.primary);
+        }
+        folderPatternButton.style.display = '';
+        placeDirectoryAction(folderPatternButton, actionContainers.primary);
+        folderPatternButton.dataset.currentPath = currentPath;
+        folderPatternButton.dataset.currentPanel = panel;
+        folderPatternButton.onclick = function (e) {
+          e.preventDefault();
+          const pathFromData = this.dataset.currentPath;
+          const panelFromData = this.dataset.currentPanel;
+          console.log('Folder pattern button clicked, path from data:', pathFromData, 'panel:', panelFromData);
+          applyFolderRenamePatternToDirectory(pathFromData, panelFromData);
+        };
+      } else if (folderPatternButton) {
+        folderPatternButton.style.display = 'none';
+      }
+
       const forceProviders = getForceMetadataProvidersForPanel(panel);
 
       if (forceProviders.includes('comicvine')) {
@@ -3018,6 +3049,7 @@ function updateRenameButtonVisibility(panel) {
       if (renameButton) renameButton.style.display = 'none';
       if (replaceButton) replaceButton.style.display = 'none';
       if (seriesRenameButton) seriesRenameButton.style.display = 'none';
+      if (folderPatternButton) folderPatternButton.style.display = 'none';
       if (forceComicVineButton) forceComicVineButton.style.display = 'none';
       if (forceMetronButton) forceMetronButton.style.display = 'none';
     }
@@ -6094,6 +6126,19 @@ function applyFolderRenamePatternToFile(filePath, panel) {
       console.error('Apply folder + rename pattern error:', error);
       CLU.showToast('Move Error', error.message, 'error');
       refreshPanelForPath(filePath);
+    }
+  });
+}
+
+function applyFolderRenamePatternToDirectory(directoryPath, panel) {
+  CLU.applyFolderRenamePatternToDirectory(directoryPath, {
+    onSuccess: function () {
+      refreshPanelForPath(directoryPath);
+    },
+    onError: function (error) {
+      console.error('Apply folder + rename pattern to directory error:', error);
+      CLU.showToast('Move Error', error.message, 'error');
+      refreshPanelForPath(directoryPath);
     }
   });
 }

@@ -280,4 +280,67 @@
         }
       });
   };
+
+  CLU.applyFolderRenamePatternToDirectory = function (directoryPath, hooks) {
+    hooks = hooks || {};
+
+    var loadingToast = document.createElement('div');
+    loadingToast.className = 'toast show position-fixed top-0 end-0 m-3';
+    loadingToast.style.zIndex = '1200';
+    loadingToast.innerHTML =
+      '<div class="toast-header bg-primary text-white">' +
+        '<strong class="me-auto">Applying Folder + Rename Pattern</strong>' +
+      '</div>' +
+      '<div class="toast-body">' +
+        '<div class="d-flex align-items-center">' +
+          '<div class="spinner-border spinner-border-sm me-2" role="status">' +
+            '<span class="visually-hidden">Loading...</span>' +
+          '</div>' +
+          'Processing files in folder...' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(loadingToast);
+
+    fetch('/apply-folder-rename-pattern', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ path: directoryPath })
+    })
+      .then(function (response) {
+        return response.json().then(function (data) {
+          return { ok: response.ok, data: data };
+        });
+      })
+      .then(function (result) {
+        if (document.body.contains(loadingToast)) {
+          document.body.removeChild(loadingToast);
+        }
+
+        if (!result.ok) {
+          throw new Error(result.data.error || 'Failed to apply folder and rename pattern');
+        }
+
+        CLU.showToast(
+          result.data.updated ? 'Folder Processed' : 'No Changes Applied',
+          result.data.message || 'Finished processing folder.',
+          result.data.failed_count > 0 ? 'warning' : (result.data.updated ? 'success' : 'info')
+        );
+
+        if (_isFn(hooks.onSuccess)) {
+          hooks.onSuccess(result.data);
+        }
+      })
+      .catch(function (error) {
+        if (document.body.contains(loadingToast)) {
+          document.body.removeChild(loadingToast);
+        }
+        if (_isFn(hooks.onError)) {
+          hooks.onError(error);
+        } else {
+          CLU.showToast('Move Error', error.message, 'error');
+        }
+      });
+  };
 })();

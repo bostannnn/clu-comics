@@ -692,36 +692,114 @@ def apply_rename_pattern():
 
 @files_bp.route('/apply-folder-rename-pattern', methods=['POST'])
 def apply_folder_rename_pattern():
-    """Move a file into its custom-pattern folder and rename it using local data only."""
+    """Move a file, or all comic files in a folder, into custom-pattern folders and rename them."""
     data = request.get_json() or {}
-    file_path = data.get('path')
+    target_path = data.get('path')
 
-    if not file_path:
+    if not target_path:
         return jsonify({"error": "Missing file path"}), 400
 
-    if not os.path.exists(file_path):
+    if not os.path.exists(target_path):
         return jsonify({"error": "Source file does not exist"}), 404
 
-    if not os.path.isfile(file_path):
-        return jsonify({"error": "Path is not a file"}), 400
-
-    if is_critical_path(file_path):
-        app_logger.error(f"Attempted to apply folder+rename pattern to critical path: {file_path}")
-        return jsonify({"error": get_critical_path_error_message(file_path, "move or rename")}), 403
+    if is_critical_path(target_path):
+        app_logger.error(f"Attempted to apply folder+rename pattern to critical path: {target_path}")
+        return jsonify({"error": get_critical_path_error_message(target_path, "move or rename")}), 403
 
     try:
         from cbz_ops.rename import move_and_rename_file_using_custom_patterns
+        from app import update_index_on_move
 
-        new_path, was_updated = move_and_rename_file_using_custom_patterns(file_path)
+        if os.path.isdir(target_path):
+            comic_extensions = {'.cbz', '.cbr', '.zip'}
+            candidate_paths = []
+            for entry in sorted(os.listdir(target_path)):
+                full_path = os.path.join(target_path, entry)
+                if not os.path.isfile(full_path) or is_hidden(full_path):
+                    continue
+                if os.path.splitext(entry)[1].lower() in comic_extensions:
+                    candidate_paths.append(full_path)
+
+            if not candidate_paths:
+                return jsonify({
+                    "success": True,
+                    "updated": False,
+                    "bulk": True,
+                    "processed_count": 0,
+                    "updated_count": 0,
+                    "skipped_count": 0,
+                    "failed_count": 0,
+                    "results": [],
+                    "message": "No comic files found directly inside this folder"
+                })
+
+            results = []
+            updated_count = 0
+            skipped_count = 0
+            failed_count = 0
+
+            for file_path in candidate_paths:
+                try:
+                    new_path, was_updated = move_and_rename_file_using_custom_patterns(file_path)
+                    if was_updated:
+                        update_index_on_move(file_path, new_path)
+                        updated_count += 1
+                        results.append({
+                            "path": file_path,
+                            "new_path": new_path,
+                            "new_name": os.path.basename(new_path),
+                            "updated": True
+                        })
+                    else:
+                        skipped_count += 1
+                        results.append({
+                            "path": file_path,
+                            "new_path": new_path,
+                            "new_name": os.path.basename(new_path),
+                            "updated": False
+                        })
+                except ValueError as e:
+                    failed_count += 1
+                    results.append({
+                        "path": file_path,
+                        "updated": False,
+                        "error": str(e)
+                    })
+                except Exception as e:
+                    failed_count += 1
+                    app_logger.error(f"Error applying folder+rename pattern to {file_path}: {e}")
+                    results.append({
+                        "path": file_path,
+                        "updated": False,
+                        "error": str(e)
+                    })
+
+            return jsonify({
+                "success": True,
+                "updated": updated_count > 0,
+                "bulk": True,
+                "processed_count": len(candidate_paths),
+                "updated_count": updated_count,
+                "skipped_count": skipped_count,
+                "failed_count": failed_count,
+                "results": results,
+                "message": (
+                    f"Processed {len(candidate_paths)} comic files: "
+                    f"{updated_count} updated, {skipped_count} skipped, {failed_count} failed"
+                )
+            })
+
+        if not os.path.isfile(target_path):
+            return jsonify({"error": "Path must be a file or folder"}), 400
+
+        new_path, was_updated = move_and_rename_file_using_custom_patterns(target_path)
 
         if was_updated:
-            from app import update_index_on_move
-
-            update_index_on_move(file_path, new_path)
+            update_index_on_move(target_path, new_path)
             return jsonify({
                 "success": True,
                 "updated": True,
-                "old_path": file_path,
+                "old_path": target_path,
                 "new_path": new_path,
                 "new_name": os.path.basename(new_path),
                 "message": "File moved and renamed successfully"
@@ -730,19 +808,19 @@ def apply_folder_rename_pattern():
         return jsonify({
             "success": True,
             "updated": False,
-            "old_path": file_path,
+            "old_path": target_path,
             "new_path": new_path,
             "new_name": os.path.basename(new_path),
             "message": "File already matches the custom folder and rename patterns"
         })
     except ValueError as e:
-        app_logger.warning(f"Refused custom folder+rename pattern for {file_path}: {e}")
+        app_logger.warning(f"Refused custom folder+rename pattern for {target_path}: {e}")
         return jsonify({"error": str(e)}), 400
     except ImportError as e:
         app_logger.error(f"Failed to import rename module: {e}")
         return jsonify({"error": "Rename module not available"}), 500
     except Exception as e:
-        app_logger.error(f"Error applying custom folder+rename pattern to {file_path}: {e}")
+        app_logger.error(f"Error applying custom folder+rename pattern to {target_path}: {e}")
         return jsonify({"error": str(e)}), 500
 
 
