@@ -1635,7 +1635,7 @@ class TestBatchForceMetadata:
         assert mock_add_xml.called is True
         assert mock_get_volume_details.call_count == 2
         mock_get_volume_details.assert_any_call("test-key", 4050)
-        mock_get_issue_by_number.assert_called_once_with("test-key", 4050, "1")
+        mock_get_issue_by_number.assert_called_once_with("test-key", 4050, "1", 2020)
         xml_bytes = mock_add_xml.call_args.args[1]
         assert b"<Publisher>DC Comics</Publisher>" in xml_bytes
 
@@ -1803,6 +1803,226 @@ class TestBatchForceMetadata:
         resp.get_data(as_text=True)
         assert mock_add_xml.called is False
 
+    @patch("routes.metadata.time.sleep", return_value=None)
+    @patch("core.database.update_file_index_from_comicinfo")
+    @patch("cbz_ops.rename.rename_comic_from_metadata", side_effect=lambda file_path, metadata: (file_path, False))
+    @patch("routes.metadata.add_comicinfo_to_cbz")
+    @patch("routes.metadata.comicvine.get_issue_by_number", return_value={
+        "id": 1003,
+        "name": "20th Century Boys v03",
+        "issue_number": "3",
+        "volume_name": "20th Century Boys",
+        "volume_id": 34961,
+        "publisher": "Viz",
+        "year": 2000,
+        "month": 1,
+        "day": 1,
+        "description": "Fetched from ComicVine",
+        "image_url": None,
+    })
+    @patch("routes.metadata.comicvine.get_volume_details", return_value={"start_year": 2000, "publisher_name": "Viz"})
+    @patch("routes.metadata.is_valid_library_path", return_value=True)
+    @patch("routes.metadata.gcd.is_mysql_available", return_value=False)
+    @patch("routes.metadata.metron.is_metron_configured", return_value=False)
+    def test_force_batch_uses_manga_volume_number_for_comicvine(
+        self,
+        mock_metron_configured,
+        mock_gcd_available,
+        mock_valid_library_path,
+        mock_get_volume_details,
+        mock_get_issue_by_number,
+        mock_add_xml,
+        mock_rename,
+        mock_update_index,
+        mock_sleep,
+        client,
+        tmp_path,
+    ):
+        batch_dir = tmp_path / "data" / "20th Century Boys (2000)"
+        batch_dir.mkdir(parents=True)
+        _make_cbz(
+            str(batch_dir / "20th Century Boys, v03 (2000) [Band of the Hawks].cbz"),
+            with_comicinfo=False,
+        )
+
+        client.application.config["COMICVINE_API_KEY"] = "test-key"
+
+        resp = client.post("/api/batch-metadata", json={
+            "directory": str(batch_dir),
+            "volume_id": 34961,
+            "force_manual_selection": True,
+            "force_provider": "comicvine",
+            "overwrite_existing_metadata": True,
+        })
+
+        assert resp.status_code == 200
+        resp.get_data(as_text=True)
+        mock_get_issue_by_number.assert_called_once_with("test-key", 34961, "3", 2000)
+        mock_add_xml.assert_called_once()
+
+    @patch("routes.metadata.time.sleep", return_value=None)
+    @patch("core.database.update_file_index_from_comicinfo")
+    @patch("cbz_ops.rename.rename_comic_from_metadata", side_effect=lambda file_path, metadata: (file_path, False))
+    @patch("routes.metadata.add_comicinfo_to_cbz")
+    @patch("routes.metadata.comicvine.get_issue_by_number")
+    @patch("routes.metadata.comicvine.get_volume_details", return_value={"start_year": 2013, "publisher_name": "Image"})
+    @patch("routes.metadata.is_valid_library_path", return_value=True)
+    @patch("routes.metadata.gcd.is_mysql_available", return_value=False)
+    @patch("routes.metadata.metron.is_metron_configured", return_value=False)
+    def test_force_batch_does_not_treat_western_volume_only_name_as_issue(
+        self,
+        mock_metron_configured,
+        mock_gcd_available,
+        mock_valid_library_path,
+        mock_get_volume_details,
+        mock_get_issue_by_number,
+        mock_add_xml,
+        mock_rename,
+        mock_update_index,
+        mock_sleep,
+        client,
+        tmp_path,
+    ):
+        batch_dir = tmp_path / "data" / "Saga (2013)"
+        batch_dir.mkdir(parents=True)
+        _make_cbz(
+            str(batch_dir / "Saga v02 (2013).cbz"),
+            with_comicinfo=False,
+        )
+
+        client.application.config["COMICVINE_API_KEY"] = "test-key"
+
+        resp = client.post("/api/batch-metadata", json={
+            "directory": str(batch_dir),
+            "volume_id": 12345,
+            "force_manual_selection": True,
+            "force_provider": "comicvine",
+            "overwrite_existing_metadata": True,
+        })
+
+        assert resp.status_code == 200
+        body = resp.get_data(as_text=True)
+        mock_get_issue_by_number.assert_not_called()
+        mock_add_xml.assert_not_called()
+        assert '"reason": "no issue number"' in body
+
+    @patch("routes.metadata.time.sleep", return_value=None)
+    @patch("core.database.update_file_index_from_comicinfo")
+    @patch("cbz_ops.rename.rename_comic_from_metadata", side_effect=lambda file_path, metadata: (file_path, False))
+    @patch("routes.metadata.add_comicinfo_to_cbz")
+    @patch("routes.metadata.comicvine.get_issue_by_number", return_value={
+        "id": 1001,
+        "name": "Failsafe Part One",
+        "issue_number": "1",
+        "volume_name": "Batman",
+        "volume_id": 4050,
+        "publisher": None,
+        "year": 2020,
+        "month": 7,
+        "day": 5,
+        "description": "Fetched from ComicVine",
+        "image_url": None,
+    })
+    @patch("routes.metadata.comicvine.get_volume_details", return_value={"start_year": 2016, "publisher_name": "DC Comics"})
+    @patch("routes.metadata.is_valid_library_path", return_value=True)
+    @patch("routes.metadata.gcd.is_mysql_available", return_value=False)
+    @patch("routes.metadata.metron.is_metron_configured", return_value=False)
+    def test_force_batch_uses_per_file_year_for_comicvine_lookup(
+        self,
+        mock_metron_configured,
+        mock_gcd_available,
+        mock_valid_library_path,
+        mock_get_volume_details,
+        mock_get_issue_by_number,
+        mock_add_xml,
+        mock_rename,
+        mock_update_index,
+        mock_sleep,
+        client,
+        tmp_path,
+    ):
+        batch_dir = tmp_path / "data" / "Batman (2016)"
+        batch_dir.mkdir(parents=True)
+        _make_cbz(
+            str(batch_dir / "Batman 001 (2020).cbz"),
+            with_comicinfo=False,
+        )
+
+        client.application.config["COMICVINE_API_KEY"] = "test-key"
+
+        resp = client.post("/api/batch-metadata", json={
+            "directory": str(batch_dir),
+            "volume_id": 4050,
+            "force_manual_selection": True,
+            "force_provider": "comicvine",
+            "overwrite_existing_metadata": True,
+        })
+
+        assert resp.status_code == 200
+        resp.get_data(as_text=True)
+        mock_get_issue_by_number.assert_called_once_with("test-key", 4050, "1", 2020)
+
+    @patch("routes.metadata.time.sleep", return_value=None)
+    @patch("core.database.update_file_index_from_comicinfo")
+    @patch("cbz_ops.rename.rename_comic_from_metadata", side_effect=lambda file_path, metadata: (file_path, False))
+    @patch("routes.metadata.add_comicinfo_to_cbz")
+    @patch("routes.metadata.comicvine.get_issue_by_number", return_value={
+        "id": 1003,
+        "name": "20th Century Boys v03",
+        "issue_number": "3",
+        "volume_name": "20th Century Boys",
+        "volume_id": 34961,
+        "publisher": "Viz",
+        "year": 2000,
+        "month": 1,
+        "day": 1,
+        "description": "Fetched from ComicVine",
+        "image_url": None,
+    })
+    @patch("routes.metadata.comicvine.get_volume_details", return_value={"start_year": 2000, "publisher_name": "Viz"})
+    @patch("routes.metadata.is_valid_library_path", return_value=True)
+    @patch("routes.metadata.gcd.is_mysql_available", return_value=False)
+    @patch("routes.metadata.metron.is_metron_configured", return_value=False)
+    def test_force_batch_uses_volume_details_when_cvinfo_has_year_but_no_publisher(
+        self,
+        mock_metron_configured,
+        mock_gcd_available,
+        mock_valid_library_path,
+        mock_get_volume_details,
+        mock_get_issue_by_number,
+        mock_add_xml,
+        mock_rename,
+        mock_update_index,
+        mock_sleep,
+        client,
+        tmp_path,
+    ):
+        batch_dir = tmp_path / "data" / "20th Century Boys (2000)"
+        batch_dir.mkdir(parents=True)
+        (batch_dir / "cvinfo").write_text(
+            "https://comicvine.gamespot.com/volume/4050-34961/\n"
+            "start_year: 2000\n",
+            encoding="utf-8",
+        )
+        _make_cbz(
+            str(batch_dir / "20th Century Boys, v03 (2000) [Band of the Hawks].cbz"),
+            with_comicinfo=False,
+        )
+
+        client.application.config["COMICVINE_API_KEY"] = "test-key"
+
+        resp = client.post("/api/batch-metadata", json={
+            "directory": str(batch_dir),
+            "overwrite_existing_metadata": True,
+        })
+
+        assert resp.status_code == 200
+        resp.get_data(as_text=True)
+        assert mock_get_volume_details.call_count >= 1
+        mock_get_volume_details.assert_any_call("test-key", 34961)
+        mock_get_issue_by_number.assert_called_once_with("test-key", 34961, "3", 2000)
+        mock_add_xml.assert_called_once()
+
 
 class TestBatchMetadataRenameUpdatesIndex:
     """Verify file_index is updated with new path/name after batch rename."""
@@ -1949,6 +2169,93 @@ class TestBatchMangaProviderPriority:
                     break
 
         assert skip_comic_cvinfo is False
+
+
+class TestSearchComicVineMetadata:
+
+    @patch("routes.metadata.comicvine.auto_move_file", return_value=None)
+    @patch("core.database.set_has_comicinfo")
+    @patch("routes.metadata.add_comicinfo_to_cbz")
+    @patch("routes.metadata.comicvine.get_volume_details", return_value={"start_year": 2000, "publisher_name": "Viz"})
+    @patch("routes.metadata.comicvine.get_issue_by_number")
+    @patch("routes.metadata.comicvine.parse_cvinfo_volume_id", return_value=34961)
+    @patch("routes.metadata.comicvine.find_cvinfo_in_folder", return_value="/data/20th Century Boys/cvinfo")
+    @patch("routes.metadata.comicvine.is_simyan_available", return_value=True)
+    def test_search_comicvine_metadata_uses_manga_volume_number(
+        self,
+        mock_simyan,
+        mock_find_cvinfo,
+        mock_parse_cvinfo,
+        mock_get_issue,
+        mock_get_volume_details,
+        mock_add_xml,
+        mock_set_has_comicinfo,
+        mock_auto_move,
+        client,
+    ):
+        client.application.config["COMICVINE_API_KEY"] = "test-key"
+        mock_get_issue.return_value = {
+            "id": 1003,
+            "name": "20th Century Boys v03",
+            "issue_number": "3",
+            "volume_name": "20th Century Boys",
+            "volume_id": 34961,
+            "publisher": "Viz",
+            "year": 2000,
+            "image_url": None,
+        }
+
+        resp = client.post("/search-comicvine-metadata", json={
+            "file_path": "/data/20th Century Boys/20th Century Boys, v03 (2000) [Band of the Hawks].cbz",
+            "file_name": "20th Century Boys, v03 (2000) [Band of the Hawks].cbz",
+        })
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["success"] is True
+        mock_get_issue.assert_called_once_with("test-key", 34961, "3", 2000)
+
+    @patch("routes.metadata.comicvine.auto_move_file", return_value=None)
+    @patch("core.database.set_has_comicinfo")
+    @patch("routes.metadata.add_comicinfo_to_cbz")
+    @patch("routes.metadata.comicvine.get_issue_by_number")
+    @patch("routes.metadata.comicvine.parse_cvinfo_volume_id", return_value=12345)
+    @patch("routes.metadata.comicvine.read_cvinfo_fields", return_value={"publisher_name": "Image"})
+    @patch("routes.metadata.comicvine.find_cvinfo_in_folder", return_value="/data/Saga/cvinfo")
+    @patch("routes.metadata.comicvine.is_simyan_available", return_value=True)
+    def test_search_comicvine_metadata_does_not_use_western_volume_only_name_as_issue(
+        self,
+        mock_simyan,
+        mock_find_cvinfo,
+        mock_read_cvinfo_fields,
+        mock_parse_cvinfo,
+        mock_get_issue,
+        mock_add_xml,
+        mock_set_has_comicinfo,
+        mock_auto_move,
+        client,
+    ):
+        client.application.config["COMICVINE_API_KEY"] = "test-key"
+        mock_get_issue.return_value = {
+            "id": 2001,
+            "name": "Saga",
+            "issue_number": "1",
+            "volume_name": "Saga",
+            "volume_id": 12345,
+            "publisher": "Image",
+            "year": 2013,
+            "image_url": None,
+        }
+
+        resp = client.post("/search-comicvine-metadata", json={
+            "file_path": "/data/Saga/Saga v02 (2013).cbz",
+            "file_name": "Saga v02 (2013).cbz",
+        })
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["success"] is True
+        mock_get_issue.assert_called_once_with("test-key", 12345, "1", 2013)
 
     def test_batch_skips_disabled_providers(self):
         """Disabled manga provider at top doesn't trigger skip."""

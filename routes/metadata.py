@@ -307,6 +307,62 @@ def _looks_like_year_token(filename, token):
     return False
 
 
+_MANGA_PUBLISHER_TOKENS = (
+    "viz",
+    "shonen jump",
+    "kodansha",
+    "yen press",
+    "seven seas",
+    "square enix manga",
+    "vertical",
+    "tokyopop",
+    "denpa",
+    "dark horse manga",
+    "fakku",
+    "udon",
+)
+
+
+def _is_manga_publisher(publisher_name):
+    normalized = re.sub(r"[^a-z0-9]+", " ", str(publisher_name or "").lower()).strip()
+    if not normalized:
+        return False
+    return any(token in normalized for token in _MANGA_PUBLISHER_TOKENS)
+
+
+def _extract_metadata_lookup(filename, allow_volume_as_issue=False):
+    """Extract lookup issue/year, optionally allowing manga-style ``vNN`` volume-as-issue."""
+    from cbz_ops.rename import parse_comic_filename
+
+    custom_pattern = current_app.config.get("CUSTOM_RENAME_PATTERN", "")
+    parsed = parse_comic_filename(filename, custom_pattern=custom_pattern or None)
+    parsed_issue = parsed.get("issue_number") or None
+    parsed_year = parsed.get("year")
+
+    extracted = comicvine.extract_issue_number(filename)
+    if extracted and not (
+        _looks_like_year_token(filename, extracted)
+        and not _has_explicit_issue_marker(filename)
+    ):
+        return {"issue_number": extracted, "year": parsed_year}
+
+    if parsed_issue:
+        volume_number = str(parsed.get("volume_number") or "").strip().lower()
+        filename_without_ext = os.path.splitext(filename or "")[0]
+        is_volume_only_lookup = (
+            bool(volume_number)
+            and volume_number.startswith("v")
+            and parsed_issue == (volume_number[1:].lstrip("0") or "1")
+            and not extracted
+            and not _has_explicit_issue_marker(filename)
+            and re.search(r"\bv\d+\b(?!\s+\d)", filename_without_ext, re.IGNORECASE)
+        )
+        if not is_volume_only_lookup or allow_volume_as_issue:
+            return {"issue_number": parsed_issue, "year": parsed_year}
+
+    return {"issue_number": None, "year": parsed_year}
+
+
 def _extract_batch_series_name(directory, comic_files):
     """Derive a likely series name for folder batch metadata."""
     series_name = os.path.basename(directory)
@@ -1485,6 +1541,7 @@ def batch_metadata():
         cvinfo_created = False
         metron_id_added = False
         cvinfo_start_year = None
+        cvinfo_publisher_name = None
         cv_id_missing_warning = False  # Track if CV ID is missing from Metron
 
         # Determine if manga providers have higher priority than comic providers
@@ -1539,6 +1596,7 @@ def batch_metadata():
                 cvinfo_created = True
                 if volume_details:
                     cvinfo_start_year = volume_details.get('start_year')
+                    cvinfo_publisher_name = volume_details.get('publisher_name')
             elif force_provider == 'metron':
                 if not (metron_available and metron_api):
                     return jsonify({"error": "Metron is not enabled for this library"}), 400
@@ -1581,6 +1639,7 @@ def batch_metadata():
                 if series_details:
                     cv_volume_id = series_details.get('cv_id')
                     cvinfo_start_year = series_details.get('year_began')
+                    cvinfo_publisher_name = series_details.get('publisher_name')
         elif not os.path.exists(cvinfo_path):
             app_logger.info(f"No cvinfo found, searching for series: '{series_name}' (year: {extracted_year})")
 
@@ -1601,6 +1660,7 @@ def batch_metadata():
                         cv_volume_id = metron_series.get('cv_id')
                         series_id = metron_series['id']
                         cvinfo_start_year = metron_series.get('year_began')
+                        cvinfo_publisher_name = metron_series.get('publisher_name')
                         cvinfo_created = True
                         metron_id_added = True
                         app_logger.info(f"Created cvinfo via Metron: series_id={series_id}, cv_id={cv_volume_id}")
@@ -1649,6 +1709,7 @@ def batch_metadata():
 
                         if volume_details:
                             cvinfo_start_year = volume_details.get('start_year')
+                            cvinfo_publisher_name = volume_details.get('publisher_name')
                 except Exception as e:
                     app_logger.error(f"Error searching ComicVine: {e}")
         else:
@@ -1656,6 +1717,8 @@ def batch_metadata():
             cv_volume_id = comicvine.parse_cvinfo_volume_id(cvinfo_path)
             series_id = metron.parse_cvinfo_for_metron_id(cvinfo_path)
             app_logger.info(f"Found existing cvinfo with volume ID: {cv_volume_id}, series_id: {series_id}")
+            cvinfo_fields = comicvine.read_cvinfo_fields(cvinfo_path)
+            cvinfo_publisher_name = cvinfo_fields.get('publisher_name')
 
             # If cvinfo has series_id but no CV URL, look up cv_id from Metron and add it
             if not cv_volume_id and series_id and metron_api:
@@ -1687,18 +1750,26 @@ def batch_metadata():
                                 series_details.get('publisher_name'),
                                 series_details.get('year_began'))
                             cvinfo_start_year = series_details.get('year_began')
+                            cvinfo_publisher_name = series_details.get('publisher_name')
                         metron_id_added = True
                         app_logger.info(f"Added Metron data to cvinfo: series_id={series_id}, publisher={series_details.get('publisher_name')}, year={series_details.get('year_began')}")
 
         # Step 4: Read start_year from cvinfo for ComicVine calls (for Volume field)
-        if not cvinfo_start_year and os.path.exists(cvinfo_path):
+        if os.path.exists(cvinfo_path):
             cvinfo_fields = comicvine.read_cvinfo_fields(cvinfo_path)
-            cvinfo_start_year = cvinfo_fields.get('start_year')
-            # If not in cvinfo but we have a volume_id, fetch and save
-            if not cvinfo_start_year and cv_volume_id and comicvine_available:
+            if not cvinfo_start_year:
+                cvinfo_start_year = cvinfo_fields.get('start_year')
+            if not cvinfo_publisher_name:
+                cvinfo_publisher_name = cvinfo_fields.get('publisher_name')
+            # If cvinfo is missing publisher/start year but we have a volume id,
+            # hydrate both from ComicVine so manga detection can still work.
+            if (not cvinfo_start_year or not cvinfo_publisher_name) and cv_volume_id and comicvine_available:
                 volume_details = comicvine.get_volume_details(comicvine_api_key, cv_volume_id)
                 if volume_details.get('start_year') or volume_details.get('publisher_name'):
-                    cvinfo_start_year = volume_details.get('start_year')
+                    if not cvinfo_start_year:
+                        cvinfo_start_year = volume_details.get('start_year')
+                    if not cvinfo_publisher_name:
+                        cvinfo_publisher_name = volume_details.get('publisher_name')
                     comicvine.write_cvinfo_fields(cvinfo_path, volume_details.get('publisher_name'), cvinfo_start_year)
 
         # Store year for GCD lookups
@@ -1762,20 +1833,13 @@ def batch_metadata():
                         result['details'].append({'file': filename, 'status': 'skipped', 'reason': 'CBR format'})
                         continue
 
-                    # Extract issue/volume number from filename
-                    issue_number = comicvine.extract_issue_number(filename)
-
-                    # For manga, also try to extract volume number (v01, v02, etc.)
-                    volume_number = None
-                    volume_match = re.search(r'\bv(\d+)', filename, re.IGNORECASE)
-                    if volume_match:
-                        volume_number = volume_match.group(1).lstrip('0') or '1'
-
-                    # Use volume number for manga providers (AniList, MangaDex), issue number for comics
-                    if (anilist_available or mangadex_available or mangaupdates_available) and volume_number:
-                        issue_number = volume_number
-                        app_logger.info(f"Using volume number {volume_number} for manga: {filename}")
-                    elif not issue_number:
+                    lookup = _extract_metadata_lookup(
+                        filename,
+                        allow_volume_as_issue=_is_manga_publisher(cvinfo_publisher_name),
+                    )
+                    issue_number = lookup['issue_number']
+                    issue_year = lookup['year']
+                    if not issue_number:
                         app_logger.warning(f"Could not extract issue number from {filename}")
                         result['errors'] += 1
                         result['details'].append({'file': filename, 'status': 'error', 'reason': 'no issue number'})
@@ -1829,6 +1893,7 @@ def batch_metadata():
                                 comicvine_api_key,
                                 cv_volume_id,
                                 issue_number,
+                                issue_year,
                             )
                             if issue_data:
                                 volume_data = _resolve_comicvine_volume_data(
@@ -3810,16 +3875,12 @@ def search_metadata():
         parsed = parse_comic_filename(file_name, custom_pattern=custom_pattern or None)
         series_name = parsed['series_name'] or None
         issue_number = parsed['issue_number'] or None
-        issue_from_pattern = bool(issue_number)
         year = parsed['year']
 
         if not issue_number:
             issue_number = "1"
 
-        # Also extract issue number via the provider base utility
-        # Only use fallback when no pattern matched an issue number (avoid
-        # overriding a valid match, e.g. "Spider-Man 2099 001" where 001 is correct)
-        if not issue_from_pattern:
+        if not parsed['issue_number']:
             extracted = comicvine.extract_issue_number(file_name)
             if extracted and not (
                 _looks_like_year_token(file_name, extracted)
@@ -4362,19 +4423,24 @@ def search_comicvine_metadata():
         if cvinfo_path:
             app_logger.info(f"Found cvinfo file at {cvinfo_path}")
 
+            cvinfo_fields = comicvine.read_cvinfo_fields(cvinfo_path)
+            allow_volume_as_issue = _is_manga_publisher(cvinfo_fields.get("publisher_name"))
+            cv_volume_id = comicvine.parse_cvinfo_volume_id(cvinfo_path)
+            if not allow_volume_as_issue and cv_volume_id:
+                volume_details = comicvine.get_volume_details(api_key, cv_volume_id)
+                allow_volume_as_issue = _is_manga_publisher(volume_details.get("publisher_name"))
+
             # Extract issue number from filename (handles extension removal internally)
-            issue_number = comicvine.extract_issue_number(file_name)
-            name_without_ext = os.path.splitext(file_name)[0]
+            lookup = _extract_metadata_lookup(
+                file_name,
+                allow_volume_as_issue=allow_volume_as_issue,
+            )
+            issue_number = lookup["issue_number"]
+            year = lookup["year"]
             if not issue_number:
                 issue_number = "1"  # Default for graphic novels/one-shots
 
-            # Extract year from filename if present
-            year_match = re.search(r'\((\d{4})\)', name_without_ext)
-            year = int(year_match.group(1)) if year_match else None
-
             # Try ComicVine with volume ID from cvinfo
-            cv_volume_id = comicvine.parse_cvinfo_volume_id(cvinfo_path)
-
             if cv_volume_id:
                 app_logger.info(f"Using ComicVine volume ID {cv_volume_id} from cvinfo")
                 issue_data = comicvine.get_issue_by_number(api_key, cv_volume_id, issue_number, year)
