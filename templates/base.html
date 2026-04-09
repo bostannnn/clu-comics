@@ -114,6 +114,7 @@
     }
     .ops-item-completed { opacity: 0.6; }
     .ops-item-error { border-left: 3px solid #dc3545; }
+    .ops-item-cancelled { border-left: 3px solid #ffc107; opacity: 0.75; }
   </style>
   {% block extra_css %}{% endblock %}
 </head>
@@ -189,8 +190,9 @@
             const pct = op.total > 0 ? Math.round((op.current / op.total) * 100) : 0;
             const isRunning = op.status === 'running';
             const isError = op.status === 'error';
-            const itemClass = isError ? 'ops-item ops-item-error' : (isRunning ? 'ops-item' : 'ops-item ops-item-completed');
-            const barClass = isError ? 'bg-danger' : (isRunning ? 'progress-bar-striped progress-bar-animated' : 'bg-success');
+            const isCancelled = op.status === 'cancelled';
+            const itemClass = isError ? 'ops-item ops-item-error' : (isCancelled ? 'ops-item ops-item-cancelled' : (isRunning ? 'ops-item' : 'ops-item ops-item-completed'));
+            const barClass = isError ? 'bg-danger' : (isCancelled ? 'bg-warning' : (isRunning ? 'progress-bar-striped progress-bar-animated' : 'bg-success'));
             const countText = op.total > 0 ? op.current + '/' + op.total : '';
 
             html += '<div class="' + itemClass + '">';

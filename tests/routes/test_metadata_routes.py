@@ -2023,6 +2023,76 @@ class TestBatchForceMetadata:
         mock_get_issue_by_number.assert_called_once_with("test-key", 34961, "3", 2000)
         mock_add_xml.assert_called_once()
 
+    @patch("routes.metadata.app_state.complete_operation")
+    @patch("routes.metadata.app_state.register_operation", return_value="op-cancel")
+    @patch("routes.metadata.app_state.is_operation_cancelled", return_value=True)
+    @patch("routes.metadata.is_valid_library_path", return_value=True)
+    @patch("routes.metadata.gcd.is_mysql_available", return_value=False)
+    @patch("routes.metadata.metron.is_metron_configured", return_value=False)
+    def test_batch_metadata_cancel_stops_before_processing_next_file(
+        self,
+        mock_metron_configured,
+        mock_gcd_available,
+        mock_valid_library_path,
+        mock_cancelled,
+        mock_register,
+        mock_complete,
+        client,
+        tmp_path,
+    ):
+        batch_dir = tmp_path / "data" / "Batman (2020)"
+        batch_dir.mkdir(parents=True)
+        _make_cbz(str(batch_dir / "Batman 001 (2020).cbz"), with_comicinfo=False)
+
+        resp = client.post("/api/batch-metadata", json={
+            "directory": str(batch_dir),
+        })
+
+        assert resp.status_code == 200
+        body = resp.get_data(as_text=True)
+        assert '"type": "cancelled"' in body
+        assert '"op_id": "op-cancel"' in body
+        mock_complete.assert_called_once_with("op-cancel", cancelled=True)
+
+    @patch("routes.metadata.comicvine.search_volumes", return_value=[{
+        "id": 4050,
+        "name": "Batman",
+        "start_year": 2020,
+        "publisher_name": "DC",
+    }])
+    @patch("routes.metadata.app_state.is_operation_cancelled", return_value=True)
+    @patch("routes.metadata.is_valid_library_path", return_value=True)
+    @patch("routes.metadata.gcd.is_mysql_available", return_value=False)
+    @patch("routes.metadata.metron.is_metron_configured", return_value=False)
+    def test_force_batch_cancel_during_initial_selection_lookup(
+        self,
+        mock_metron_configured,
+        mock_gcd_available,
+        mock_valid_library_path,
+        mock_cancelled,
+        mock_search_volumes,
+        client,
+        tmp_path,
+    ):
+        batch_dir = tmp_path / "data" / "Batman (2020)"
+        batch_dir.mkdir(parents=True)
+        _make_cbz(str(batch_dir / "Batman 001 (2020).cbz"), with_comicinfo=False)
+        client.application.config["COMICVINE_API_KEY"] = "test-key"
+
+        resp = client.post("/api/batch-metadata", json={
+            "directory": str(batch_dir),
+            "force_manual_selection": True,
+            "force_provider": "comicvine",
+            "overwrite_existing_metadata": True,
+            "op_id": "client-op",
+        })
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["cancelled"] is True
+        assert data["op_id"] == "client-op"
+        mock_search_volumes.assert_called_once_with("test-key", "Batman", 2020)
+
 
 class TestBatchMetadataRenameUpdatesIndex:
     """Verify file_index is updated with new path/name after batch rename."""

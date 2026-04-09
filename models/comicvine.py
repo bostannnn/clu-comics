@@ -11,6 +11,9 @@ from typing import Optional, Dict, List, Any
 import os
 import shutil
 import re
+import threading
+from contextlib import contextmanager
+import requests
 from cbz_ops.rename import rename_comic_from_metadata
 
 try:
@@ -26,6 +29,30 @@ except ImportError:
 def is_simyan_available() -> bool:
     """Check if the Simyan library is available."""
     return SIMYAN_AVAILABLE
+
+
+_METADATA_HTTP_TIMEOUT = 30
+if not hasattr(requests.sessions.Session, "_clu_timeout_lock"):
+    requests.sessions.Session._clu_timeout_lock = threading.RLock()
+_REQUEST_TIMEOUT_LOCK = requests.sessions.Session._clu_timeout_lock
+
+
+@contextmanager
+def _default_request_timeout(timeout=_METADATA_HTTP_TIMEOUT):
+    """Apply a default requests timeout around Simyan calls."""
+    with _REQUEST_TIMEOUT_LOCK:
+        original_request = requests.sessions.Session.request
+
+        def request_with_timeout(session, method, url, **kwargs):
+            if kwargs.get("timeout") is None:
+                kwargs["timeout"] = timeout
+            return original_request(session, method, url, **kwargs)
+
+        requests.sessions.Session.request = request_with_timeout
+        try:
+            yield
+        finally:
+            requests.sessions.Session.request = original_request
 
 
 def is_comicvine_configured(app=None):
@@ -258,11 +285,12 @@ def search_volumes(api_key: str, series_name: str, year: Optional[int] = None) -
     try:
         app_logger.info(f"Searching ComicVine for volume: '{series_name}' (year: {year})")
 
-        # Initialize ComicVine API client
-        cv = Comicvine(api_key=api_key, cache=None)
+        with _default_request_timeout():
+            # Initialize ComicVine API client
+            cv = Comicvine(api_key=api_key, cache=None)
 
-        # Search for volumes using fuzzy search
-        volumes = cv.search(resource=ComicvineResource.VOLUME, query=series_name)
+            # Search for volumes using fuzzy search
+            volumes = cv.search(resource=ComicvineResource.VOLUME, query=series_name)
 
         if not volumes:
             app_logger.info(f"No volumes found for '{series_name}'")
@@ -346,14 +374,15 @@ def get_issue_by_number(api_key: str, volume_id: int, issue_number: str, year: O
     try:
         app_logger.info(f"Searching for issue #{issue_number} in volume {volume_id} (year: {year})")
 
-        # Initialize ComicVine API client
-        cv = Comicvine(api_key=api_key, cache=None)
+        with _default_request_timeout():
+            # Initialize ComicVine API client
+            cv = Comicvine(api_key=api_key, cache=None)
 
-        # Get issues from the volume
-        # Build filter string
-        filter_str = f"volume:{volume_id},issue_number:{issue_number}"
+            # Get issues from the volume
+            # Build filter string
+            filter_str = f"volume:{volume_id},issue_number:{issue_number}"
 
-        issues = cv.list_issues(params={"filter": filter_str})
+            issues = cv.list_issues(params={"filter": filter_str})
 
         if not issues:
             app_logger.info(f"No issues found for volume {volume_id}, issue #{issue_number}")
@@ -371,7 +400,8 @@ def get_issue_by_number(api_key: str, volume_id: int, issue_number: str, year: O
         basic_issue = issues[0]
 
         # Fetch full issue details to get all metadata (credits, characters, etc.)
-        issue = cv.get_issue(basic_issue.id)
+        with _default_request_timeout():
+            issue = cv.get_issue(basic_issue.id)
 
         # Convert to dict format
         issue_dict = _issue_to_dict(issue)
@@ -400,8 +430,9 @@ def get_issue_by_id(api_key: str, issue_id: int) -> Optional[Dict[str, Any]]:
         raise Exception("Simyan library not installed. Install with: pip install simyan")
 
     try:
-        cv = Comicvine(api_key=api_key, cache=None)
-        issue = cv.get_issue(issue_id)
+        with _default_request_timeout():
+            cv = Comicvine(api_key=api_key, cache=None)
+            issue = cv.get_issue(issue_id)
         if not issue:
             app_logger.info(f"No issue found for ComicVine issue id {issue_id}")
             return None
@@ -427,8 +458,9 @@ def list_issue_candidates_for_volume(api_key: str, volume_id: int, year: Optiona
         raise Exception("Simyan library not installed. Install with: pip install simyan")
 
     try:
-        cv = Comicvine(api_key=api_key, cache=None)
-        issues = cv.list_issues(params={"filter": f"volume:{volume_id}"})
+        with _default_request_timeout():
+            cv = Comicvine(api_key=api_key, cache=None)
+            issues = cv.list_issues(params={"filter": f"volume:{volume_id}"})
         if not issues:
             app_logger.info(f"No issue candidates found for volume {volume_id}")
             return []
@@ -1136,8 +1168,9 @@ def get_volume_details(api_key: str, volume_id: int) -> Dict[str, Any]:
 
     try:
         app_logger.info(f"Fetching volume details for volume ID: {volume_id}")
-        cv = Comicvine(api_key=api_key, cache=None)
-        volume = cv.get_volume(volume_id)
+        with _default_request_timeout():
+            cv = Comicvine(api_key=api_key, cache=None)
+            volume = cv.get_volume(volume_id)
 
         if volume:
             result['start_year'] = getattr(volume, 'start_year', None)

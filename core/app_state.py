@@ -23,11 +23,14 @@ COMPLETED_TTL = 15  # seconds before completed ops are purged
 STALE_TIMEOUT = 300  # seconds with no update before a running op is marked stale/error
 
 
-def register_operation(op_type, label, total=0):
+def register_operation(op_type, label, total=0, op_id=None):
     """Register a new long-running operation. Returns the operation ID."""
-    op_id = uuid.uuid4().hex
+    requested_op_id = str(op_id).strip() if op_id else ""
+    op_id = requested_op_id or uuid.uuid4().hex
     now = time.time()
     with _operations_lock:
+        if op_id in _operations:
+            op_id = uuid.uuid4().hex
         _operations[op_id] = {
             "id": op_id,
             "op_type": op_type,
@@ -39,6 +42,7 @@ def register_operation(op_type, label, total=0):
             "started_at": now,
             "updated_at": now,
             "completed_at": None,
+            "cancel_requested": False,
         }
     return op_id
 
@@ -58,16 +62,41 @@ def update_operation(op_id, current=None, total=None, detail=None):
         op["updated_at"] = time.time()
 
 
-def complete_operation(op_id, error=False):
-    """Mark an operation as completed or errored."""
+def complete_operation(op_id, error=False, cancelled=False):
+    """Mark an operation as completed, errored, or cancelled."""
     with _operations_lock:
         op = _operations.get(op_id)
         if op is None:
             return
-        op["status"] = "error" if error else "completed"
+        if cancelled:
+            op["status"] = "cancelled"
+            op["detail"] = "Cancelled"
+        else:
+            op["status"] = "error" if error else "completed"
         op["completed_at"] = time.time()
-        if not error:
+        op["updated_at"] = op["completed_at"]
+        if not error and not cancelled:
             op["current"] = op["total"]
+
+
+def cancel_operation(op_id):
+    """Request cancellation for a running operation. Returns True if found."""
+    with _operations_lock:
+        op = _operations.get(op_id)
+        if op is None:
+            return False
+        if op["status"] == "running":
+            op["cancel_requested"] = True
+            op["detail"] = "Cancel requested..."
+            op["updated_at"] = time.time()
+        return True
+
+
+def is_operation_cancelled(op_id):
+    """Return True when cancellation has been requested for an operation."""
+    with _operations_lock:
+        op = _operations.get(op_id)
+        return bool(op and op.get("cancel_requested"))
 
 
 def get_active_operations():
@@ -84,7 +113,7 @@ def get_active_operations():
         # Prune expired completed operations
         expired = [
             oid for oid, op in _operations.items()
-            if op["status"] in ("completed", "error")
+            if op["status"] in ("completed", "error", "cancelled")
             and op["completed_at"] is not None
             and (now - op["completed_at"]) > COMPLETED_TTL
         ]

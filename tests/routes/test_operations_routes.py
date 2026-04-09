@@ -57,3 +57,18 @@ class TestOperationsRoute:
         data = resp.get_json()
         assert len(data["notifications"]) == 1
         assert data["notifications"][0]["message"] == "Background warning"
+
+    def test_cancel_running_operation(self, client):
+        op_id = app_state.register_operation("metadata", "Batman", total=10)
+
+        resp = client.post(f"/api/operations/{op_id}/cancel")
+
+        assert resp.status_code == 200
+        assert resp.get_json()["success"] is True
+        assert app_state.is_operation_cancelled(op_id) is True
+
+    def test_cancel_unknown_operation(self, client):
+        resp = client.post("/api/operations/missing/cancel")
+
+        assert resp.status_code == 404
+        assert resp.get_json()["success"] is False

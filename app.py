@@ -6758,6 +6758,13 @@ def active_operations():
     return jsonify({"operations": ops, "notifications": notifications})
 
 
+@app.route("/api/operations/<op_id>/cancel", methods=["POST"])
+def cancel_operation(op_id):
+    if not app_state.cancel_operation(op_id):
+        return jsonify({"success": False, "error": "Operation not found"}), 404
+    return jsonify({"success": True})
+
+
 @app.route("/watch-count")
 def watch_count():
     watch_dir = config.get("SETTINGS", "WATCH", fallback="/temp")

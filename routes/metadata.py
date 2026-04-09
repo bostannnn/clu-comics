@@ -1447,6 +1447,8 @@ def batch_metadata():
     from core.comicinfo import read_comicinfo_from_zip
     from app import TARGET_DIR
 
+    op_id = None
+
     try:
         from core.database import get_library_providers
 
@@ -1458,6 +1460,7 @@ def batch_metadata():
         force_manual_selection = bool(data.get('force_manual_selection'))
         force_provider = (data.get('force_provider') or '').strip().lower()
         overwrite_existing_metadata = bool(data.get('overwrite_existing_metadata'))
+        requested_op_id = (data.get('op_id') or '').strip()
 
         if not directory:
             return jsonify({"error": "Missing directory parameter"}), 400
@@ -1534,6 +1537,26 @@ def batch_metadata():
 
         series_name = _extract_batch_series_name(directory, comic_files)
 
+        def ensure_batch_operation(detail="Starting..."):
+            nonlocal op_id
+            if not op_id:
+                op_id = app_state.register_operation(
+                    "metadata",
+                    os.path.basename(directory),
+                    total=len(comic_files),
+                    op_id=requested_op_id or None,
+                )
+            app_state.update_operation(op_id, detail=detail)
+            return op_id
+
+        def complete_batch_operation(error=False, cancelled=False):
+            if op_id:
+                app_state.complete_operation(op_id, error=error, cancelled=cancelled)
+
+        def cancelled_response():
+            complete_batch_operation(cancelled=True)
+            return jsonify({"cancelled": True, "op_id": op_id})
+
         # Step 2: Check for cvinfo / resolve folder series context
         cvinfo_path = os.path.join(directory, 'cvinfo')
         cv_volume_id = None
@@ -1562,21 +1585,30 @@ def batch_metadata():
             if force_provider not in {'comicvine', 'metron'}:
                 return jsonify({"error": "Force Fetch Metadata requires a valid provider"}), 400
 
+            ensure_batch_operation(f"Preparing forced {force_provider} lookup...")
+
             app_logger.info(
                 f"Force batch metadata enabled via {force_provider} for '{series_name}' (year: {extracted_year})"
             )
 
             if force_provider == 'comicvine':
                 if not comicvine_available:
+                    complete_batch_operation(error=True)
                     return jsonify({"error": "ComicVine is not enabled for this library"}), 400
 
                 if not selected_volume_id:
+                    app_state.update_operation(op_id, detail="Searching ComicVine series...")
                     volumes = comicvine.search_volumes(comicvine_api_key, series_name, extracted_year)
+                    if app_state.is_operation_cancelled(op_id):
+                        return cancelled_response()
                     if not volumes:
+                        complete_batch_operation(error=True)
                         return jsonify({"error": f"No ComicVine volumes found for '{series_name}'"}), 404
 
+                    complete_batch_operation()
                     return jsonify({
                         "requires_selection": True,
+                        "op_id": op_id,
                         "directory": directory,
                         "parsed_filename": {
                             "series_name": series_name,
@@ -1588,30 +1620,40 @@ def batch_metadata():
                     })
 
                 cv_volume_id = selected_volume_id
+                app_state.update_operation(op_id, detail="Writing selected ComicVine series...")
                 volume_details = _write_selected_comicvine_cvinfo(
                     cvinfo_path,
                     comicvine_api_key,
                     cv_volume_id,
                 )
+                if app_state.is_operation_cancelled(op_id):
+                    return cancelled_response()
                 cvinfo_created = True
                 if volume_details:
                     cvinfo_start_year = volume_details.get('start_year')
                     cvinfo_publisher_name = volume_details.get('publisher_name')
             elif force_provider == 'metron':
                 if not (metron_available and metron_api):
+                    complete_batch_operation(error=True)
                     return jsonify({"error": "Metron is not enabled for this library"}), 400
 
                 if not selected_series_id:
+                    app_state.update_operation(op_id, detail="Searching Metron series...")
                     metron_matches = metron.search_series_candidates_by_name(
                         metron_api,
                         series_name,
                         extracted_year,
                     )
+                    if app_state.is_operation_cancelled(op_id):
+                        return cancelled_response()
                     if not metron_matches:
+                        complete_batch_operation(error=True)
                         return jsonify({"error": f"No Metron series found for '{series_name}'"}), 404
 
+                    complete_batch_operation()
                     return jsonify({
                         "requires_selection": True,
+                        "op_id": op_id,
                         "directory": directory,
                         "parsed_filename": {
                             "series_name": series_name,
@@ -1629,11 +1671,14 @@ def batch_metadata():
                     })
 
                 series_id = selected_series_id
+                app_state.update_operation(op_id, detail="Writing selected Metron series...")
                 series_details = _write_selected_metron_cvinfo(
                     cvinfo_path,
                     metron_api,
                     series_id,
                 )
+                if app_state.is_operation_cancelled(op_id):
+                    return cancelled_response()
                 cvinfo_created = True
                 metron_id_added = True
                 if series_details:
@@ -1777,6 +1822,7 @@ def batch_metadata():
 
         def generate():
             """Generator for SSE streaming."""
+            nonlocal op_id
             result = {
                 'cvinfo_created': cvinfo_created,
                 'metron_id_added': metron_id_added,
@@ -1789,25 +1835,42 @@ def batch_metadata():
             }
 
             total_files = len(comic_files)
-            op_id = app_state.register_operation("metadata", os.path.basename(directory), total=total_files)
+            if not op_id:
+                op_id = app_state.register_operation(
+                    "metadata",
+                    os.path.basename(directory),
+                    total=total_files,
+                    op_id=requested_op_id or None,
+                )
+            else:
+                app_state.update_operation(op_id, current=0, total=total_files, detail="Starting...")
             client_connected = True
+            op_cancelled = False
+
+            def cancel_requested():
+                return app_state.is_operation_cancelled(op_id)
 
             # Emit initial progress
             try:
-                yield f"data: {json.dumps({'type': 'progress', 'current': 0, 'total': total_files, 'file': 'Starting...'})}\n\n"
+                yield f"data: {json.dumps({'type': 'progress', 'op_id': op_id, 'current': 0, 'total': total_files, 'file': 'Starting...'})}\n\n"
             except GeneratorExit:
                 client_connected = False
                 app_logger.info("Client disconnected during batch metadata, continuing processing")
 
             # Step 4: Process each comic file
             for i, file_path in enumerate(comic_files):
+                if cancel_requested():
+                    op_cancelled = True
+                    app_logger.info("Batch metadata cancelled before processing next file")
+                    break
+
                 filename = os.path.basename(file_path)
 
                 # Emit progress event
                 app_state.update_operation(op_id, current=i + 1, detail=filename)
                 if client_connected:
                     try:
-                        yield f"data: {json.dumps({'type': 'progress', 'current': i + 1, 'total': total_files, 'file': filename})}\n\n"
+                        yield f"data: {json.dumps({'type': 'progress', 'op_id': op_id, 'current': i + 1, 'total': total_files, 'file': filename})}\n\n"
                     except GeneratorExit:
                         client_connected = False
                         app_logger.info("Client disconnected during batch metadata, continuing processing")
@@ -1850,7 +1913,7 @@ def batch_metadata():
                     # Send keepalive so the SSE stream doesn't go silent during API calls
                     if client_connected:
                         try:
-                            yield f"data: {json.dumps({'type': 'keepalive', 'file': filename})}\n\n"
+                            yield f"data: {json.dumps({'type': 'keepalive', 'op_id': op_id, 'file': filename})}\n\n"
                         except GeneratorExit:
                             client_connected = False
                             app_logger.info("Client disconnected during batch metadata, continuing processing")
@@ -2159,11 +2222,24 @@ def batch_metadata():
                         ]
 
                     for provider_name in provider_order:
+                        if cancel_requested():
+                            op_cancelled = True
+                            app_logger.info("Batch metadata cancelled during provider lookup")
+                            break
                         try_fn = provider_try_fns.get(provider_name)
                         if try_fn and try_fn():
                             break
 
+                    if op_cancelled or cancel_requested():
+                        op_cancelled = True
+                        break
+
                     if metadata:
+                        if cancel_requested():
+                            op_cancelled = True
+                            app_logger.info("Batch metadata cancelled before writing metadata")
+                            break
+
                         # Generate and add ComicInfo.xml
                         xml_bytes = comicvine.generate_comicinfo_xml(metadata)
                         add_comicinfo_to_cbz(file_path, xml_bytes)
@@ -2216,12 +2292,22 @@ def batch_metadata():
                     result['errors'] += 1
                     result['details'].append({'file': filename, 'status': 'error', 'reason': str(e)})
 
-            # Emit final complete event
-            app_state.complete_operation(op_id)
-            if client_connected:
-                yield f"data: {json.dumps({'type': 'complete', 'result': result})}\n\n"
+            # Emit final terminal event
+            if op_cancelled or cancel_requested():
+                app_state.complete_operation(op_id, cancelled=True)
+                if client_connected:
+                    yield f"data: {json.dumps({'type': 'cancelled', 'op_id': op_id, 'result': result})}\n\n"
+                else:
+                    app_logger.info(
+                        f"Batch metadata cancelled (client disconnected): {result['processed']} processed, "
+                        f"{result['errors']} errors, {result['skipped']} skipped"
+                    )
             else:
-                app_logger.info(f"Batch metadata complete (client disconnected): {result['processed']} processed, {result['errors']} errors, {result['skipped']} skipped")
+                app_state.complete_operation(op_id)
+                if client_connected:
+                    yield f"data: {json.dumps({'type': 'complete', 'op_id': op_id, 'result': result})}\n\n"
+                else:
+                    app_logger.info(f"Batch metadata complete (client disconnected): {result['processed']} processed, {result['errors']} errors, {result['skipped']} skipped")
 
         return Response(stream_with_context(generate()), mimetype='text/event-stream')
 

@@ -6,7 +6,9 @@ from core.app_logging import app_logger
 from typing import Optional, Dict, Any, List
 import re
 import time
+import threading
 from datetime import datetime, timedelta
+from contextlib import contextmanager
 from core.version import __version__
 
 import requests as requests_lib
@@ -23,6 +25,28 @@ _RATE_LIMIT_DEFAULT_WAIT = 60  # seconds, used when retry_after is 0 or unset
 _DAILY_RATE_LIMIT_THRESHOLD = (
     60  # seconds; retry_after above this implies daily limit exceeded
 )
+_METADATA_HTTP_TIMEOUT = 30
+if not hasattr(requests_lib.sessions.Session, "_clu_timeout_lock"):
+    requests_lib.sessions.Session._clu_timeout_lock = threading.RLock()
+_REQUEST_TIMEOUT_LOCK = requests_lib.sessions.Session._clu_timeout_lock
+
+
+@contextmanager
+def _default_request_timeout(timeout=_METADATA_HTTP_TIMEOUT):
+    """Apply a default requests timeout around third-party client calls."""
+    with _REQUEST_TIMEOUT_LOCK:
+        original_request = requests_lib.sessions.Session.request
+
+        def request_with_timeout(session, method, url, **kwargs):
+            if kwargs.get("timeout") is None:
+                kwargs["timeout"] = timeout
+            return original_request(session, method, url, **kwargs)
+
+        requests_lib.sessions.Session.request = request_with_timeout
+        try:
+            yield
+        finally:
+            requests_lib.sessions.Session.request = original_request
 
 
 def _handle_rate_limit(e: "RateLimitError", attempt: int, context: str) -> bool:
@@ -58,12 +82,20 @@ def _api_call(fn, context: str, default=None):
     """Call fn() with rate-limit retry and standard error handling."""
     for attempt in range(_RATE_LIMIT_MAX_RETRIES):
         try:
-            return fn()
+            with _default_request_timeout():
+                return fn()
         except RateLimitError as e:
             if not _handle_rate_limit(e, attempt, context):
                 return default
         except ApiError as e:
             app_logger.error(f"Metron API error {context}: {e}")
+            return default
+        except (
+            requests_exceptions.ConnectionError,
+            requests_exceptions.ReadTimeout,
+            requests_exceptions.Timeout,
+        ) as e:
+            app_logger.warning(f"Metron request failed {context}: {e}")
             return default
     return default
 

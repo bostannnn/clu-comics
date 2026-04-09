@@ -36,10 +36,13 @@
 
   // ── Progress toast builder ────────────────────────────────────────────
 
-  function _buildProgressToast(title, countText, detailText) {
+  function _buildProgressToast(title, countText, detailText, onCancel) {
     title = title || 'Fetching Metadata';
     countText = countText || '0/0';
     detailText = detailText || 'Starting...';
+    var cancelHtml = typeof onCancel === 'function'
+      ? '<button type="button" class="btn btn-sm btn-outline-light ms-2 metadata-cancel-btn">Cancel</button>'
+      : '';
 
     var toast = document.createElement('div');
     toast.className = 'toast show position-fixed';
@@ -48,6 +51,7 @@
       '<div class="toast-header bg-primary text-white">' +
         '<strong class="me-auto">' + CLU.escapeHtml(title) + '</strong>' +
         '<small class="batch-progress-count">' + CLU.escapeHtml(countText) + '</small>' +
+        cancelHtml +
       '</div>' +
       '<div class="toast-body">' +
         '<div class="d-flex align-items-center">' +
@@ -58,6 +62,16 @@
         '</div>' +
       '</div>';
     document.body.appendChild(toast);
+    if (typeof onCancel === 'function') {
+      var cancelBtn = toast.querySelector('.metadata-cancel-btn');
+      if (cancelBtn) {
+        cancelBtn.addEventListener('click', function () {
+          cancelBtn.disabled = true;
+          cancelBtn.textContent = 'Canceling...';
+          onCancel(toast);
+        });
+      }
+    }
     return toast;
   }
 
@@ -65,6 +79,13 @@
     if (toast && toast.parentNode) {
       toast.parentNode.removeChild(toast);
     }
+  }
+
+  function _newOperationId() {
+    if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+      return window.crypto.randomUUID().replace(/-/g, '');
+    }
+    return 'client' + Date.now().toString(16) + Math.random().toString(16).slice(2);
   }
 
   // ── Batch result summary builder ──────────────────────────────────────
@@ -83,16 +104,24 @@
 
   // ── SSE stream processor ──────────────────────────────────────────────
 
-  function _processSSEStream(response, progressToast, onComplete) {
+  function _processSSEStream(response, progressToast, onComplete, options) {
+    options = options || {};
     var reader = response.body.getReader();
     var decoder = new TextDecoder();
     var buffer = '';
     var countEl = progressToast.querySelector('.batch-progress-count');
     var fileEl = progressToast.querySelector('.batch-progress-file');
+    var sawTerminalEvent = false;
 
     function read() {
       return reader.read().then(function (result) {
-        if (result.done) return;
+        if (result.done) {
+          if (!sawTerminalEvent) {
+            _removeToast(progressToast);
+            throw new Error('Metadata stream ended before completion');
+          }
+          return;
+        }
 
         buffer += decoder.decode(result.value, { stream: true });
         var lines = buffer.split('\n');
@@ -101,22 +130,41 @@
         for (var i = 0; i < lines.length; i++) {
           var line = lines[i];
           if (line.indexOf('data: ') === 0) {
+            var data;
             try {
-              var data = JSON.parse(line.slice(6));
-
-              if (data.type === 'progress') {
-                countEl.textContent = data.current + '/' + data.total;
-                fileEl.textContent = data.file;
-                fileEl.title = data.file;
-              } else if (data.type === 'complete') {
-                _removeToast(progressToast);
-                if (typeof onComplete === 'function') {
-                  onComplete(data.result);
-                }
-                return;
-              }
+              data = JSON.parse(line.slice(6));
             } catch (e) {
               console.error('Error parsing SSE data:', e);
+              throw e;
+            }
+
+            var opId = data.op_id || data.operation_id;
+            if (opId && typeof options.onOperationId === 'function') {
+              options.onOperationId(opId);
+            }
+
+            if (data.type === 'progress') {
+              countEl.textContent = data.current + '/' + data.total;
+              fileEl.textContent = data.file;
+              fileEl.title = data.file;
+            } else if (data.type === 'complete') {
+              sawTerminalEvent = true;
+              _removeToast(progressToast);
+              if (typeof onComplete === 'function') {
+                onComplete(data.result);
+              }
+              return;
+            } else if (data.type === 'cancelled') {
+              sawTerminalEvent = true;
+              _removeToast(progressToast);
+              if (typeof options.onCancelled === 'function') {
+                options.onCancelled(data.result);
+              }
+              return;
+            } else if (data.type === 'error') {
+              sawTerminalEvent = true;
+              _removeToast(progressToast);
+              throw new Error(data.error || 'Metadata fetch failed');
             }
           }
         }
@@ -1009,9 +1057,55 @@
   function _requestBatchMetadata(dirPath, dirName, options, selection) {
     var libraryId = _getLibraryId();
     var contract = _getContract();
-    var progressToast = _buildProgressToast();
+    var operationId = _newOperationId();
+    var cancelRequested = false;
+    var cancelConfirmed = false;
+    var cancelRequestSent = false;
+    var cancelRetryCount = 0;
+    var responseStarted = false;
+    var requestController = typeof AbortController !== 'undefined' ? new AbortController() : null;
 
-    var requestBody = { directory: dirPath };
+    function sendCancelRequest() {
+      if (!operationId || cancelRequestSent) {
+        return;
+      }
+      cancelRequestSent = true;
+      fetch('/api/operations/' + encodeURIComponent(operationId) + '/cancel', {
+        method: 'POST',
+        keepalive: true
+      }).then(function (response) {
+        cancelRequestSent = false;
+        if (response.ok) {
+          cancelConfirmed = true;
+          return;
+        }
+        if (cancelRequested && response.status === 404 && cancelRetryCount < 20) {
+          cancelRetryCount++;
+          window.setTimeout(sendCancelRequest, 250);
+        }
+      }).catch(function () {
+        cancelRequestSent = false;
+        if (cancelRequested && !cancelConfirmed && cancelRetryCount < 20) {
+          cancelRetryCount++;
+          window.setTimeout(sendCancelRequest, 250);
+        }
+      });
+    }
+
+    var progressToast = _buildProgressToast(null, null, null, function (toast) {
+      cancelRequested = true;
+      var fileEl = toast.querySelector('.batch-progress-file');
+      if (fileEl) {
+        fileEl.textContent = 'Cancel requested...';
+        fileEl.title = 'Cancel requested...';
+      }
+      sendCancelRequest();
+      if (!responseStarted && requestController) {
+        requestController.abort();
+      }
+    });
+
+    var requestBody = { directory: dirPath, op_id: operationId };
     if (selection && selection.provider === 'comicvine' && selection.id !== null && typeof selection.id !== 'undefined') {
       requestBody.volume_id = selection.id;
     }
@@ -1034,12 +1128,27 @@
     fetch('/api/batch-metadata', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(requestBody)
+      body: JSON.stringify(requestBody),
+      signal: requestController ? requestController.signal : undefined
     })
       .then(function (response) {
+        responseStarted = true;
         var contentType = response.headers.get('content-type');
+        if (!response.ok && !(contentType && contentType.indexOf('application/json') !== -1)) {
+          return response.text().then(function (text) {
+            throw new Error(text || ('Request failed with status ' + response.status));
+          });
+        }
         if (contentType && contentType.indexOf('application/json') !== -1) {
           return response.json().then(function (data) {
+            if (data.op_id || data.operation_id) {
+              operationId = data.op_id || data.operation_id;
+            }
+            if (data.cancelled || cancelRequested) {
+              _removeToast(progressToast);
+              CLU.showToast('Metadata Fetch Cancelled', 'No changes made', 'warning');
+              return;
+            }
             if (data.requires_selection) {
               _removeToast(progressToast);
               data._batchOptions = options || null;
@@ -1060,10 +1169,28 @@
           if (typeof contract.onBatchComplete === 'function') {
             contract.onBatchComplete(dirPath, result);
           }
+        }, {
+          onOperationId: function (opId) {
+            operationId = opId;
+            if (cancelRequested) {
+              sendCancelRequest();
+            }
+          },
+          onCancelled: function (result) {
+            var summary = _buildSummary(result || {});
+            CLU.showToast('Metadata Fetch Cancelled', summary, 'warning');
+            if (typeof contract.onBatchComplete === 'function') {
+              contract.onBatchComplete(dirPath, result || {});
+            }
+          }
         });
       })
       .catch(function (error) {
         _removeToast(progressToast);
+        if (cancelRequested && error && error.name === 'AbortError') {
+          CLU.showToast('Metadata Fetch Cancelled', 'No changes made', 'warning');
+          return;
+        }
         CLU.showToast('Metadata Error', 'Error fetching metadata: ' + error.message, 'error');
       });
   }

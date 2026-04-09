@@ -227,6 +227,14 @@ def app(db_connection, tmp_path):
         notifications = app_state.get_and_clear_notifications() if include_notifications else []
         return jsonify({"operations": ops, "notifications": notifications})
 
+    @test_app.route("/api/operations/<op_id>/cancel", methods=["POST"])
+    def cancel_operation(op_id):
+        from flask import jsonify
+        import core.app_state as app_state
+        if not app_state.cancel_operation(op_id):
+            return jsonify({"success": False, "error": "Operation not found"}), 404
+        return jsonify({"success": True})
+
     @test_app.route("/api/on-the-stack")
     def api_on_the_stack():
         from flask import jsonify, request as flask_request

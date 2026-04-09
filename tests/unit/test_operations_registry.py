@@ -44,6 +44,13 @@ class TestRegisterOperation:
         assert op["detail"] == "Starting..."
         assert op["started_at"] > 0
         assert op["completed_at"] is None
+        assert op["cancel_requested"] is False
+
+    def test_register_operation_accepts_requested_id(self):
+        op_id = app_state.register_operation("metadata", "Batman", total=1, op_id="client-op")
+        assert op_id == "client-op"
+        ops = app_state.get_active_operations()
+        assert ops[0]["id"] == "client-op"
 
     def test_update_operation(self):
         op_id = app_state.register_operation("move", "file.cbz", total=100)
@@ -72,6 +79,27 @@ class TestRegisterOperation:
         assert op["completed_at"] is not None
         # current should NOT snap to total on error
         assert op["current"] == 0
+
+    def test_cancel_operation_requests_cancel(self):
+        op_id = app_state.register_operation("metadata", "X-Men", total=10)
+        assert app_state.cancel_operation(op_id) is True
+        assert app_state.is_operation_cancelled(op_id) is True
+        ops = app_state.get_active_operations()
+        op = ops[0]
+        assert op["status"] == "running"
+        assert op["cancel_requested"] is True
+        assert op["detail"] == "Cancel requested..."
+
+    def test_complete_with_cancelled(self):
+        op_id = app_state.register_operation("metadata", "X-Men", total=10)
+        app_state.update_operation(op_id, current=4)
+        app_state.complete_operation(op_id, cancelled=True)
+        ops = app_state.get_active_operations()
+        op = ops[0]
+        assert op["status"] == "cancelled"
+        assert op["detail"] == "Cancelled"
+        assert op["completed_at"] is not None
+        assert op["current"] == 4
 
     def test_auto_cleanup_expired(self):
         op_id = app_state.register_operation("move", "old-op", total=1)
