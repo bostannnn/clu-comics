@@ -250,6 +250,13 @@
     return left.raw.localeCompare(right.raw);
   }
 
+  function _getCVVolumeUrl(volume) {
+    var url = volume && (volume.comicvine_url || volume.site_detail_url || volume.site_url);
+    if (!url || typeof url !== 'string') return '';
+    if (!/^https:\/\/comicvine\.gamespot\.com\//.test(url)) return '';
+    return url;
+  }
+
   function _renderCVVolumeList(volumes) {
     var volumeList = document.getElementById('cvVolumeList');
     volumeList.innerHTML = '';
@@ -261,14 +268,20 @@
       volumeItem.style.cursor = 'pointer';
 
       var yearDisplay = isIssueMode ? (volume.cover_date || volume.year || 'Unknown') : (volume.start_year || 'Unknown');
-      var issueCount = volume.count_of_issues || 'Unknown';
+      var issueCount = volume.count_of_issues === 0 || volume.count_of_issues ? volume.count_of_issues : 'Unknown';
+      var comicVineUrl = isIssueMode ? '' : _getCVVolumeUrl(volume);
+      var issueCountHtml = isIssueMode ? '' :
+        '<small class="text-muted d-block mt-1">Issues: ' + CLU.escapeHtml(issueCount) + '</small>';
+      var comicVineLinkHtml = comicVineUrl ?
+        '<a href="' + CLU.escapeHtml(comicVineUrl) + '" class="cv-volume-link small d-block mt-1" target="_blank" rel="noopener noreferrer">ComicVine</a>' :
+        '';
       var titleHtml = isIssueMode
         ? '<div class="fw-bold">#' + CLU.escapeHtml(volume.issue_number || '?') + ' ' + CLU.escapeHtml(volume.name || 'Untitled Issue') + '</div>'
         : '<div class="fw-bold">' + CLU.escapeHtml(volume.name) + '</div>';
       var metaHtml = isIssueMode
         ? '<small class="text-muted">Series: ' + CLU.escapeHtml(volume.volume_name || _cvSelectionContext && _cvSelectionContext.volume_name || 'Unknown') +
           '<br>Cover Date: ' + CLU.escapeHtml(volume.cover_date || 'Unknown') + '</small>'
-        : '<small class="text-muted">Publisher: ' + CLU.escapeHtml(volume.publisher_name || 'Unknown') + '<br>Issues: ' + issueCount + '</small>';
+        : '<small class="text-muted">Publisher: ' + CLU.escapeHtml(volume.publisher_name || 'Unknown') + '</small>';
       var descriptionPreview = volume.description ?
         '<small class="text-muted d-block mt-1">' + CLU.escapeHtml(volume.description) + '</small>' : '';
 
@@ -287,11 +300,20 @@
             metaHtml +
             descriptionPreview +
           '</div>' +
-          '<div class="text-end">' +
-            '<span class="badge bg-success rounded-pill">' + yearDisplay + '</span>' +
+          '<div class="text-end flex-shrink-0">' +
+            '<span class="badge bg-success rounded-pill">' + CLU.escapeHtml(yearDisplay) + '</span>' +
             langBadge +
+            issueCountHtml +
+            comicVineLinkHtml +
           '</div>' +
         '</div>';
+
+      var volumeLink = volumeItem.querySelector('.cv-volume-link');
+      if (volumeLink) {
+        volumeLink.addEventListener('click', function (event) {
+          event.stopPropagation();
+        });
+      }
 
       volumeItem.addEventListener('click', function () {
         _cvClickHandler(volume);

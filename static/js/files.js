@@ -5464,6 +5464,13 @@ function searchComicVineMetadata(filePath, fileName) {
     });
 }
 
+function getComicVineVolumeUrl(volume) {
+  const url = volume && (volume.comicvine_url || volume.site_detail_url || volume.site_url);
+  if (!url || typeof url !== 'string') return '';
+  if (!/^https:\/\/comicvine\.gamespot\.com\//.test(url)) return '';
+  return url;
+}
+
 // Stub for ComicVine volume selection modal - will be implemented similar to GCD
 function showComicVineVolumeSelectionModal(data, filePath, fileName) {
   console.log('Showing ComicVine volume selection modal', data);
@@ -5489,6 +5496,11 @@ function showComicVineVolumeSelectionModal(data, filePath, fileName) {
     volumeItem.style.cursor = 'pointer';
 
     const yearDisplay = volume.start_year || 'Unknown';
+    const issueCount = volume.count_of_issues === 0 || volume.count_of_issues ? volume.count_of_issues : 'Unknown';
+    const comicVineUrl = getComicVineVolumeUrl(volume);
+    const comicVineLinkHtml = comicVineUrl
+      ? `<a href="${CLU.escapeHtml(comicVineUrl)}" class="cv-volume-link small d-block mt-1" target="_blank" rel="noopener noreferrer">ComicVine</a>`
+      : '';
     const descriptionPreview = volume.description ?
       `<small class="text-muted d-block mt-1">${volume.description}</small>` : '';
 
@@ -5502,12 +5514,23 @@ function showComicVineVolumeSelectionModal(data, filePath, fileName) {
       <div class="flex-grow-1 d-flex justify-content-between align-items-start">
         <div class="me-2">
           <div class="fw-bold">${volume.name}</div>
-          <small class="text-muted">Publisher: ${volume.publisher_name || 'Unknown'}<br>Issues: ${volume.count_of_issues || 'Unknown'}</small>
+          <small class="text-muted">Publisher: ${volume.publisher_name || 'Unknown'}</small>
           ${descriptionPreview}
         </div>
-        <span class="badge bg-success rounded-pill">${yearDisplay}</span>
+        <div class="text-end flex-shrink-0">
+          <span class="badge bg-success rounded-pill">${yearDisplay}</span>
+          <small class="text-muted d-block mt-1">Issues: ${issueCount}</small>
+          ${comicVineLinkHtml}
+        </div>
       </div>
     `;
+
+    const volumeLink = volumeItem.querySelector('.cv-volume-link');
+    if (volumeLink) {
+      volumeLink.addEventListener('click', event => {
+        event.stopPropagation();
+      });
+    }
 
     volumeItem.addEventListener('click', () => {
       // Highlight selected item

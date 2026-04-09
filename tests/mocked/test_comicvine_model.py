@@ -29,6 +29,27 @@ class TestSearchVolumes:
         assert len(results) == 1
         assert results[0]["name"] == "Batman"
         assert results[0]["id"] == 4050
+        assert results[0]["count_of_issues"] == 50
+        assert results[0]["comicvine_url"] == "https://comicvine.gamespot.com/volume/4050-4050/"
+
+    @patch("models.comicvine.SIMYAN_AVAILABLE", True)
+    @patch("models.comicvine.ComicvineResource", create=True)
+    @patch("models.comicvine.Comicvine", create=True)
+    def test_uses_issue_count_alias_without_detail_lookup(self, mock_cv_class, mock_resource):
+        from models.comicvine import search_volumes
+
+        volume = make_mock_cv_volume(id=40664, name="Akira", start_year=2000, count_of_issues=None)
+        volume.issue_count = 6
+
+        mock_cv = MagicMock()
+        mock_cv.search.return_value = [volume]
+        mock_cv_class.return_value = mock_cv
+
+        results = search_volumes("fake-key", "Akira")
+        assert len(results) == 1
+        assert results[0]["count_of_issues"] == 6
+        assert results[0]["comicvine_url"] == "https://comicvine.gamespot.com/volume/4050-40664/"
+        mock_cv.get_volume.assert_not_called()
 
     @patch("models.comicvine.SIMYAN_AVAILABLE", True)
     @patch("models.comicvine.ComicvineResource", create=True)

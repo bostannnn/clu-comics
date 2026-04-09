@@ -60,6 +60,33 @@ def get_cv_api_key(app=None):
     return key if key else None
 
 
+def _comicvine_volume_url(volume_id):
+    if volume_id is None:
+        return None
+    volume_id = str(volume_id).strip()
+    if not volume_id:
+        return None
+    if not volume_id.isdigit():
+        return None
+    return f"https://comicvine.gamespot.com/volume/4050-{volume_id}/"
+
+
+def _coerce_issue_count(value):
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
+def _get_resource_issue_count(resource):
+    return _coerce_issue_count(
+        getattr(resource, 'count_of_issues', None) or getattr(resource, 'issue_count', None)
+    )
+
+
 def fetch_cv_arcs(api_key, search=None):
     """Browse or search ComicVine story arcs.
 
@@ -254,10 +281,12 @@ def search_volumes(api_key: str, series_name: str, year: Optional[int] = None) -
                 "name": vol.name,
                 "start_year": getattr(vol, 'start_year', None),
                 "publisher_name": vol.publisher.name if hasattr(vol, 'publisher') and vol.publisher else None,
-                "count_of_issues": getattr(vol, 'count_of_issues', None),
+                "count_of_issues": _get_resource_issue_count(vol),
                 "image_url": image_url,
-                "description": getattr(vol, 'description', None)
+                "description": getattr(vol, 'description', None),
+                "comicvine_url": _comicvine_volume_url(vol.id),
             }
+
             # Truncate description if present
             if vol_dict["description"] and len(vol_dict["description"]) > 200:
                 vol_dict["description"] = vol_dict["description"][:200] + "..."
