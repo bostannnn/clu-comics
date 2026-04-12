@@ -417,3 +417,44 @@ class TestFileMetadata:
         assert row[1] == "1"
         assert row[2] == "Detective, Gotham"
         assert row[3] == 1
+
+
+class TestBrowseByMetadataTags:
+
+    def test_get_files_by_metadata_matches_exact_tag_only(self, db_connection):
+        from core.database import (
+            add_file_index_entry,
+            get_files_by_metadata,
+            get_files_by_metadata_grouped,
+            update_file_index_from_comicinfo,
+        )
+
+        add_file_index_entry("A.cbz", "/data/A.cbz", "file", parent="/data")
+        add_file_index_entry("B.cbz", "/data/B.cbz", "file", parent="/data")
+
+        update_file_index_from_comicinfo(
+            "/data/A.cbz",
+            {
+                "Series": "Alpha",
+                "Number": "1",
+                "Publisher": "Pub",
+                "Tags": "Art, Hero",
+            },
+        )
+        update_file_index_from_comicinfo(
+            "/data/B.cbz",
+            {
+                "Series": "Beta",
+                "Number": "1",
+                "Publisher": "Pub",
+                "Tags": "Martial Arts, Action",
+            },
+        )
+
+        result = get_files_by_metadata("tags", "Art")
+        assert result["total"] == 1
+        assert [f["path"] for f in result["files"]] == ["/data/A.cbz"]
+
+        grouped = get_files_by_metadata_grouped("tags", "Art")
+        assert grouped["total"] == 1
+        assert grouped["groups"][0]["files"][0]["path"] == "/data/A.cbz"

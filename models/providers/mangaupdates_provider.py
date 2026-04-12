@@ -20,8 +20,7 @@ class MangaUpdatesProvider(BaseProvider):
     """MangaUpdates metadata provider using the public REST API.
 
     The MangaUpdates API is public and does not require authentication.
-    It is series-based (no individual chapter/volume endpoints), so
-    volumes are synthesized from the series volume count.
+    It is series-based and does not provide reliable per-volume issue lists.
     """
 
     provider_type = ProviderType.MANGAUPDATES
@@ -112,11 +111,14 @@ class MangaUpdatesProvider(BaseProvider):
                 continue
 
             role = cls._clean_text(author.get("type")).lower()
-            if "author" in role or "writer" in role:
+            is_writer = any(term in role for term in ("author", "writer", "story"))
+            is_artist = any(term in role for term in ("artist", "art", "illustrator"))
+
+            if is_writer:
                 writers.append(name)
-            elif any(term in role for term in ("artist", "art", "illustrator")):
+            if is_artist:
                 pencillers.append(name)
-            else:
+            if not is_writer and not is_artist:
                 fallback.append(name)
 
         writers = cls._dedupe_names(writers)
@@ -301,24 +303,13 @@ class MangaUpdatesProvider(BaseProvider):
                         publisher = pub_name
                         break
 
-            # Get volume count
-            issue_count = None
-            status = data.get("status", "")
-            # Try latest_chapter for volume count
-            latest_chapter = data.get("latest_chapter")
-            if latest_chapter:
-                try:
-                    issue_count = int(latest_chapter)
-                except (ValueError, TypeError):
-                    pass
-
             return SearchResult(
                 provider=self.provider_type,
                 id=series_id,
                 title=title,
                 year=series_year,
                 publisher=publisher,
-                issue_count=issue_count,
+                issue_count=None,
                 cover_url=cover_url,
                 description=description
             )
@@ -328,35 +319,13 @@ class MangaUpdatesProvider(BaseProvider):
 
     def get_issues(self, series_id: str) -> List[IssueResult]:
         """
-        Get synthetic volumes for a MangaUpdates manga.
+        MangaUpdates does not provide a reliable per-volume list.
 
-        MangaUpdates doesn't have individual volume/chapter endpoints.
-        Returns synthetic volume entries based on the series data.
+        We intentionally do not synthesize volumes from latest_chapter,
+        because that field reflects chapter progress, not volume count.
         """
         try:
-            series = self.get_series(series_id)
-            if not series:
-                return []
-
-            volume_count = series.issue_count or 0
-            if volume_count == 0:
-                return []
-
-            results = []
-            for i in range(1, min(volume_count + 1, 501)):  # Cap at 500
-                results.append(IssueResult(
-                    provider=self.provider_type,
-                    id=f"{series_id}-{i}",
-                    series_id=series_id,
-                    issue_number=str(i),
-                    title=None,
-                    cover_date=None,
-                    store_date=None,
-                    cover_url=series.cover_url,
-                    summary=None
-                ))
-
-            return results
+            return []
         except Exception as e:
             app_logger.error(f"MangaUpdates get_issues failed: {e}")
             return []
@@ -511,14 +480,6 @@ class MangaUpdatesProvider(BaseProvider):
             series_type = detail.get("type", "")
             if isinstance(series_type, str) and series_type.lower() in ("manga", "manhwa", "manhua"):
                 metadata["Manga"] = "Yes"
-
-            # Volume count from latest_chapter
-            latest_chapter = detail.get("latest_chapter")
-            if latest_chapter:
-                try:
-                    metadata["Count"] = int(latest_chapter)
-                except (ValueError, TypeError):
-                    pass
 
             # Status in Notes
             status = detail.get("status", "")

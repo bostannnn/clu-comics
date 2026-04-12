@@ -3887,8 +3887,19 @@ def get_files_by_metadata(field_name, value, limit=50, offset=0):
 
         c = conn.cursor()
 
-        # Use LIKE with wildcards to handle comma-separated values
-        like_pattern = f"%{value}%"
+        if field_name == "tags":
+            normalized_value = value.strip()
+            normalized_column = (
+                f"REPLACE(REPLACE(REPLACE(COALESCE({db_column}, ''), ', ', ','), ' ,', ','), ',,', ',')"
+            )
+            match_clause = (
+                " AND ',' || " + normalized_column + " || ',' LIKE '%,' || ? || ',%'"
+            )
+            match_params = (normalized_value,)
+        else:
+            like_pattern = f"%{value}%"
+            match_clause = " AND " + db_column + " LIKE ?"
+            match_params = (like_pattern,)
 
         # Get total count first
         # db_column is validated via field_mapping above
@@ -3896,9 +3907,9 @@ def get_files_by_metadata(field_name, value, limit=50, offset=0):
             "SELECT COUNT(*) FROM file_index"
             " WHERE type = 'file'"
             " AND (LOWER(name) LIKE '%.cbz' OR LOWER(name) LIKE '%.cbr')"
-            " AND " + db_column + " LIKE ?"
+            + match_clause
         )
-        c.execute(count_query, (like_pattern,))
+        c.execute(count_query, match_params)
         total = c.fetchone()[0]
 
         # Get paginated results
@@ -3908,11 +3919,11 @@ def get_files_by_metadata(field_name, value, limit=50, offset=0):
             " FROM file_index"
             " WHERE type = 'file'"
             " AND (LOWER(name) LIKE '%.cbz' OR LOWER(name) LIKE '%.cbr')"
-            " AND " + db_column + " LIKE ?"
+            + match_clause +
             " ORDER BY ci_series COLLATE NOCASE, CAST(ci_number AS INTEGER) ASC, ci_number ASC"
             " LIMIT ? OFFSET ?"
         )
-        c.execute(select_query, (like_pattern, limit, offset))
+        c.execute(select_query, match_params + (limit, offset))
 
         rows = c.fetchall()
         conn.close()
@@ -3974,7 +3985,20 @@ def get_files_by_metadata_grouped(field_name, value):
             return {"groups": [], "total": 0, "nested": use_nested}
 
         c = conn.cursor()
-        like_pattern = f"%{value}%"
+
+        if field_name == "tags":
+            normalized_value = value.strip()
+            normalized_column = (
+                f"REPLACE(REPLACE(REPLACE(COALESCE({search_column}, ''), ', ', ','), ' ,', ','), ',,', ',')"
+            )
+            match_clause = (
+                " AND ',' || " + normalized_column + " || ',' LIKE '%,' || ? || ',%'"
+            )
+            match_params = (normalized_value,)
+        else:
+            like_pattern = f"%{value}%"
+            match_clause = " AND " + search_column + " LIKE ?"
+            match_params = (like_pattern,)
 
         # Query all matching files, ordered for grouping
         # Use CAST for numeric sorting of issue numbers (handles "8" before "18")
@@ -3984,11 +4008,11 @@ def get_files_by_metadata_grouped(field_name, value):
             " FROM file_index"
             " WHERE type = 'file'"
             " AND (LOWER(name) LIKE '%.cbz' OR LOWER(name) LIKE '%.cbr')"
-            " AND " + search_column + " LIKE ?"
+            + match_clause +
             " ORDER BY ci_publisher COLLATE NOCASE, ci_series COLLATE NOCASE,"
             "          CAST(ci_number AS INTEGER) ASC, ci_number ASC"
         )
-        c.execute(query, (like_pattern,))
+        c.execute(query, match_params)
 
         rows = c.fetchall()
         conn.close()

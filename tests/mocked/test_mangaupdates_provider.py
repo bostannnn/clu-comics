@@ -157,7 +157,7 @@ class TestMangaUpdatesProviderGetSeries:
         assert result.title == "One Punch Man"
         assert result.year == 2012
         assert result.publisher == "Shueisha"
-        assert result.issue_count == 30
+        assert result.issue_count is None
 
     @patch("time.sleep")
     @patch("requests.request")
@@ -174,7 +174,7 @@ class TestMangaUpdatesProviderGetIssues:
 
     @patch("time.sleep")
     @patch("requests.request")
-    def test_synthetic_volumes(self, mock_request, mock_sleep):
+    def test_does_not_synthesize_volumes_from_latest_chapter(self, mock_request, mock_sleep):
         from models.providers.mangaupdates_provider import MangaUpdatesProvider
 
         mock_request.return_value = _mock_response(SAMPLE_SERIES)
@@ -182,11 +182,7 @@ class TestMangaUpdatesProviderGetIssues:
         p = MangaUpdatesProvider()
         results = p.get_issues("12345")
 
-        assert len(results) == 30
-        assert results[0].issue_number == "1"
-        assert results[0].id == "12345-1"
-        assert results[29].issue_number == "30"
-        assert results[29].id == "12345-30"
+        assert results == []
 
     @patch("time.sleep")
     @patch("requests.request")
@@ -224,7 +220,7 @@ class TestMangaUpdatesProviderGetIssueMetadata:
         assert metadata["Tags"] == "Hero/s, Parody"
         assert metadata["AlternateSeries"] == "OPM; ワンパンマン"
         assert metadata["Manga"] == "Yes"
-        assert metadata["Count"] == 30
+        assert "Count" not in metadata
         assert "Ongoing" in metadata["Notes"]
         assert "MangaUpdates" in metadata["Notes"]
         assert "mangaupdates.com/series/12345" in metadata["Web"]
@@ -282,6 +278,26 @@ class TestMangaUpdatesProviderGetIssueMetadata:
         assert metadata is not None
         assert metadata["Writer"] == "Sakamoto Shinichi, Ohba Tsugumi"
         assert metadata["Penciller"] == "Sakamoto Shinichi, Obata Takeshi"
+
+    @patch("time.sleep")
+    @patch("requests.request")
+    def test_combined_author_artist_roles_populate_both_fields(self, mock_request, mock_sleep):
+        from models.providers.mangaupdates_provider import MangaUpdatesProvider
+
+        mock_request.return_value = _mock_response({
+            **SAMPLE_SERIES,
+            "authors": [
+                {"name": "FUJIMOTO Tatsuki", "type": "Author/Artist"},
+                {"name": "ONE", "type": "Story & Art"},
+            ],
+        })
+
+        p = MangaUpdatesProvider()
+        metadata = p.get_issue_metadata("12345", "1")
+
+        assert metadata is not None
+        assert metadata["Writer"] == "Fujimoto Tatsuki, ONE"
+        assert metadata["Penciller"] == "Fujimoto Tatsuki, ONE"
 
     @patch("time.sleep")
     @patch("requests.request")
