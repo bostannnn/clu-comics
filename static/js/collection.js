@@ -8,11 +8,6 @@
 // Update XML – field config and current path now in clu-update-xml.js
 
 document.addEventListener('DOMContentLoaded', () => {
-    const refreshStatusBtn = document.getElementById('collectionRefreshIndexStatusBtn');
-    if (refreshStatusBtn) {
-        refreshStatusBtn.addEventListener('click', () => updateCollectionIndexStatus());
-    }
-
     const rebuildIndexBtn = document.getElementById('collectionRebuildIndexBtn');
     if (rebuildIndexBtn) {
         rebuildIndexBtn.addEventListener('click', rebuildCollectionIndex);
@@ -95,14 +90,10 @@ let collectionIndexStatusRequest = 0;
 function updateCollectionIndexStatus(options = {}) {
     const { silent = false } = options;
     const statusEl = document.getElementById('collectionIndexStatusText');
-    const refreshBtn = document.getElementById('collectionRefreshIndexStatusBtn');
     const requestId = ++collectionIndexStatusRequest;
 
     if (statusEl && !silent) {
         statusEl.textContent = 'Checking status...';
-    }
-    if (refreshBtn) {
-        refreshBtn.disabled = true;
     }
 
     return fetch('/api/file-index-status', {
@@ -128,11 +119,6 @@ function updateCollectionIndexStatus(options = {}) {
             }
             if (!silent) {
                 CLU.showError('Failed to load file index status');
-            }
-        })
-        .finally(() => {
-            if (requestId === collectionIndexStatusRequest && refreshBtn) {
-                refreshBtn.disabled = false;
             }
         });
 }

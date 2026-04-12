@@ -95,6 +95,20 @@ class TestGenerateComicInfoXml:
         assert writer is not None
         assert "Chris Claremont" in writer.text
 
+    def test_generate_tags_field(self):
+        from routes.metadata import generate_comicinfo_xml
+        import xml.etree.ElementTree as ET
+
+        issue_data = {
+            "Series": "Chainsaw Man",
+            "Tags": "Blood and Gore, Body Horror, Violence",
+        }
+        xml_bytes = generate_comicinfo_xml(issue_data)
+        root = ET.fromstring(xml_bytes)
+        tags = root.find("Tags")
+        assert tags is not None
+        assert tags.text == "Blood and Gore, Body Horror, Violence"
+
 
 class TestAsText:
 

@@ -21,14 +21,10 @@ let swIndexStatusRequest = 0;
 function updateSourceWallIndexStatus(options = {}) {
     const { silent = false } = options;
     const statusEl = document.getElementById('swIndexStatusText');
-    const refreshBtn = document.getElementById('swRefreshIndexStatusBtn');
     const requestId = ++swIndexStatusRequest;
 
     if (statusEl && !silent) {
         statusEl.textContent = 'Checking status...';
-    }
-    if (refreshBtn) {
-        refreshBtn.disabled = true;
     }
 
     return fetch('/api/file-index-status', {
@@ -54,11 +50,6 @@ function updateSourceWallIndexStatus(options = {}) {
             }
             if (!silent) {
                 CLU.showError('Failed to load file index status');
-            }
-        })
-        .finally(() => {
-            if (requestId === swIndexStatusRequest && refreshBtn) {
-                refreshBtn.disabled = false;
             }
         });
 }
@@ -1284,11 +1275,6 @@ function updateXmlSW() {
 // ── Initialization ──
 
 document.addEventListener('DOMContentLoaded', () => {
-    const refreshStatusBtn = document.getElementById('swRefreshIndexStatusBtn');
-    if (refreshStatusBtn) {
-        refreshStatusBtn.addEventListener('click', () => updateSourceWallIndexStatus());
-    }
-
     const rebuildIndexBtn = document.getElementById('swRebuildIndexBtn');
     if (rebuildIndexBtn) {
         rebuildIndexBtn.addEventListener('click', rebuildSourceWallIndex);

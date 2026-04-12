@@ -32,6 +32,11 @@ SAMPLE_SERIES = {
     "type": "Manga",
     "authors": [{"name": "ONE"}, {"name": "Murata Yusuke"}],
     "genres": [{"genre": "Action"}, {"genre": "Comedy"}],
+    "categories": [
+        {"category": "Parody", "votes": 12, "votes_plus": 12, "votes_minus": 0},
+        {"category": "Hero/s", "votes": 25, "votes_plus": 26, "votes_minus": 1},
+        {"category": "Monster/s", "votes": 0, "votes_plus": 0, "votes_minus": 0},
+    ],
     "associated": [{"title": "OPM"}, {"title": "ワンパンマン"}],
     "publishers": [{"publisher_name": "Shueisha"}],
     "latest_chapter": "30",
@@ -216,12 +221,44 @@ class TestMangaUpdatesProviderGetIssueMetadata:
         assert metadata["Writer"] == "ONE, Murata Yusuke"
         assert metadata["Penciller"] == "ONE, Murata Yusuke"
         assert metadata["Genre"] == "Action, Comedy"
+        assert metadata["Tags"] == "Hero/s, Parody"
         assert metadata["AlternateSeries"] == "OPM; ワンパンマン"
         assert metadata["Manga"] == "Yes"
         assert metadata["Count"] == 30
         assert "Ongoing" in metadata["Notes"]
         assert "MangaUpdates" in metadata["Notes"]
         assert "mangaupdates.com/series/12345" in metadata["Web"]
+
+    @patch("time.sleep")
+    @patch("requests.request")
+    def test_category_tags_are_sorted_limited_and_filtered(self, mock_request, mock_sleep):
+        from models.providers.mangaupdates_provider import MangaUpdatesProvider
+
+        categories = []
+        for i in range(25):
+            categories.append({
+                "category": f"Tag {i:02d}",
+                "votes": 100 - i,
+                "votes_plus": 100 - i,
+                "votes_minus": 0,
+            })
+        categories.extend([
+            {"category": "Zero Votes", "votes": 0, "votes_plus": 0, "votes_minus": 0},
+            {"category": "Negative Signal", "votes": -1, "votes_plus": 0, "votes_minus": 1},
+        ])
+
+        mock_request.return_value = _mock_response({**SAMPLE_SERIES, "categories": categories})
+
+        p = MangaUpdatesProvider()
+        metadata = p.get_issue_metadata("12345", "1")
+
+        assert metadata is not None
+        tags = metadata["Tags"].split(", ")
+        assert len(tags) == 20
+        assert tags[0] == "Tag 00"
+        assert tags[-1] == "Tag 19"
+        assert "Zero Votes" not in tags
+        assert "Negative Signal" not in tags
 
     @patch("time.sleep")
     @patch("requests.request")

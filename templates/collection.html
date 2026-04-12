@@ -65,16 +65,13 @@
 
                 <!-- Per Page & Refresh -->
                 <div class="d-flex align-items-center gap-2">
-                    <div id="collectionIndexStatusCard" class="d-flex align-items-center gap-2 rounded-3 px-3 py-2 bg-body border">
+                    <div id="collectionIndexStatusCard" class="d-flex align-items-center gap-2 rounded-3 px-3 py-2 border bg-body-tertiary">
                         <div class="small lh-sm">
                             <div class="fw-semibold">File Index</div>
                             <div id="collectionIndexStatusText" class="text-muted">Checking status...</div>
                         </div>
-                        <button class="btn btn-outline-secondary btn-sm" type="button" id="collectionRefreshIndexStatusBtn" title="Refresh index status">
-                            <i class="bi bi-arrow-clockwise"></i>
-                        </button>
                         <button class="btn btn-outline-primary btn-sm" type="button" id="collectionRebuildIndexBtn" title="Rebuild file index">
-                            <i class="bi bi-database-gear me-1"></i>Refresh Index
+                            <i class="bi bi-database-gear me-1"></i>Reindex
                         </button>
                     </div>
                     <div class="input-group input-group-sm">

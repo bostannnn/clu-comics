@@ -477,6 +477,7 @@ def generate_comicinfo_xml(issue_data, series_data=None):
 
     # Genre/Characters/Teams/Locations
     add("Genre",      issue_data.get("Genre"))
+    add("Tags",       issue_data.get("Tags"))
     add("Characters", issue_data.get("Characters"))
     add("Teams",      issue_data.get("Teams"))
     add("Locations",  issue_data.get("Locations"))

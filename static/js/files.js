@@ -5989,6 +5989,15 @@ function selectComicVineVolume(filePath, fileName, volumeId, publisherName, issu
 function padIssueNumber(numStr, width = 3) {
   numStr = String(numStr).trim();
   if (!numStr) return '';
+  if (/^v\d+(?:\.\d+)?$/i.test(numStr)) {
+    const prefix = numStr[0];
+    const inner = numStr.slice(1);
+    if (inner.includes('.')) {
+      const parts = inner.split('.');
+      return prefix + parts[0].padStart(width - 1, '0') + '.' + parts.slice(1).join('.');
+    }
+    return prefix + inner.padStart(width - 1, '0');
+  }
   if (numStr.includes('.')) {
     const parts = numStr.split('.');
     return parts[0].padStart(width, '0') + '.' + parts.slice(1).join('.');

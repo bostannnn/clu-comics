@@ -31,12 +31,41 @@ class MangaUpdatesProvider(BaseProvider):
     rate_limit = 30
 
     API_BASE = "https://api.mangaupdates.com/v1"
+    MAX_CATEGORY_TAGS = 20
 
     # Class-level rate limiting
     _last_request_time = 0.0
 
     def __init__(self, credentials: Optional[ProviderCredentials] = None):
         super().__init__(credentials)
+
+    @classmethod
+    def _extract_top_category_tags(cls, categories: Any) -> List[str]:
+        """Return top-voted category names from a MangaUpdates series payload."""
+        if not isinstance(categories, list):
+            return []
+
+        ranked = []
+        for item in categories:
+            if not isinstance(item, dict):
+                continue
+
+            name = str(item.get("category", "") or "").strip()
+            if not name:
+                continue
+
+            try:
+                votes = int(item.get("votes", 0) or 0)
+            except (TypeError, ValueError):
+                votes = 0
+
+            if votes <= 0:
+                continue
+
+            ranked.append((votes, name))
+
+        ranked.sort(key=lambda entry: (-entry[0], entry[1].lower()))
+        return [name for _, name in ranked[: cls.MAX_CATEGORY_TAGS]]
 
     def _make_request(self, method: str, endpoint: str, json_data: Dict = None) -> Optional[Dict]:
         """Make an HTTP request to the MangaUpdates API with rate limiting."""
@@ -373,6 +402,11 @@ class MangaUpdatesProvider(BaseProvider):
                         genre_names.append(gname)
                 if genre_names:
                     metadata["Genre"] = ", ".join(genre_names)
+
+            # Categories -> ComicInfo Tags (ranked by MU votes)
+            category_tags = self._extract_top_category_tags(detail.get("categories"))
+            if category_tags:
+                metadata["Tags"] = ", ".join(category_tags)
 
             # Alternate series: start with the native title if we used a preferred title,
             # then append associated titles from the API, deduplicating
