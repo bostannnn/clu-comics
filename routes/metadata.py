@@ -770,7 +770,7 @@ def cbz_save_comicinfo():
             'AlternateNumber', 'AlternateCount', 'Year', 'Month', 'Day',
             'Publisher', 'Imprint', 'Format', 'PageCount', 'LanguageISO',
             'MetronId', 'Writer', 'Penciller', 'Inker', 'Colorist', 'Letterer',
-            'CoverArtist', 'Editor', 'Genre', 'Characters', 'Teams',
+            'CoverArtist', 'Editor', 'Genre', 'Tags', 'Characters', 'Teams',
             'Locations', 'StoryArc', 'SeriesGroup', 'MainCharacterOrTeam',
             'AgeRating', 'Summary', 'Notes', 'Web', 'ScanInformation',
             'Review', 'CommunityRating', 'BlackAndWhite', 'Manga'

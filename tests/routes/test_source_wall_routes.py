@@ -21,7 +21,8 @@ class TestSourceWallFiles:
         mock_files.return_value = (
             [{"id": 1, "name": "SubDir", "path": "/data/SubDir", "type": "directory"}],
             [{"id": 2, "name": "Issue 001.cbz", "path": "/data/Issue 001.cbz",
-              "type": "file", "ci_series": "Batman", "ci_volume": "2020"}],
+              "type": "file", "ci_series": "Batman", "ci_volume": "2020",
+              "ci_tags": "Detective, Gotham"}],
         )
 
         resp = client.get("/api/source-wall/files?path=/data")
@@ -31,6 +32,7 @@ class TestSourceWallFiles:
         assert len(data["directories"]) == 1
         assert len(data["files"]) == 1
         assert data["files"][0]["ci_series"] == "Batman"
+        assert data["files"][0]["ci_tags"] == "Detective, Gotham"
 
     def test_missing_path_returns_403(self, client):
         resp = client.get("/api/source-wall/files")

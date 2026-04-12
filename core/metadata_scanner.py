@@ -164,6 +164,7 @@ def process_metadata_scan(task):
             'ci_coverartist': metadata.get('CoverArtist', ''),
             'ci_publisher': metadata.get('Publisher', ''),
             'ci_genre': metadata.get('Genre', ''),
+            'ci_tags': metadata.get('Tags', ''),
             'ci_characters': metadata.get('Characters', '')
         }
 

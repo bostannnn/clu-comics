@@ -36,6 +36,7 @@ CI_FIELD_TO_XML = {
     'ci_coverartist': 'CoverArtist',
     'ci_publisher': 'Publisher',
     'ci_genre': 'Genre',
+    'ci_tags': 'Tags',
     'ci_characters': 'Characters',
 }
 

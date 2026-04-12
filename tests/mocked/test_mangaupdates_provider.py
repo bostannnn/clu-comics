@@ -262,6 +262,49 @@ class TestMangaUpdatesProviderGetIssueMetadata:
 
     @patch("time.sleep")
     @patch("requests.request")
+    def test_author_names_are_role_split_normalized_and_deduped(self, mock_request, mock_sleep):
+        from models.providers.mangaupdates_provider import MangaUpdatesProvider
+
+        mock_request.return_value = _mock_response({
+            **SAMPLE_SERIES,
+            "authors": [
+                {"name": "SAKAMOTO Shinichi", "type": "Author"},
+                {"name": "SAKAMOTO Shinichi", "type": "Artist"},
+                {"name": "OHBA Tsugumi", "type": "Author"},
+                {"name": "OBATA Takeshi", "type": "Artist"},
+                {"name": "SAKAMOTO Shinichi", "type": "Artist"},
+            ],
+        })
+
+        p = MangaUpdatesProvider()
+        metadata = p.get_issue_metadata("12345", "1")
+
+        assert metadata is not None
+        assert metadata["Writer"] == "Sakamoto Shinichi, Ohba Tsugumi"
+        assert metadata["Penciller"] == "Sakamoto Shinichi, Obata Takeshi"
+
+    @patch("time.sleep")
+    @patch("requests.request")
+    def test_single_token_all_caps_pen_names_are_preserved(self, mock_request, mock_sleep):
+        from models.providers.mangaupdates_provider import MangaUpdatesProvider
+
+        mock_request.return_value = _mock_response({
+            **SAMPLE_SERIES,
+            "authors": [
+                {"name": "PEACH-PIT", "type": "Author"},
+                {"name": "NISIOISIN", "type": "Artist"},
+            ],
+        })
+
+        p = MangaUpdatesProvider()
+        metadata = p.get_issue_metadata("12345", "1")
+
+        assert metadata is not None
+        assert metadata["Writer"] == "PEACH-PIT"
+        assert metadata["Penciller"] == "NISIOISIN"
+
+    @patch("time.sleep")
+    @patch("requests.request")
     def test_summary_html_stripped(self, mock_request, mock_sleep):
         from models.providers.mangaupdates_provider import MangaUpdatesProvider
 

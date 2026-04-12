@@ -94,6 +94,7 @@
       title: 'Content Details',
       fields: [
         { key: 'Genre', label: 'Genre' },
+        { key: 'Tags', label: 'Tags' },
         { key: 'Characters', label: 'Characters' },
         { key: 'Teams', label: 'Teams' },
         { key: 'Locations', label: 'Locations' },
@@ -163,6 +164,7 @@
       title: 'Content Details',
       fields: [
         { key: 'Genre', label: 'Genre' },
+        { key: 'Tags', label: 'Tags', type: 'textarea', rows: 3 },
         { key: 'Characters', label: 'Characters' },
         { key: 'Teams', label: 'Teams' },
         { key: 'Locations', label: 'Locations' },

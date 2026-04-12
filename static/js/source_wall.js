@@ -112,6 +112,7 @@ const SW_COLUMNS = {
     ci_coverartist: { label: 'Cover Artist', editable: true },
     ci_publisher:   { label: 'Publisher',    editable: true },
     ci_genre:       { label: 'Genre',        editable: true },
+    ci_tags:        { label: 'Tags',         editable: true },
     ci_characters:  { label: 'Characters',   editable: true },
 };
 
@@ -692,7 +693,7 @@ function renderTableHeader() {
 // Fields whose values are comma-separated lists
 const SW_COMMA_FIELDS = new Set([
     'ci_writer', 'ci_penciller', 'ci_inker', 'ci_colorist',
-    'ci_letterer', 'ci_coverartist', 'ci_genre', 'ci_characters',
+    'ci_letterer', 'ci_coverartist', 'ci_genre', 'ci_tags', 'ci_characters',
 ]);
 
 // Client-side suggest cache: { "ci_writer:ala" => ["Alan Moore", ...] }

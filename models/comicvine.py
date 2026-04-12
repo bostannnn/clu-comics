@@ -1326,6 +1326,7 @@ def generate_comicinfo_xml(issue_data: Dict[str, Any]) -> bytes:
     add("Locations", issue_data.get("Locations"))
     add("StoryArc", issue_data.get("StoryArc"))
     add("Genre", issue_data.get("Genre"))
+    add("Tags", issue_data.get("Tags"))
     add("AlternateSeries", issue_data.get("AlternateSeries"))
 
     # Language

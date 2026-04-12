@@ -429,6 +429,32 @@ class TestSaveComicInfoEndpoint:
     @patch("routes.metadata.is_valid_library_path", return_value=True)
     @patch("core.database.update_file_index_from_comicinfo")
     @patch("core.database.set_has_comicinfo")
+    def test_manual_save_accepts_tags_field(self, mock_set, mock_update_index, mock_valid, client, tmp_path):
+        cbz_path = str(tmp_path / "data" / "tags.cbz")
+        os.makedirs(str(tmp_path / "data"), exist_ok=True)
+        _make_cbz(cbz_path, with_comicinfo=False)
+
+        resp = client.post('/cbz-save-comicinfo', json={
+            "path": cbz_path,
+            "comicinfo": {
+                "Series": "Chainsaw Man",
+                "Tags": "Blood and Gore, Body Horror, Violence",
+            }
+        })
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["success"] is True
+        assert data["comicinfo"]["Tags"] == "Blood and Gore, Body Horror, Violence"
+        assert "<Tags>Blood and Gore, Body Horror, Violence</Tags>" in data["comicinfo_xml_text"]
+
+        with zipfile.ZipFile(cbz_path, 'r') as zf:
+            xml_data = zf.read("ComicInfo.xml").decode("utf-8")
+            assert "<Tags>Blood and Gore, Body Horror, Violence</Tags>" in xml_data
+
+    @patch("routes.metadata.is_valid_library_path", return_value=True)
+    @patch("core.database.update_file_index_from_comicinfo")
+    @patch("core.database.set_has_comicinfo")
     def test_preserves_existing_unedited_tags(self, mock_set, mock_update_index, mock_valid, client, tmp_path):
         cbz_path = str(tmp_path / "data" / "existing.cbz")
         os.makedirs(str(tmp_path / "data"), exist_ok=True)

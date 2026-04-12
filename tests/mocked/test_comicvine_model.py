@@ -431,3 +431,10 @@ class TestGenerateComicInfoXml:
         xml_bytes = generate_comicinfo_xml(data)
         assert b"<Writer>" not in xml_bytes
         assert b"<Publisher>" not in xml_bytes
+
+    def test_writes_tags_field(self):
+        from models.comicvine import generate_comicinfo_xml
+
+        data = {"Series": "Chainsaw Man", "Tags": "Blood and Gore, Body Horror"}
+        xml_bytes = generate_comicinfo_xml(data)
+        assert b"<Tags>Blood and Gore, Body Horror</Tags>" in xml_bytes

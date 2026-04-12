@@ -98,7 +98,7 @@ class TestFileIndexColumns:
         metadata_cols = {
             "ci_title", "ci_series", "ci_number", "ci_count", "ci_volume",
             "ci_year", "ci_writer", "ci_penciller", "ci_inker", "ci_colorist",
-            "ci_letterer", "ci_coverartist", "ci_publisher", "ci_genre",
+            "ci_letterer", "ci_coverartist", "ci_publisher", "ci_genre", "ci_tags",
             "ci_characters", "metadata_scanned_at",
         }
         assert metadata_cols.issubset(columns)

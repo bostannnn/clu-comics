@@ -168,7 +168,9 @@ def browse_by_metadata(category, name):
         'artist': 'penciller',
         'character': 'characters',
         'characters': 'characters',
-        'publisher': 'publisher'
+        'publisher': 'publisher',
+        'tag': 'tags',
+        'tags': 'tags',
     }
 
     normalized_category = category_mapping.get(category.lower())
@@ -184,14 +186,16 @@ def browse_by_metadata(category, name):
         'writer': 'Writer',
         'penciller': 'Artist',
         'characters': 'Character',
-        'publisher': 'Publisher'
+        'publisher': 'Publisher',
+        'tags': 'Tag',
     }
 
     group_labels = {
         'characters': 'Series',
         'writer': 'Publisher',
         'penciller': 'Publisher',
-        'publisher': 'Series'
+        'publisher': 'Series',
+        'tags': 'Series',
     }
 
     return render_template('browse_metadata.html',
@@ -642,7 +646,9 @@ def api_browse_by_metadata(category, name):
         'artist': 'penciller',
         'character': 'characters',
         'characters': 'characters',
-        'publisher': 'publisher'
+        'publisher': 'publisher',
+        'tag': 'tags',
+        'tags': 'tags',
     }
 
     normalized_category = category_mapping.get(category.lower())

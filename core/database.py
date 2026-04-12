@@ -105,6 +105,7 @@ def init_db():
             "ci_coverartist",  # Cover artist(s) - comma-separated
             "ci_publisher",  # Publisher name
             "ci_genre",  # Genre(s) - comma-separated
+            "ci_tags",  # Tags/Categories - comma-separated
             "ci_characters",  # Characters - comma-separated
             "metadata_scanned_at",  # Timestamp of last scan (REAL)
         ]
@@ -2152,7 +2153,7 @@ def update_file_metadata(file_id, metadata_dict, scanned_at, has_comicinfo=None)
             SET ci_title = ?, ci_series = ?, ci_number = ?, ci_count = ?,
                 ci_volume = ?, ci_year = ?, ci_writer = ?, ci_penciller = ?,
                 ci_inker = ?, ci_colorist = ?, ci_letterer = ?, ci_coverartist = ?,
-                ci_publisher = ?, ci_genre = ?, ci_characters = ?,
+                ci_publisher = ?, ci_genre = ?, ci_tags = ?, ci_characters = ?,
                 metadata_scanned_at = ?, has_comicinfo = ?
             WHERE id = ?
         """,
@@ -2171,6 +2172,7 @@ def update_file_metadata(file_id, metadata_dict, scanned_at, has_comicinfo=None)
                 metadata_dict.get("ci_coverartist", ""),
                 metadata_dict.get("ci_publisher", ""),
                 metadata_dict.get("ci_genre", ""),
+                metadata_dict.get("ci_tags", ""),
                 metadata_dict.get("ci_characters", ""),
                 scanned_at,
                 has_comicinfo if has_comicinfo is not None else 0,
@@ -2344,6 +2346,7 @@ def update_file_index_from_comicinfo(file_path, comicinfo_dict):
         ci_coverartist = str(comicinfo_dict.get("CoverArtist", "") or "")
         ci_publisher = str(comicinfo_dict.get("Publisher", "") or "")
         ci_genre = str(comicinfo_dict.get("Genre", "") or "")
+        ci_tags = str(comicinfo_dict.get("Tags", "") or "")
         ci_characters = str(comicinfo_dict.get("Characters", "") or "")
         scanned_at = _time.time()
 
@@ -2360,7 +2363,7 @@ def update_file_index_from_comicinfo(file_path, comicinfo_dict):
                 ci_title = ?, ci_series = ?, ci_number = ?, ci_count = ?,
                 ci_volume = ?, ci_year = ?, ci_writer = ?, ci_penciller = ?,
                 ci_inker = ?, ci_colorist = ?, ci_letterer = ?, ci_coverartist = ?,
-                ci_publisher = ?, ci_genre = ?, ci_characters = ?,
+                ci_publisher = ?, ci_genre = ?, ci_tags = ?, ci_characters = ?,
                 has_comicinfo = 1, metadata_scanned_at = ?
             WHERE path = ?
             """,
@@ -2369,7 +2372,7 @@ def update_file_index_from_comicinfo(file_path, comicinfo_dict):
                 ci_title, ci_series, ci_number, ci_count,
                 ci_volume, ci_year, ci_writer, ci_penciller,
                 ci_inker, ci_colorist, ci_letterer, ci_coverartist,
-                ci_publisher, ci_genre, ci_characters,
+                ci_publisher, ci_genre, ci_tags, ci_characters,
                 scanned_at,
                 file_path,
             ),
@@ -3855,7 +3858,7 @@ def get_files_by_metadata(field_name, value, limit=50, offset=0):
     Get comic files matching a specific metadata value from file_index.
 
     Args:
-        field_name: 'writer', 'penciller', 'characters', 'publisher'
+        field_name: 'writer', 'penciller', 'characters', 'publisher', 'tags'
         value: The metadata value to search for (e.g., 'Stan Lee')
         limit: Results per page
         offset: Pagination offset
@@ -3868,6 +3871,7 @@ def get_files_by_metadata(field_name, value, limit=50, offset=0):
         "penciller": "ci_penciller",
         "characters": "ci_characters",
         "publisher": "ci_publisher",
+        "tags": "ci_tags",
     }
 
     if field_name not in field_mapping:
@@ -3942,7 +3946,7 @@ def get_files_by_metadata_grouped(field_name, value):
     For writer/penciller: Nested grouping - Publisher -> Series -> Files
 
     Args:
-        field_name: 'writer', 'penciller', 'characters', 'publisher'
+        field_name: 'writer', 'penciller', 'characters', 'publisher', 'tags'
         value: The metadata value to search for
 
     Returns:
@@ -3953,6 +3957,7 @@ def get_files_by_metadata_grouped(field_name, value):
         "penciller": "ci_penciller",
         "characters": "ci_characters",
         "publisher": "ci_publisher",
+        "tags": "ci_tags",
     }
 
     if field_name not in field_mapping:
@@ -7804,7 +7809,7 @@ def mark_komga_book_synced(komga_book_id, komga_path, clu_path, sync_type="read"
 ALLOWED_CI_FIELDS = {
     'ci_title', 'ci_series', 'ci_number', 'ci_count', 'ci_volume', 'ci_year',
     'ci_writer', 'ci_penciller', 'ci_inker', 'ci_colorist', 'ci_letterer',
-    'ci_coverartist', 'ci_publisher', 'ci_genre', 'ci_characters',
+    'ci_coverartist', 'ci_publisher', 'ci_genre', 'ci_tags', 'ci_characters',
 }
 
 
@@ -7837,7 +7842,7 @@ def get_source_wall_files(parent_path, max_retries=3):
                 SELECT id, name, path, type, size, has_thumbnail, has_comicinfo,
                        ci_title, ci_series, ci_number, ci_count, ci_volume, ci_year,
                        ci_writer, ci_penciller, ci_inker, ci_colorist, ci_letterer,
-                       ci_coverartist, ci_publisher, ci_genre, ci_characters
+                       ci_coverartist, ci_publisher, ci_genre, ci_tags, ci_characters
                 FROM file_index
                 WHERE parent = ?
                 ORDER BY type DESC, name COLLATE NOCASE ASC

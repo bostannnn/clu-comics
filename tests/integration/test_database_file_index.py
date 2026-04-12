@@ -371,18 +371,49 @@ class TestFileMetadata:
 
         ok = update_file_metadata(
             file_id,
-            {"ci_title": "Batman", "ci_writer": "Tom King", "ci_publisher": "DC"},
+            {
+                "ci_title": "Batman",
+                "ci_writer": "Tom King",
+                "ci_publisher": "DC",
+                "ci_tags": "Detective, Gotham",
+            },
             scanned_at=time.time(),
             has_comicinfo=1,
         )
         assert ok is True
 
         cur = db_connection.execute(
-            "SELECT ci_title, ci_writer, ci_publisher, has_comicinfo FROM file_index WHERE id=?",
+            "SELECT ci_title, ci_writer, ci_publisher, ci_tags, has_comicinfo FROM file_index WHERE id=?",
             (file_id,),
         )
         row = cur.fetchone()
         assert row[0] == "Batman"
         assert row[1] == "Tom King"
         assert row[2] == "DC"
+        assert row[3] == "Detective, Gotham"
+        assert row[4] == 1
+
+    def test_update_file_index_from_comicinfo_persists_tags(self, db_connection):
+        from core.database import add_file_index_entry, update_file_index_from_comicinfo
+
+        add_file_index_entry("Test.cbz", "/data/Test.cbz", "file", parent="/data")
+
+        ok = update_file_index_from_comicinfo(
+            "/data/Test.cbz",
+            {
+                "Series": "Batman",
+                "Number": "1",
+                "Tags": "Detective, Gotham",
+            },
+        )
+        assert ok is True
+
+        cur = db_connection.execute(
+            "SELECT ci_series, ci_number, ci_tags, has_comicinfo FROM file_index WHERE path=?",
+            ("/data/Test.cbz",),
+        )
+        row = cur.fetchone()
+        assert row[0] == "Batman"
+        assert row[1] == "1"
+        assert row[2] == "Detective, Gotham"
         assert row[3] == 1

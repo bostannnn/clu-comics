@@ -40,6 +40,98 @@ class MangaUpdatesProvider(BaseProvider):
         super().__init__(credentials)
 
     @classmethod
+    def _clean_text(cls, value: Any) -> str:
+        """Strip HTML, decode entities, and normalize whitespace."""
+        text = re.sub(r'<[^>]+>', '', str(value or ""))
+        text = html.unescape(text)
+        return re.sub(r'\s+', ' ', text).strip()
+
+    @staticmethod
+    def _is_all_caps_token(token: str) -> bool:
+        letters = [char for char in token if char.isalpha()]
+        return bool(letters) and all(char.isupper() for char in letters)
+
+    @classmethod
+    def _normalize_caps_token(cls, token: str) -> str:
+        """Title-case all-uppercase alpha chunks while preserving punctuation."""
+        return re.sub(
+            r"[A-Z][A-Z]+(?:['-][A-Z][A-Z]+)*",
+            lambda match: match.group(0).title(),
+            token,
+        )
+
+    @classmethod
+    def _normalize_author_name(cls, name: Any) -> str:
+        """Normalize MangaUpdates author casing while preserving short pen names."""
+        cleaned = cls._clean_text(name)
+        if not cleaned:
+            return ""
+
+        tokens = cleaned.split()
+        if len(tokens) == 1 and cls._is_all_caps_token(tokens[0]):
+            return cleaned
+
+        normalized_tokens = [
+            cls._normalize_caps_token(token) if cls._is_all_caps_token(token) else token
+            for token in tokens
+        ]
+        return " ".join(normalized_tokens)
+
+    @classmethod
+    def _dedupe_names(cls, names: List[str]) -> List[str]:
+        """Deduplicate names case-insensitively while preserving order."""
+        unique = []
+        seen = set()
+        for name in names:
+            normalized = cls._normalize_author_name(name)
+            if not normalized:
+                continue
+            key = normalized.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(normalized)
+        return unique
+
+    @classmethod
+    def _extract_creators(cls, authors: Any) -> Dict[str, List[str]]:
+        """Split MangaUpdates author credits into writer/penciller lists."""
+        if not isinstance(authors, list):
+            return {"Writer": [], "Penciller": []}
+
+        writers = []
+        pencillers = []
+        fallback = []
+
+        for author in authors:
+            if not isinstance(author, dict):
+                continue
+
+            name = cls._normalize_author_name(author.get("name"))
+            if not name:
+                continue
+
+            role = cls._clean_text(author.get("type")).lower()
+            if "author" in role or "writer" in role:
+                writers.append(name)
+            elif any(term in role for term in ("artist", "art", "illustrator")):
+                pencillers.append(name)
+            else:
+                fallback.append(name)
+
+        writers = cls._dedupe_names(writers)
+        pencillers = cls._dedupe_names(pencillers)
+        fallback = cls._dedupe_names(fallback)
+
+        if fallback:
+            if not writers:
+                writers = list(fallback)
+            if not pencillers:
+                pencillers = list(fallback)
+
+        return {"Writer": writers, "Penciller": pencillers}
+
+    @classmethod
     def _extract_top_category_tags(cls, categories: Any) -> List[str]:
         """Return top-voted category names from a MangaUpdates series payload."""
         if not isinstance(categories, list):
@@ -127,16 +219,13 @@ class MangaUpdatesProvider(BaseProvider):
                     continue
 
                 title = record.get("title", "Unknown Title")
-                # Clean HTML from title
-                title = re.sub(r'<[^>]+>', '', title)
-                title = html.unescape(title)
+                title = self._clean_text(title)
 
                 # Prefer hit_title (the matched English title) over native title
                 hit_title = item.get("hit_title", "")
                 alternate_title = None
                 if hit_title:
-                    hit_title = re.sub(r'<[^>]+>', '', hit_title)
-                    hit_title = html.unescape(hit_title)
+                    hit_title = self._clean_text(hit_title)
                     if hit_title != title:
                         alternate_title = title
                         title = hit_title
@@ -150,8 +239,7 @@ class MangaUpdatesProvider(BaseProvider):
 
                 description = record.get("description", "")
                 if description:
-                    description = re.sub(r'<[^>]+>', '', description)
-                    description = html.unescape(description)
+                    description = self._clean_text(description)
                     if len(description) > 500:
                         description = description[:500] + "..."
 
@@ -185,8 +273,7 @@ class MangaUpdatesProvider(BaseProvider):
                 return None
 
             title = data.get("title", "Unknown Title")
-            title = re.sub(r'<[^>]+>', '', title)
-            title = html.unescape(title)
+            title = self._clean_text(title)
 
             series_year = data.get("year")
             if isinstance(series_year, str):
@@ -197,8 +284,7 @@ class MangaUpdatesProvider(BaseProvider):
 
             description = data.get("description", "")
             if description:
-                description = re.sub(r'<[^>]+>', '', description)
-                description = html.unescape(description)
+                description = self._clean_text(description)
 
             cover_url = None
             image = data.get("image", {})
@@ -210,7 +296,7 @@ class MangaUpdatesProvider(BaseProvider):
             publishers = data.get("publishers", [])
             if publishers:
                 for pub in publishers:
-                    pub_name = pub.get("publisher_name")
+                    pub_name = self._clean_text(pub.get("publisher_name"))
                     if pub_name:
                         publisher = pub_name
                         break
@@ -325,8 +411,7 @@ class MangaUpdatesProvider(BaseProvider):
                 return None
 
             title = detail.get("title", "Unknown Title")
-            title = re.sub(r'<[^>]+>', '', title)
-            title = html.unescape(title)
+            title = self._clean_text(title)
 
             # Prefix with 'v' for volume (manga convention)
             volume_number = f"v{issue_number}" if not issue_number.startswith('v') else issue_number
@@ -342,15 +427,14 @@ class MangaUpdatesProvider(BaseProvider):
             # Clean description
             description = detail.get("description", "")
             if description:
-                description = re.sub(r'<[^>]+>', '', description)
-                description = html.unescape(description)
+                description = self._clean_text(description)
 
             # Extract publisher from publishers array
             publisher = None
             publishers = detail.get("publishers", [])
             if publishers:
                 for pub in publishers:
-                    pub_name = pub.get("publisher_name")
+                    pub_name = self._clean_text(pub.get("publisher_name"))
                     if pub_name:
                         publisher = pub_name
                         break
@@ -378,19 +462,11 @@ class MangaUpdatesProvider(BaseProvider):
                 metadata["Publisher"] = publisher
 
             # Authors -> both Writer and Penciller (mangaka convention)
-            authors = detail.get("authors", [])
-            if authors:
-                author_names = []
-                for author in authors:
-                    name = author.get("name")
-                    if name:
-                        name = re.sub(r'<[^>]+>', '', name)
-                        name = html.unescape(name)
-                        author_names.append(name)
-                if author_names:
-                    author_str = ", ".join(author_names)
-                    metadata["Writer"] = author_str
-                    metadata["Penciller"] = author_str
+            creators = self._extract_creators(detail.get("authors"))
+            if creators["Writer"]:
+                metadata["Writer"] = ", ".join(creators["Writer"])
+            if creators["Penciller"]:
+                metadata["Penciller"] = ", ".join(creators["Penciller"])
 
             # Genres
             genres = detail.get("genres", [])
@@ -399,7 +475,7 @@ class MangaUpdatesProvider(BaseProvider):
                 for genre in genres:
                     gname = genre.get("genre") if isinstance(genre, dict) else str(genre)
                     if gname:
-                        genre_names.append(gname)
+                        genre_names.append(self._clean_text(gname))
                 if genre_names:
                     metadata["Genre"] = ", ".join(genre_names)
 
@@ -424,8 +500,7 @@ class MangaUpdatesProvider(BaseProvider):
                 for assoc in associated:
                     at = assoc.get("title") if isinstance(assoc, dict) else str(assoc)
                     if at:
-                        at = re.sub(r'<[^>]+>', '', at)
-                        at = html.unescape(at)
+                        at = self._clean_text(at)
                         if at.lower() not in seen:
                             alt_titles.append(at)
                             seen.add(at.lower())
