@@ -51,6 +51,9 @@ modal_body_template = '''
                   <button type="button" class="btn btn-outline-secondary btn-sm" onclick="CLU.cropImageRight(this)" title="Crop Image Right">
                     Right <i class="bi bi-arrow-bar-right"></i>
                   </button>
+                  <button type="button" class="btn btn-outline-warning btn-sm" onclick="CLU.triggerReplaceImage(this)" title="Replace Image">
+                    <i class="bi bi-arrow-repeat"></i> Replace
+                  </button>
                   <button type="button" class="btn btn-outline-danger btn-sm" onclick="CLU.deleteCardImage(this)">
                     <i class="bi bi-trash"></i>
                   </button>

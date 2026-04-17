@@ -805,6 +805,105 @@ function performRename(input) {
     });
 }
 
+function getReplaceImageInput() {
+    let input = document.getElementById('editInlineReplaceInput');
+    if (input) {
+        return input;
+    }
+
+    input = document.createElement('input');
+    input.type = 'file';
+    input.id = 'editInlineReplaceInput';
+    input.accept = '.jpg,.jpeg,.png,.gif,.webp,.bmp';
+    input.className = 'd-none';
+    document.body.appendChild(input);
+    return input;
+}
+
+function resolveEditCardFullPath(span) {
+    const fullPath = span.dataset.fullPath || span.getAttribute('data-full-path');
+    if (fullPath) {
+        return fullPath;
+    }
+
+    const relPath = span.dataset.relPath || span.getAttribute('data-rel-path');
+    if (!relPath) {
+        return null;
+    }
+
+    if (relPath.startsWith('/')) {
+        return relPath;
+    }
+
+    const folderName = document.getElementById('editInlineFolderName').value;
+    if (!folderName) {
+        return null;
+    }
+
+    return `${folderName}/${relPath}`;
+}
+
+function triggerReplaceImage(buttonElement) {
+    const input = getReplaceImageInput();
+    input.value = '';
+    input.onchange = () => {
+        const file = input.files && input.files[0];
+        if (file) {
+            replaceCardImage(buttonElement, file);
+        }
+    };
+    input.click();
+}
+
+function replaceCardImage(buttonElement, file) {
+    const colElement = buttonElement.closest('.col');
+    if (!colElement) {
+        console.error("Unable to locate column container.");
+        return;
+    }
+
+    const span = colElement.querySelector('.editable-filename');
+    if (!span) {
+        console.error("No file reference found in column:", colElement);
+        return;
+    }
+
+    const fullPath = resolveEditCardFullPath(span);
+    if (!fullPath) {
+        console.error("Unable to resolve full path for replace action.");
+        return;
+    }
+    const formData = new FormData();
+    formData.append('target_file', fullPath);
+    formData.append('replacement_image', file, file.name);
+
+    showToast('Replacing image...', 'info');
+
+    fetch('/replace-image', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (!data.success) {
+            showToast('Replace failed: ' + (data.error || 'Unknown error'), 'error');
+            return;
+        }
+
+        const imageElement = colElement.querySelector('img');
+        if (imageElement && data.imageData) {
+            imageElement.src = data.imageData;
+            imageElement.alt = span.textContent.trim();
+        }
+
+        showToast('Image replaced', 'success');
+    })
+    .catch(error => {
+        console.error('Replace error:', error);
+        showToast('Replace failed: ' + error.message, 'error');
+    });
+}
+
 function deleteCardImage(buttonElement) {
     const colElement = buttonElement.closest('.col');
     if (!colElement) {
@@ -952,6 +1051,9 @@ function generateCardHTML(imagePath, imageData) {
                                 <button type="button" class="btn btn-outline-secondary" onclick="cropImageCenter(this)" title="Crop Image Center">Middle</button>
                                 <button type="button" class="btn btn-outline-secondary btn-sm" onclick="cropImageRight(this)" title="Crop Image Right">
                                     Right <i class="bi bi-arrow-bar-right"></i>
+                                </button>
+                                <button type="button" class="btn btn-outline-warning btn-sm" onclick="triggerReplaceImage(this)" title="Replace Image">
+                                    <i class="bi bi-arrow-repeat"></i> Replace
                                 </button>
                                 <button type="button" class="btn btn-outline-danger btn-sm" onclick="deleteCardImage(this)">
                                     <i class="bi bi-trash"></i>
@@ -1553,3 +1655,12 @@ function confirmFreeFormCrop() {
         showToast("An error occurred while cropping the image.", "error");
     });
 }
+
+window.CLU = window.CLU || {};
+window.CLU.enableFilenameEdit = enableFilenameEdit;
+window.CLU.cropImageFreeForm = cropImageFreeForm;
+window.CLU.cropImageLeft = cropImageLeft;
+window.CLU.cropImageCenter = cropImageCenter;
+window.CLU.cropImageRight = cropImageRight;
+window.CLU.deleteCardImage = deleteCardImage;
+window.CLU.triggerReplaceImage = triggerReplaceImage;

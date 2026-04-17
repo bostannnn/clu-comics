@@ -1,5 +1,7 @@
 """Tests for routes/files.py -- file operations endpoints."""
+import io
 import os
+import sys
 import pytest
 from unittest.mock import patch, MagicMock
 
@@ -574,3 +576,118 @@ class TestGetImageData:
         data = resp.get_json()
         assert data["success"] is True
         assert data["imageData"].startswith("data:image/jpeg")
+
+
+class TestReplaceImage:
+
+    @staticmethod
+    def _make_upload(color="red", image_format="PNG"):
+        from PIL import Image
+
+        buffer = io.BytesIO()
+        Image.new("RGB", (12, 8), color).save(buffer, format=image_format)
+        buffer.seek(0)
+        return buffer
+
+    def test_missing_target_file(self, client):
+        data = {
+            "replacement_image": (self._make_upload(), "replacement.png"),
+        }
+
+        resp = client.post("/replace-image", data=data, content_type="multipart/form-data")
+
+        assert resp.status_code == 400
+        assert resp.get_json()["success"] is False
+
+    def test_missing_replacement_image(self, client, tmp_path):
+        target = tmp_path / "page01.jpg"
+        target.write_bytes(b"not-an-image")
+
+        resp = client.post(
+            "/replace-image",
+            data={"target_file": str(target)},
+            content_type="multipart/form-data",
+        )
+
+        assert resp.status_code == 400
+        assert resp.get_json()["success"] is False
+
+    @patch("routes.files.is_critical_path", return_value=False)
+    @patch("routes.files.is_valid_library_path", return_value=True)
+    def test_target_not_found(self, mock_valid, mock_critical, client):
+        data = {
+            "target_file": "/nonexistent/page01.jpg",
+            "replacement_image": (self._make_upload(), "replacement.png"),
+        }
+
+        resp = client.post("/replace-image", data=data, content_type="multipart/form-data")
+
+        assert resp.status_code == 404
+        assert resp.get_json()["success"] is False
+
+    @patch("routes.files.is_critical_path", return_value=False)
+    @patch("routes.files.is_path_in_any_root", return_value=False)
+    @patch("routes.files.is_valid_library_path", return_value=False)
+    def test_access_denied_outside_allowed_roots(self, mock_valid, mock_any_root, mock_critical, client, tmp_path):
+        from PIL import Image
+
+        target = tmp_path / "page01.jpg"
+        Image.new("RGB", (10, 10), "blue").save(target)
+
+        data = {
+            "target_file": str(target),
+            "replacement_image": (self._make_upload(), "replacement.png"),
+        }
+
+        resp = client.post("/replace-image", data=data, content_type="multipart/form-data")
+
+        assert resp.status_code == 403
+        assert resp.get_json()["success"] is False
+
+    @patch("routes.files.is_critical_path", return_value=False)
+    @patch("routes.files.is_valid_library_path", return_value=True)
+    def test_invalid_replacement_extension(self, mock_valid, mock_critical, client, tmp_path):
+        from PIL import Image
+
+        target = tmp_path / "page01.jpg"
+        Image.new("RGB", (10, 10), "blue").save(target)
+
+        data = {
+            "target_file": str(target),
+            "replacement_image": (io.BytesIO(b"plain text"), "replacement.txt"),
+        }
+
+        resp = client.post("/replace-image", data=data, content_type="multipart/form-data")
+
+        assert resp.status_code == 400
+        assert "not allowed" in resp.get_json()["error"]
+
+    @patch("routes.files.is_critical_path", return_value=False)
+    @patch("routes.files.is_valid_library_path", return_value=True)
+    def test_replace_success(self, mock_valid, mock_critical, client, tmp_path):
+        from PIL import Image
+
+        target = tmp_path / "page01.jpg"
+        Image.new("RGB", (10, 10), "blue").save(target)
+
+        app_module = sys.modules["app"]
+        app_module.resize_upload.reset_mock()
+
+        data = {
+            "target_file": str(target),
+            "replacement_image": (self._make_upload(color="red"), "replacement.png"),
+        }
+
+        resp = client.post("/replace-image", data=data, content_type="multipart/form-data")
+
+        assert resp.status_code == 200
+        payload = resp.get_json()
+        assert payload["success"] is True
+        assert payload["path"] == str(target)
+        assert payload["imageData"].startswith("data:image/png;base64,")
+        app_module.resize_upload.assert_called_once_with(str(target), str(tmp_path))
+
+        with Image.open(target) as replaced:
+            assert replaced.size == (12, 8)
+            pixel = replaced.convert("RGB").getpixel((0, 0))
+            assert pixel[0] > pixel[2]

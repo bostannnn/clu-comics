@@ -20,6 +20,7 @@ import time
 import threading
 import zipfile
 from flask import Blueprint, request, jsonify, render_template_string, Response
+from PIL import Image
 from core.app_logging import app_logger
 from helpers.library import (
     is_critical_path,
@@ -36,6 +37,75 @@ from core.memory_utils import memory_context
 import core.app_state as app_state
 
 files_bp = Blueprint('files', __name__)
+SUPPORTED_IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'}
+
+
+def _flatten_to_rgb(image):
+    """Convert an image with transparency or a palette to an RGB image."""
+    if image.mode == 'P':
+        image = image.convert('RGBA')
+
+    if image.mode in ('RGBA', 'LA'):
+        background = Image.new('RGB', image.size, (255, 255, 255))
+        alpha = image.getchannel('A') if 'A' in image.getbands() else None
+        background.paste(image, mask=alpha)
+        return background
+
+    if image.mode not in ('RGB', 'L'):
+        return image.convert('RGB')
+
+    return image
+
+
+def _save_uploaded_image_to_target(uploaded_file, target_file):
+    """Decode an uploaded image and overwrite the target path atomically."""
+    from PIL import Image, ImageOps, UnidentifiedImageError
+
+    target_ext = os.path.splitext(target_file)[1].lower()
+    temp_path = f"{target_file}.tmp"
+    save_format_map = {
+        '.jpg': 'JPEG',
+        '.jpeg': 'JPEG',
+        '.png': 'PNG',
+        '.gif': 'GIF',
+        '.webp': 'WEBP',
+        '.bmp': 'BMP',
+    }
+    save_kwargs = {}
+
+    try:
+        uploaded_file.stream.seek(0)
+        with Image.open(uploaded_file.stream) as image:
+            image = ImageOps.exif_transpose(image)
+
+            if target_ext in ('.jpg', '.jpeg', '.bmp'):
+                image = _flatten_to_rgb(image)
+            elif target_ext == '.gif':
+                if getattr(image, 'is_animated', False):
+                    image.seek(0)
+                if image.mode not in ('P', 'L'):
+                    image = image.convert('P')
+            elif target_ext == '.png' and image.mode == 'P' and 'transparency' in image.info:
+                image = image.convert('RGBA')
+
+            if target_ext in ('.jpg', '.jpeg', '.webp'):
+                save_kwargs['quality'] = 95
+
+            image.save(temp_path, format=save_format_map[target_ext], **save_kwargs)
+    except UnidentifiedImageError as exc:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise ValueError('Uploaded file is not a valid image') from exc
+    except OSError as exc:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise ValueError(f'Failed to decode uploaded image: {exc}') from exc
+    except Exception:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise
+
+    os.replace(temp_path, target_file)
 
 
 # =============================================================================
@@ -279,6 +349,67 @@ def upload_to_folder():
     except Exception as e:
         app_logger.error(f"Error in upload_to_folder: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+@files_bp.route('/replace-image', methods=['POST'])
+def replace_image():
+    """Replace an existing image file in place and return refreshed preview data."""
+    from app import resize_upload
+
+    try:
+        target_file = request.form.get('target_file')
+        replacement_image = request.files.get('replacement_image')
+
+        if not target_file:
+            return jsonify({'success': False, 'error': 'Missing target file path'}), 400
+
+        if not replacement_image or replacement_image.filename == '':
+            return jsonify({'success': False, 'error': 'No replacement image provided'}), 400
+
+        if is_critical_path(target_file):
+            app_logger.error(f"Attempted to replace image in critical path: {target_file}")
+            return jsonify({'success': False, 'error': get_critical_path_error_message(target_file, 'replace image in')}), 403
+
+        allowed_target_roots = [
+            config.get("SETTINGS", "WATCH", fallback="/temp"),
+            config.get("SETTINGS", "TARGET", fallback="/processed"),
+        ]
+        if not (is_valid_library_path(target_file) or is_path_in_any_root(target_file, allowed_target_roots)):
+            app_logger.error(f"Attempted to replace image outside allowed roots: {target_file}")
+            return jsonify({'success': False, 'error': 'Access denied'}), 403
+
+        if not os.path.exists(target_file):
+            return jsonify({'success': False, 'error': 'Target file not found'}), 404
+
+        if not os.path.isfile(target_file):
+            return jsonify({'success': False, 'error': 'Target path is not a file'}), 400
+
+        target_ext = os.path.splitext(target_file)[1].lower()
+        upload_name = os.path.basename(replacement_image.filename)
+        upload_ext = os.path.splitext(upload_name)[1].lower()
+
+        if target_ext not in SUPPORTED_IMAGE_EXTENSIONS:
+            return jsonify({'success': False, 'error': f'Target file type not supported ({target_ext})'}), 400
+
+        if upload_ext not in SUPPORTED_IMAGE_EXTENSIONS:
+            return jsonify({'success': False, 'error': f'Replacement file type not allowed ({upload_ext})'}), 400
+
+        _save_uploaded_image_to_target(replacement_image, target_file)
+
+        base_name = os.path.splitext(os.path.basename(target_file))[0].lower()
+        if base_name not in ('header', 'folder'):
+            resize_upload(target_file, os.path.dirname(target_file))
+
+        return jsonify({
+            'success': True,
+            'path': target_file,
+            'imageData': get_image_data_url(target_file),
+        })
+    except ValueError as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    except Exception as e:
+        app_logger.error(f"Error replacing image {request.form.get('target_file')}: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 # =============================================================================

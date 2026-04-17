@@ -20,6 +20,7 @@
   'use strict';
 
   var CLU = window.CLU = window.CLU || {};
+  var REPLACEABLE_IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'];
 
   function _getContract() { return window._cluCbzEdit || {}; }
 
@@ -63,6 +64,7 @@
                   '<button type="button" class="btn btn-outline-primary btn-sm" onclick="CLU.cropImageLeft(this)" title="Crop Left"><i class="bi bi-arrow-bar-left"></i> Left</button>' +
                   '<button type="button" class="btn btn-outline-primary" onclick="CLU.cropImageCenter(this)" title="Crop Center">Middle</button>' +
                   '<button type="button" class="btn btn-outline-primary btn-sm" onclick="CLU.cropImageRight(this)" title="Crop Right">Right <i class="bi bi-arrow-bar-right"></i></button>' +
+                  '<button type="button" class="btn btn-outline-warning btn-sm" onclick="CLU.triggerReplaceImage(this)" title="Replace Image"><i class="bi bi-arrow-repeat"></i> Replace</button>' +
                   '<button type="button" class="btn btn-outline-danger btn-sm" onclick="CLU.deleteCardImage(this)"><i class="bi bi-trash"></i></button>' +
                 '</div>' +
               '</div>' +
@@ -227,6 +229,69 @@
     if (input.previousElementSibling) input.previousElementSibling.classList.remove('d-none');
   }
 
+  function _getReplaceInput() {
+    var input = document.getElementById('editInlineReplaceInput');
+    if (input) return input;
+
+    input = document.createElement('input');
+    input.type = 'file';
+    input.id = 'editInlineReplaceInput';
+    input.accept = REPLACEABLE_IMAGE_EXTENSIONS.join(',');
+    input.className = 'd-none';
+    document.body.appendChild(input);
+    return input;
+  }
+
+  // ── replace image ───────────────────────────────────────────────────────
+
+  CLU.triggerReplaceImage = function (buttonElement) {
+    var input = _getReplaceInput();
+    input.value = '';
+    input.onchange = function () {
+      var file = input.files && input.files[0];
+      if (file) CLU.replaceCardImage(buttonElement, file);
+    };
+    input.click();
+  };
+
+  CLU.replaceCardImage = function (buttonElement, file) {
+    var col = buttonElement.closest('.col');
+    if (!col) { console.error('Unable to locate column container.'); return; }
+
+    var span = col.querySelector('.editable-filename');
+    if (!span) { console.error('No file reference found.'); return; }
+
+    var fullPath = _resolveFullPath(span);
+    if (!fullPath) return;
+
+    var fd = new FormData();
+    fd.append('target_file', fullPath);
+    fd.append('replacement_image', file, file.name);
+
+    CLU.showToast('Replacing', 'Replacing image...', 'info');
+
+    fetch('/replace-image', { method: 'POST', body: fd })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (!data.success) {
+          CLU.showError('Replace failed: ' + (data.error || 'Unknown error'));
+          return;
+        }
+
+        var img = col.querySelector('img');
+        if (img && data.imageData) {
+          img.src = data.imageData;
+          img.alt = span.textContent.trim();
+        }
+
+        CLU.showSuccess('Image replaced');
+      })
+      .catch(function (err) {
+        console.error('Replace error:', err);
+        CLU.showError('Replace failed: ' + err.message);
+      });
+  };
+
   // ── setupEditModalDropZone ──────────────────────────────────────────────
 
   CLU.setupEditModalDropZone = function () {
@@ -257,7 +322,7 @@
     var folderName = folder ? folder.value : '';
     if (!folderName) { CLU.showError('Cannot upload: No target folder'); return; }
 
-    var allowed = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'];
+    var allowed = REPLACEABLE_IMAGE_EXTENSIONS;
     var valid = Array.from(files).filter(function (f) {
       return allowed.indexOf('.' + f.name.split('.').pop().toLowerCase()) !== -1;
     });
