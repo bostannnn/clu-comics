@@ -354,8 +354,6 @@ def upload_to_folder():
 @files_bp.route('/replace-image', methods=['POST'])
 def replace_image():
     """Replace an existing image file in place and return refreshed preview data."""
-    from app import resize_upload
-
     try:
         target_file = request.form.get('target_file')
         replacement_image = request.files.get('replacement_image')
@@ -395,10 +393,6 @@ def replace_image():
             return jsonify({'success': False, 'error': f'Replacement file type not allowed ({upload_ext})'}), 400
 
         _save_uploaded_image_to_target(replacement_image, target_file)
-
-        base_name = os.path.splitext(os.path.basename(target_file))[0].lower()
-        if base_name not in ('header', 'folder'):
-            resize_upload(target_file, os.path.dirname(target_file))
 
         return jsonify({
             'success': True,

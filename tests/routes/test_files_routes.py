@@ -670,9 +670,6 @@ class TestReplaceImage:
         target = tmp_path / "page01.jpg"
         Image.new("RGB", (10, 10), "blue").save(target)
 
-        app_module = sys.modules["app"]
-        app_module.resize_upload.reset_mock()
-
         data = {
             "target_file": str(target),
             "replacement_image": (self._make_upload(color="red"), "replacement.png"),
@@ -685,7 +682,6 @@ class TestReplaceImage:
         assert payload["success"] is True
         assert payload["path"] == str(target)
         assert payload["imageData"].startswith("data:image/png;base64,")
-        app_module.resize_upload.assert_called_once_with(str(target), str(tmp_path))
 
         with Image.open(target) as replaced:
             assert replaced.size == (12, 8)
