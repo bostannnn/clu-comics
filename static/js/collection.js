@@ -1394,6 +1394,9 @@ function renderGrid(items) {
                         onForceMetron: hasCollectionProvider('metron')
                             ? function () { fetchDirMetadataCollection(item.path, item.name, 'metron'); }
                             : null,
+                        onForceMangaUpdates: hasCollectionProvider('mangaupdates')
+                            ? function () { fetchDirMetadataCollection(item.path, item.name, 'mangaupdates'); }
+                            : null,
                         onScanFiles: function () { scanDirectory(item.path, item.name); },
                         onMissingFileCheck: function () { checkMissingFiles(item.path, item.name); },
                         onUpdateXml: !isRootLevel
@@ -1532,6 +1535,9 @@ function renderGrid(items) {
                             : null,
                         onForceMetron: hasCollectionProvider('metron')
                             ? function () { fetchMetadataCollection(item.path, item.name, 'metron'); }
+                            : null,
+                        onForceMangaUpdates: hasCollectionProvider('mangaupdates')
+                            ? function () { fetchMetadataCollection(item.path, item.name, 'mangaupdates'); }
                             : null,
                         readDateLabel: isRead ? 'Update Read Date' : 'Set Read Date',
                         onSetReadDate: function () { openSetReadDateModal(item.path, isRead); },
@@ -2766,6 +2772,8 @@ function fetchDirMetadataCollection(dirPath, dirName, forceProvider) {
         CLU.forceFetchDirectoryMetadataViaComicVine(dirPath, dirName);
     } else if (forceProvider === 'metron') {
         CLU.forceFetchDirectoryMetadataViaMetron(dirPath, dirName);
+    } else if (forceProvider === 'mangaupdates') {
+        CLU.forceFetchDirectoryMetadataViaMangaUpdates(dirPath, dirName);
     } else {
         CLU.fetchDirectoryMetadata(dirPath, dirName);
     }

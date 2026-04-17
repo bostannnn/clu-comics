@@ -383,6 +383,94 @@ def _extract_batch_series_name(directory, comic_files):
     return series_name
 
 
+def _normalize_manga_series_name(series_name):
+    """Normalize manga folder/file derived names before provider search."""
+    normalized = re.sub(r'\s*\(\d{4}\).*$', '', series_name or '')
+    normalized = re.sub(r'\s*v\d+.*$', '', normalized)
+    return normalized.strip()
+
+
+def _build_manga_selection_data(provider_type, series_name, issue_number, year, results):
+    """Build a common manual-selection payload for manga providers."""
+    possible_matches = []
+    for result in results:
+        possible_matches.append({
+            "id": result.id,
+            "name": result.title,
+            "start_year": result.year,
+            "publisher_name": result.publisher or "",
+            "image_url": result.cover_url,
+            "description": result.description or "",
+            "count_of_issues": result.issue_count,
+            "alternate_title": getattr(result, 'alternate_title', None),
+        })
+
+    return {
+        "requires_selection": True,
+        "provider": provider_type,
+        "possible_matches": possible_matches,
+        "parsed_filename": {
+            "series_name": series_name,
+            "issue_number": issue_number,
+            "year": year,
+        },
+    }
+
+
+def _search_manga_provider_candidates(provider_type, series_name, year):
+    """Return manga provider search results plus a normalized search term."""
+    normalized_series = _normalize_manga_series_name(series_name)
+    if not normalized_series:
+        return None, []
+
+    if provider_type == 'anilist':
+        from models.providers.anilist_provider import AniListProvider
+        provider = AniListProvider()
+    elif provider_type == 'mangadex':
+        from models.providers.mangadex_provider import MangaDexProvider
+        provider = MangaDexProvider()
+    elif provider_type == 'mangaupdates':
+        from models.providers.mangaupdates_provider import MangaUpdatesProvider
+        provider = MangaUpdatesProvider()
+    else:
+        raise ValueError(f"Unsupported manga provider: {provider_type}")
+
+    return normalized_series, provider.search_series(normalized_series, year)
+
+
+def _write_selected_manga_cvinfo(cvinfo_path, provider_type, series_id, title="", alternate_title=""):
+    """Overwrite cached manga provider lines in cvinfo with the selected series."""
+    provider_type = (provider_type or '').strip().lower()
+    if provider_type not in {'mangadex', 'mangaupdates', 'anilist'}:
+        raise ValueError(f"Unsupported manga provider: {provider_type}")
+
+    keep_lines = []
+    provider_prefix = f"{provider_type}_"
+    if os.path.exists(cvinfo_path):
+        with open(cvinfo_path, 'r', encoding='utf-8') as f:
+            existing_lines = f.read().splitlines()
+        for raw_line in existing_lines:
+            line = raw_line.strip()
+            if not line:
+                continue
+            if any(line.startswith(f"{key}:") for key in comicvine.MANGA_CVINFO_KEYS if key.startswith(provider_prefix)):
+                continue
+            keep_lines.append(line)
+
+    provider_lines = [f"{provider_type}_id: {series_id}"]
+    if title:
+        provider_lines.append(f"{provider_type}_title: {title}")
+    if alternate_title:
+        provider_lines.append(f"{provider_type}_alt_title: {alternate_title}")
+
+    with open(cvinfo_path, 'w', encoding='utf-8') as f:
+        lines = keep_lines + provider_lines
+        if lines:
+            f.write("\n".join(lines) + "\n")
+
+    return True
+
+
 def _write_selected_comicvine_cvinfo(cvinfo_path, api_key, volume_id):
     """Overwrite folder cvinfo with the selected ComicVine volume and cached details."""
     url = f"https://comicvine.gamespot.com/volume/4050-{volume_id}/"
@@ -1457,6 +1545,8 @@ def batch_metadata():
         directory = data.get('directory')
         selected_volume_id = data.get('volume_id')  # Optional: pre-selected ComicVine volume ID
         selected_series_id = data.get('series_id')  # Optional: pre-selected Metron series ID
+        selected_title = (data.get('selected_title') or '').strip()
+        selected_alternate_title = (data.get('selected_alternate_title') or '').strip()
         library_id = data.get('library_id')  # Optional: library ID for provider lookup
         force_manual_selection = bool(data.get('force_manual_selection'))
         force_provider = (data.get('force_provider') or '').strip().lower()
@@ -1583,7 +1673,7 @@ def batch_metadata():
                         break
 
         if force_manual_selection:
-            if force_provider not in {'comicvine', 'metron'}:
+            if force_provider not in {'comicvine', 'metron', 'mangaupdates'}:
                 return jsonify({"error": "Force Fetch Metadata requires a valid provider"}), 400
 
             ensure_batch_operation(f"Preparing forced {force_provider} lookup...")
@@ -1686,6 +1776,55 @@ def batch_metadata():
                     cv_volume_id = series_details.get('cv_id')
                     cvinfo_start_year = series_details.get('year_began')
                     cvinfo_publisher_name = series_details.get('publisher_name')
+            elif force_provider == 'mangaupdates':
+                if not mangaupdates_available:
+                    complete_batch_operation(error=True)
+                    return jsonify({"error": "MangaUpdates is not enabled for this library"}), 400
+
+                from models.providers.mangaupdates_provider import MangaUpdatesProvider
+                mu = MangaUpdatesProvider()
+
+                if not selected_series_id:
+                    app_state.update_operation(op_id, detail="Searching MangaUpdates series...")
+                    normalized_series, results = _search_manga_provider_candidates(
+                        'mangaupdates',
+                        series_name,
+                        extracted_year,
+                    )
+                    if app_state.is_operation_cancelled(op_id):
+                        return cancelled_response()
+                    if not results:
+                        complete_batch_operation(error=True)
+                        return jsonify({"error": f"No MangaUpdates series found for '{normalized_series or series_name}'"}), 404
+
+                    selection_data = _build_manga_selection_data(
+                        'mangaupdates',
+                        series_name,
+                        str(len(comic_files)),
+                        extracted_year,
+                        results,
+                    )
+                    selection_data["op_id"] = op_id
+                    selection_data["directory"] = directory
+                    complete_batch_operation()
+                    return jsonify(selection_data)
+
+                if not selected_title:
+                    selected_series = mu.get_series(str(selected_series_id))
+                    if selected_series:
+                        selected_title = selected_series.title or selected_title
+
+                app_state.update_operation(op_id, detail="Writing selected MangaUpdates series...")
+                _write_selected_manga_cvinfo(
+                    cvinfo_path,
+                    'mangaupdates',
+                    str(selected_series_id),
+                    selected_title,
+                    selected_alternate_title,
+                )
+                if app_state.is_operation_cancelled(op_id):
+                    return cancelled_response()
+                cvinfo_created = True
         elif not os.path.exists(cvinfo_path):
             app_logger.info(f"No cvinfo found, searching for series: '{series_name}' (year: {extracted_year})")
 
@@ -1820,6 +1959,8 @@ def batch_metadata():
 
         # Store year for GCD lookups
         gcd_year = extracted_year or cvinfo_start_year
+        cached_manga_fields = comicvine.read_cvinfo_manga_fields(cvinfo_path)
+        has_manga_series_cache = any(cached_manga_fields.get(key) for key in comicvine.MANGA_CVINFO_KEYS)
 
         def generate():
             """Generator for SSE streaming."""
@@ -1899,7 +2040,11 @@ def batch_metadata():
 
                     lookup = _extract_metadata_lookup(
                         filename,
-                        allow_volume_as_issue=_is_manga_publisher(cvinfo_publisher_name),
+                        allow_volume_as_issue=(
+                            _is_manga_publisher(cvinfo_publisher_name)
+                            or has_manga_series_cache
+                            or force_provider in manga_providers_set
+                        ),
                     )
                     issue_number = lookup['issue_number']
                     issue_year = lookup['year']
@@ -3707,6 +3852,28 @@ def _try_comicvine_single_selection(series_name, year):
         return None
 
 
+def _try_mangaupdates_single_selection(series_name, issue_number, year):
+    """Return MangaUpdates candidates for forced single-file manual selection."""
+    try:
+        normalized_series, results = _search_manga_provider_candidates(
+            'mangaupdates',
+            series_name,
+            year,
+        )
+        if not results:
+            return None
+        return _build_manga_selection_data(
+            'mangaupdates',
+            series_name,
+            issue_number,
+            year,
+            results,
+        )
+    except Exception as e:
+        app_logger.warning(f"[search-metadata] MangaUpdates candidate lookup failed: {e}")
+        return None
+
+
 def _try_gcd_single(series_name, issue_number, year):
     """Try GCD provider for a single file.
     Returns (metadata_dict, None, None) on success,
@@ -3976,10 +4143,10 @@ def search_metadata():
             series_name = search_term_override.strip()
             app_logger.info(f"[search-metadata] Using manual search term override: '{series_name}'")
 
-        if force_provider and force_provider not in {'comicvine', 'metron'}:
+        if force_provider and force_provider not in {'comicvine', 'metron', 'mangaupdates'}:
             return fail_single_metadata(
                 400,
-                {"success": False, "error": "Force metadata requires ComicVine or Metron"},
+                {"success": False, "error": "Force metadata requires ComicVine, Metron, or MangaUpdates"},
                 current=2,
                 detail="Unsupported force provider",
             )
@@ -4196,22 +4363,20 @@ def search_metadata():
                 )
             provider_order = [force_provider]
 
-        if force_manual_selection and force_provider in {'comicvine', 'metron'}:
+        if force_manual_selection and force_provider in {'comicvine', 'metron', 'mangaupdates'}:
             update_single_metadata_progress(2, f"Preparing forced {force_provider} selection...")
 
             if force_provider == 'comicvine':
                 selection_data = _try_comicvine_single_selection(series_name, year)
                 provider_error = f"No ComicVine volumes found for '{series_name}'"
-            else:
+            elif force_provider == 'metron':
                 selection_data = _try_metron_single_selection(series_name, year)
                 provider_error = f"No Metron series found for '{series_name}'"
+            else:
+                selection_data = _try_mangaupdates_single_selection(series_name, issue_number, year)
+                provider_error = f"No MangaUpdates series found for '{series_name}'"
 
             if selection_data:
-                selection_data["parsed_filename"] = {
-                    "series_name": series_name,
-                    "issue_number": issue_number,
-                    "year": year
-                }
                 update_single_metadata_progress(4, f"{force_provider} requires selection")
                 app_logger.info(f"[search-metadata] forced {force_provider} selection required for {file_name}")
                 return jsonify(selection_data)
@@ -4295,24 +4460,13 @@ def search_metadata():
 
             elif provider_type in ('anilist', 'mangadex', 'mangaupdates'):
                 # Manga providers: clean series name and search
-                manga_series_name = re.sub(r'\s*\(\d{4}\).*$', '', series_name)
-                manga_series_name = re.sub(r'\s*v\d+.*$', '', manga_series_name).strip()
+                manga_series_name = _normalize_manga_series_name(series_name)
                 # Use volume number if available (vNN pattern)
                 vol_match = re.search(r'\bv(\d+)', file_name, re.IGNORECASE)
                 manga_issue = vol_match.group(1).lstrip('0') or '1' if vol_match else issue_number
 
                 try:
-                    if provider_type == 'anilist':
-                        from models.providers.anilist_provider import AniListProvider
-                        prov = AniListProvider()
-                    elif provider_type == 'mangadex':
-                        from models.providers.mangadex_provider import MangaDexProvider
-                        prov = MangaDexProvider()
-                    else:
-                        from models.providers.mangaupdates_provider import MangaUpdatesProvider
-                        prov = MangaUpdatesProvider()
-
-                    results = prov.search_series(manga_series_name, year)
+                    _, results = _search_manga_provider_candidates(provider_type, series_name, year)
                     if results:
                         # Check for confident match: exact (case-insensitive) title match
                         search_lower = manga_series_name.lower().strip()
@@ -4326,33 +4480,28 @@ def search_metadata():
                             match_series = confident_match
                         elif len(results) > 1:
                             # Multiple results, no exact match — prompt user
-                            possible_matches = []
-                            for r in results:
-                                possible_matches.append({
-                                    "id": r.id,
-                                    "name": r.title,
-                                    "start_year": r.year,
-                                    "publisher_name": r.publisher or "",
-                                    "image_url": r.cover_url,
-                                    "description": r.description or "",
-                                    "count_of_issues": r.issue_count,
-                                    "alternate_title": getattr(r, 'alternate_title', None),
-                                })
-                            selection_data = {
-                                "requires_selection": True,
-                                "provider": provider_type,
-                                "possible_matches": possible_matches,
-                                "parsed_filename": {
-                                    "series_name": series_name,
-                                    "issue_number": issue_number,
-                                    "year": year
-                                }
-                            }
+                            selection_data = _build_manga_selection_data(
+                                provider_type,
+                                series_name,
+                                issue_number,
+                                year,
+                                results,
+                            )
                             update_single_metadata_progress(4, f"{provider_type} requires selection")
                             app_logger.info(f"[search-metadata] {provider_type} requires selection for {file_name}")
                             return jsonify(selection_data)
                         else:
                             match_series = results[0]
+
+                        if provider_type == 'anilist':
+                            from models.providers.anilist_provider import AniListProvider
+                            prov = AniListProvider()
+                        elif provider_type == 'mangadex':
+                            from models.providers.mangadex_provider import MangaDexProvider
+                            prov = MangaDexProvider()
+                        else:
+                            from models.providers.mangaupdates_provider import MangaUpdatesProvider
+                            prov = MangaUpdatesProvider()
 
                         metadata = prov.get_issue_metadata(match_series.id, manga_issue,
                             preferred_title=match_series.title, alternate_title=match_series.alternate_title)

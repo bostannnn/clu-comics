@@ -927,6 +927,49 @@ class TestSearchMetadataParsedFilename:
         mock_search_candidates.assert_called_once()
         mock_find_cvinfo.assert_not_called()
 
+    @patch("routes.metadata._search_manga_provider_candidates")
+    @patch("models.comicvine.find_cvinfo_in_folder")
+    @patch("core.database.get_library_providers", return_value=[
+        {"provider_type": "mangaupdates", "enabled": True},
+    ])
+    @patch("core.database.set_has_comicinfo")
+    def test_force_provider_requires_manual_selection_for_single_mangaupdates(
+        self,
+        mock_set,
+        mock_providers,
+        mock_find_cvinfo,
+        mock_search_candidates,
+        client,
+    ):
+        match = MagicMock(
+            id="12345",
+            title="Demon Love Spell",
+            year=2008,
+            publisher="Shogakukan",
+            issue_count=None,
+            cover_url="https://example.com/cover.jpg",
+            description="A romance.",
+            alternate_title="Ayakashi Koi Emaki",
+        )
+        mock_search_candidates.return_value = ("Demon Love Spell", [match])
+
+        resp = client.post('/api/search-metadata', json={
+            'file_path': '/data/Demon Love Spell v01.cbz',
+            'file_name': 'Demon Love Spell v01.cbz',
+            'library_id': 1,
+            'force_provider': 'mangaupdates',
+            'force_manual_selection': True,
+        })
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["requires_selection"] is True
+        assert data["provider"] == "mangaupdates"
+        assert data["possible_matches"][0]["id"] == "12345"
+        assert data["possible_matches"][0]["alternate_title"] == "Ayakashi Koi Emaki"
+        mock_search_candidates.assert_called_once_with("mangaupdates", "Demon Love Spell", None)
+        mock_find_cvinfo.assert_not_called()
+
     @patch("models.comicvine.find_cvinfo_in_folder", return_value=None)
     @patch("core.database.get_library_providers", return_value=[
         {"provider_type": "metron", "enabled": True},
@@ -1393,6 +1436,45 @@ class TestComicVineVolumeYearHandling:
 
     @patch("core.database.set_has_comicinfo")
     @patch("routes.metadata.add_comicinfo_to_cbz")
+    @patch("models.providers.mangaupdates_provider.MangaUpdatesProvider.get_issue_metadata", return_value={
+        "Series": "Demon Love Spell",
+        "Number": "v1",
+        "Year": 2008,
+        "Notes": "Metadata from MangaUpdates.",
+    })
+    def test_search_metadata_selection_supports_mangaupdates_series_choice(
+        self,
+        mock_get_issue_metadata,
+        mock_add_xml,
+        mock_set_has_comicinfo,
+        client,
+    ):
+        resp = client.post("/api/search-metadata", json={
+            "file_path": "/data/Demon Love Spell v01.cbz",
+            "file_name": "Demon Love Spell v01.cbz",
+            "selected_match": {
+                "provider": "mangaupdates",
+                "series_id": "12345",
+                "preferred_title": "Demon Love Spell",
+                "alternate_title": "Ayakashi Koi Emaki",
+            },
+        })
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["success"] is True
+        assert data["source"] == "mangaupdates"
+        mock_get_issue_metadata.assert_called_once_with(
+            "12345",
+            "1",
+            preferred_title="Demon Love Spell",
+            alternate_title="Ayakashi Koi Emaki",
+        )
+        mock_add_xml.assert_called_once()
+        assert mock_add_xml.call_args.args[0] == "/data/Demon Love Spell v01.cbz"
+
+    @patch("core.database.set_has_comicinfo")
+    @patch("routes.metadata.add_comicinfo_to_cbz")
     @patch("routes.metadata.comicvine.auto_move_file", return_value=None)
     @patch("routes.metadata.comicvine.get_volume_details", return_value={"start_year": 2017, "publisher_name": "Fantagraphics"})
     @patch("routes.metadata.comicvine.get_issue_by_number")
@@ -1723,6 +1805,110 @@ class TestBatchForceMetadata:
         assert data["possible_matches"][0]["id"] == 501
         mock_search_candidates.assert_called_once()
         mock_parse_cvinfo.assert_not_called()
+
+    @patch("routes.metadata._search_manga_provider_candidates")
+    @patch("routes.metadata.is_valid_library_path", return_value=True)
+    @patch("core.database.get_library_providers", return_value=[
+        {"provider_type": "mangaupdates", "enabled": True, "priority": 0},
+    ])
+    def test_force_batch_mangaupdates_requires_manual_selection(
+        self,
+        mock_providers,
+        mock_valid_library_path,
+        mock_search_candidates,
+        client,
+        tmp_path,
+    ):
+        batch_dir = tmp_path / "data" / "Demon Love Spell"
+        batch_dir.mkdir(parents=True)
+        _make_cbz(str(batch_dir / "Demon Love Spell v01.cbz"), with_comicinfo=False)
+
+        match = MagicMock(
+            id="12345",
+            title="Demon Love Spell",
+            year=2008,
+            publisher="Shogakukan",
+            issue_count=None,
+            cover_url="https://example.com/cover.jpg",
+            description="A romance.",
+            alternate_title="Ayakashi Koi Emaki",
+        )
+        mock_search_candidates.return_value = ("Demon Love Spell", [match])
+
+        resp = client.post("/api/batch-metadata", json={
+            "directory": str(batch_dir),
+            "library_id": 1,
+            "force_manual_selection": True,
+            "force_provider": "mangaupdates",
+            "overwrite_existing_metadata": True,
+        })
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["requires_selection"] is True
+        assert data["provider"] == "mangaupdates"
+        assert data["possible_matches"][0]["id"] == "12345"
+        mock_search_candidates.assert_called_once_with("mangaupdates", "Demon Love Spell", None)
+
+    @patch("routes.metadata.time.sleep", return_value=None)
+    @patch("core.database.update_file_index_from_comicinfo")
+    @patch("cbz_ops.rename.rename_comic_from_metadata", side_effect=lambda file_path, metadata: (file_path, False))
+    @patch("routes.metadata.add_comicinfo_to_cbz")
+    @patch("models.providers.mangaupdates_provider.MangaUpdatesProvider.get_issue_metadata", return_value={
+        "Series": "Demon Love Spell",
+        "Number": "v1",
+        "Year": 2008,
+        "Notes": "Metadata from MangaUpdates.",
+    })
+    @patch("routes.metadata.is_valid_library_path", return_value=True)
+    @patch("core.database.get_library_providers", return_value=[
+        {"provider_type": "mangaupdates", "enabled": True, "priority": 0},
+    ])
+    def test_force_batch_mangaupdates_writes_selected_series_to_cvinfo(
+        self,
+        mock_providers,
+        mock_valid_library_path,
+        mock_get_issue_metadata,
+        mock_add_xml,
+        mock_rename,
+        mock_update_index,
+        mock_sleep,
+        client,
+        tmp_path,
+    ):
+        batch_dir = tmp_path / "data" / "Demon Love Spell"
+        batch_dir.mkdir(parents=True)
+        cvinfo_path = batch_dir / "cvinfo"
+        cvinfo_path.write_text("publisher_name: Existing Publisher\n", encoding="utf-8")
+        _make_cbz(str(batch_dir / "Demon Love Spell v01.cbz"), with_comicinfo=False)
+
+        resp = client.post("/api/batch-metadata", json={
+            "directory": str(batch_dir),
+            "library_id": 1,
+            "series_id": "12345",
+            "selected_title": "Demon Love Spell",
+            "selected_alternate_title": "Ayakashi Koi Emaki",
+            "force_manual_selection": True,
+            "force_provider": "mangaupdates",
+            "overwrite_existing_metadata": True,
+        })
+
+        assert resp.status_code == 200
+        body = resp.get_data(as_text=True)
+        assert '"type": "complete"' in body
+        assert mock_add_xml.called is True
+        mock_get_issue_metadata.assert_called_once_with(
+            "12345",
+            "1",
+            preferred_title="Demon Love Spell",
+            alternate_title="Ayakashi Koi Emaki",
+        )
+
+        cvinfo_text = cvinfo_path.read_text(encoding="utf-8")
+        assert "publisher_name: Existing Publisher" in cvinfo_text
+        assert "mangaupdates_id: 12345" in cvinfo_text
+        assert "mangaupdates_title: Demon Love Spell" in cvinfo_text
+        assert "mangaupdates_alt_title: Ayakashi Koi Emaki" in cvinfo_text
 
     @patch("routes.metadata.time.sleep", return_value=None)
     @patch("core.database.update_file_index_from_comicinfo")

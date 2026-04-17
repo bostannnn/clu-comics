@@ -850,7 +850,9 @@
 
     var modalTitle = document.getElementById('comicVineVolumeModalLabel');
     if (modalTitle) {
-      var providerLabel = data.provider === 'metron' ? 'Metron' : 'ComicVine';
+      var providerLabel = data.provider === 'metron'
+        ? 'Metron'
+        : (data.provider === 'mangaupdates' ? 'MangaUpdates' : 'ComicVine');
       modalTitle.textContent = 'Select Correct Series (' + providerLabel + ') - ' + data.possible_matches.length + ' result(s)';
     }
 
@@ -870,7 +872,9 @@
 
       CLU.fetchDirectoryMetadataWithSelection(dirPath, dirName, {
         provider: data.provider || 'comicvine',
-        id: match.id
+        id: match.id,
+        title: match.name || '',
+        alternate_title: match.alternate_title || ''
       }, data._batchOptions || null);
     };
 
@@ -1112,6 +1116,11 @@
     if (selection && selection.provider === 'metron' && selection.id !== null && typeof selection.id !== 'undefined') {
       requestBody.series_id = selection.id;
     }
+    if (selection && selection.provider === 'mangaupdates' && selection.id !== null && typeof selection.id !== 'undefined') {
+      requestBody.series_id = selection.id;
+      requestBody.selected_title = selection.title || '';
+      requestBody.selected_alternate_title = selection.alternate_title || '';
+    }
     if (libraryId) {
       requestBody.library_id = libraryId;
     }
@@ -1216,6 +1225,14 @@
     _requestBatchMetadata(dirPath, dirName, {
       forceManualSelection: true,
       forceProvider: 'metron',
+      overwriteExistingMetadata: true
+    }, null);
+  };
+
+  CLU.forceFetchDirectoryMetadataViaMangaUpdates = function (dirPath, dirName) {
+    _requestBatchMetadata(dirPath, dirName, {
+      forceManualSelection: true,
+      forceProvider: 'mangaupdates',
       overwriteExistingMetadata: true
     }, null);
   };

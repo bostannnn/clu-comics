@@ -406,6 +406,8 @@ function fetchDirectoryMetadataForPanel(dirPath, dirName, panel, forceProvider) 
     CLU.forceFetchDirectoryMetadataViaComicVine(dirPath, dirName);
   } else if (forceProvider === 'metron') {
     CLU.forceFetchDirectoryMetadataViaMetron(dirPath, dirName);
+  } else if (forceProvider === 'mangaupdates') {
+    CLU.forceFetchDirectoryMetadataViaMangaUpdates(dirPath, dirName);
   } else {
     CLU.fetchDirectoryMetadata(dirPath, dirName);
   }
@@ -417,7 +419,7 @@ function getForceMetadataProvidersForPanel(panel) {
   if (libraryId) {
     return providers
       .map(p => p.provider_type)
-      .filter(type => type === 'comicvine' || type === 'metron');
+      .filter(type => type === 'comicvine' || type === 'metron' || type === 'mangaupdates');
   }
 
   const fallback = [];
@@ -431,7 +433,9 @@ function appendForceMetadataMenuItems(dropdownMenu, fullPath, dirName, panel) {
   forceProviders.forEach((providerType) => {
     const item = document.createElement("li");
     const link = document.createElement("a");
-    const providerLabel = providerType === 'metron' ? 'Metron' : 'ComicVine';
+    const providerLabel = providerType === 'metron'
+      ? 'Metron'
+      : (providerType === 'mangaupdates' ? 'MangaUpdates' : 'ComicVine');
     link.className = "dropdown-item";
     link.href = "#";
     link.innerHTML = '<i class="bi bi-cloud-check me-2"></i>Force Fetch via ' + providerLabel;
@@ -823,6 +827,9 @@ function createListItem(itemName, fullPath, type, panel, isDraggable) {
           onForceMetron: hasProvider(panel, 'metron')
             ? function () { fetchDirectoryMetadataForPanel(fullPath, fileData.name, panel, 'metron'); }
             : null,
+          onForceMangaUpdates: hasProvider(panel, 'mangaupdates')
+            ? function () { fetchDirectoryMetadataForPanel(fullPath, fileData.name, panel, 'mangaupdates'); }
+            : null,
           onMissingFileCheck: function () { executeScriptOnDirectory('missing', fullPath, panel); },
           onUpdateXml: function () { CLU.openUpdateXmlModal(fullPath, fileData.name); },
           onRemoveAllXml: function () { bulkRemoveXmlFromDirectory(fullPath, panel); }
@@ -928,6 +935,9 @@ function createListItem(itemName, fullPath, type, panel, isDraggable) {
             : null,
           onForceMetron: hasProvider(panel, 'metron')
             ? function () { searchMetadataForFile(fullPath, fileData.name, panel, { forceProvider: 'metron' }); }
+            : null,
+          onForceMangaUpdates: hasProvider(panel, 'mangaupdates')
+            ? function () { searchMetadataForFile(fullPath, fileData.name, panel, { forceProvider: 'mangaupdates' }); }
             : null,
           onAddToReadingList: function () { openAddToReadingListModal(fullPath); },
           onDelete: function () { showDeletePrompt(fullPath, fileData.name, panel); }
@@ -1727,6 +1737,9 @@ function loadRecentFiles(panel) {
                 : null,
               onForceMetron: hasProvider(panel, 'metron')
                 ? function () { searchMetadataForFile(file.file_path, file.file_name, panel, { forceProvider: 'metron' }); }
+                : null,
+              onForceMangaUpdates: hasProvider(panel, 'mangaupdates')
+                ? function () { searchMetadataForFile(file.file_path, file.file_name, panel, { forceProvider: 'mangaupdates' }); }
                 : null,
               extraMetadataActions: hasGCD || (!hasAnyProvider && typeof gcdMysqlAvailable !== 'undefined' && gcdMysqlAvailable)
                 ? [{
@@ -2917,6 +2930,7 @@ function updateRenameButtonVisibility(panel) {
     let folderPatternButton = renameRow.querySelector('.folder-pattern-btn');
     let forceComicVineButton = renameRow.querySelector('.force-metadata-comicvine-btn');
     let forceMetronButton = renameRow.querySelector('.force-metadata-metron-btn');
+    let forceMangaUpdatesButton = renameRow.querySelector('.force-metadata-mangaupdates-btn');
 
     if (hasFiles) {
       // Create or update the rename text button
@@ -3060,6 +3074,30 @@ function updateRenameButtonVisibility(panel) {
       } else if (forceMetronButton) {
         forceMetronButton.style.display = 'none';
       }
+
+      if (forceProviders.includes('mangaupdates')) {
+        if (!forceMangaUpdatesButton) {
+          forceMangaUpdatesButton = document.createElement('button');
+          forceMangaUpdatesButton.type = 'button';
+          forceMangaUpdatesButton.className = 'dropdown-item force-metadata-mangaupdates-btn';
+          forceMangaUpdatesButton.innerHTML = '<i class="bi bi-cloud-check"></i><span>Force MangaUpdates</span>';
+          forceMangaUpdatesButton.title = 'Force match all files in this directory via MangaUpdates';
+          placeDirectoryAction(forceMangaUpdatesButton, actionContainers.overflowMenu);
+        }
+        forceMangaUpdatesButton.style.display = '';
+        placeDirectoryAction(forceMangaUpdatesButton, actionContainers.overflowMenu);
+        forceMangaUpdatesButton.dataset.currentPath = currentPath;
+        forceMangaUpdatesButton.dataset.currentPanel = panel;
+        forceMangaUpdatesButton.onclick = function (e) {
+          e.preventDefault();
+          const pathFromData = this.dataset.currentPath;
+          const panelFromData = this.dataset.currentPanel;
+          const dirName = pathFromData.split('/').filter(Boolean).pop() || pathFromData;
+          fetchDirectoryMetadataForPanel(pathFromData, dirName, panelFromData, 'mangaupdates');
+        };
+      } else if (forceMangaUpdatesButton) {
+        forceMangaUpdatesButton.style.display = 'none';
+      }
     } else {
       // Hide file-related buttons when no files
       if (renameButton) renameButton.style.display = 'none';
@@ -3068,6 +3106,7 @@ function updateRenameButtonVisibility(panel) {
       if (folderPatternButton) folderPatternButton.style.display = 'none';
       if (forceComicVineButton) forceComicVineButton.style.display = 'none';
       if (forceMetronButton) forceMetronButton.style.display = 'none';
+      if (forceMangaUpdatesButton) forceMangaUpdatesButton.style.display = 'none';
     }
 
     // Create or update the Add CVINFO button (always visible for non-root folders)

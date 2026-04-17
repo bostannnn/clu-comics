@@ -219,6 +219,17 @@ function renderCurrentFolderActions() {
         actionBar.appendChild(metronButton);
     }
 
+    if (hasSourceWallProvider('mangaupdates')) {
+        const mangaUpdatesButton = document.createElement('button');
+        mangaUpdatesButton.className = 'btn btn-outline-success btn-sm';
+        mangaUpdatesButton.innerHTML = '<i class="bi bi-cloud-check me-1"></i>Force MangaUpdates';
+        mangaUpdatesButton.title = 'Force match all files in the current folder via MangaUpdates';
+        mangaUpdatesButton.addEventListener('click', () => {
+            fetchDirMetadataSW(swCurrentPath, getCurrentFolderName(), 'mangaupdates');
+        });
+        actionBar.appendChild(mangaUpdatesButton);
+    }
+
     if (actionBar.children.length === 1) {
         actionBar.classList.add('d-none');
         return;
@@ -490,6 +501,9 @@ function renderTable() {
                 : null,
             onForceMetron: hasSourceWallProvider('metron')
                 ? function () { fetchDirMetadataSW(dir.path, dir.name, 'metron'); }
+                : null,
+            onForceMangaUpdates: hasSourceWallProvider('mangaupdates')
+                ? function () { fetchDirMetadataSW(dir.path, dir.name, 'mangaupdates'); }
                 : null
         });
         tr.appendChild(tdActions);
@@ -562,6 +576,9 @@ function renderTable() {
                 : null,
             onForceMetron: hasSourceWallProvider('metron')
                 ? function () { fetchMetadataSW(file.path, file.name, 'metron'); }
+                : null,
+            onForceMangaUpdates: hasSourceWallProvider('mangaupdates')
+                ? function () { fetchMetadataSW(file.path, file.name, 'mangaupdates'); }
                 : null,
             extraPostReadingActions: [{
                 label: 'Info',
@@ -1224,6 +1241,8 @@ function fetchDirMetadataSW(path, name, forceProvider) {
         CLU.forceFetchDirectoryMetadataViaComicVine(path, name);
     } else if (forceProvider === 'metron') {
         CLU.forceFetchDirectoryMetadataViaMetron(path, name);
+    } else if (forceProvider === 'mangaupdates') {
+        CLU.forceFetchDirectoryMetadataViaMangaUpdates(path, name);
     } else {
         CLU.fetchDirectoryMetadata(path, name);
     }

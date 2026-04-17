@@ -100,6 +100,7 @@
     _pushAction(metadataOps, 'Fetch Metadata', 'bi bi-cloud-download', context.onFetchMetadata);
     _pushAction(metadataOps, 'Force ComicVine', 'bi bi-cloud-check', context.onForceComicVine);
     _pushAction(metadataOps, 'Force Metron', 'bi bi-cloud-check', context.onForceMetron);
+    _pushAction(metadataOps, 'Force MangaUpdates', 'bi bi-cloud-check', context.onForceMangaUpdates);
     _appendItems(metadataOps, context.extraMetadataActions);
 
     var readingOps = [];
@@ -134,6 +135,7 @@
     _pushAction(metadataOps, 'Fetch All Metadata', 'bi bi-cloud-download', context.onFetchAllMetadata);
     _pushAction(metadataOps, 'Force Fetch via ComicVine', 'bi bi-cloud-check', context.onForceComicVine);
     _pushAction(metadataOps, 'Force Fetch via Metron', 'bi bi-cloud-check', context.onForceMetron);
+    _pushAction(metadataOps, 'Force Fetch via MangaUpdates', 'bi bi-cloud-check', context.onForceMangaUpdates);
     _appendItems(metadataOps, context.extraMetadataActions);
 
     var maintenanceOps = [];
