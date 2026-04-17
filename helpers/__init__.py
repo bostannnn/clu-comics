@@ -499,3 +499,62 @@ def create_thumbnail_streaming(image_path, max_size=(100, 100), quality=85):
     except Exception as e:
         app_logger.error(f"Error creating thumbnail for {image_path}: {e}")
         return None
+
+
+def _estimate_canvas_fill_color(image):
+    """
+    Estimate a neutral fill color from the image corners for padded resizes.
+    """
+    sample = image.convert("RGB")
+    width, height = sample.size
+    corner_points = [
+        (0, 0),
+        (max(width - 1, 0), 0),
+        (0, max(height - 1, 0)),
+        (max(width - 1, 0), max(height - 1, 0)),
+    ]
+    pixels = [sample.getpixel(point) for point in corner_points]
+
+    return tuple(
+        int(round(sum(channel_values) / len(channel_values)))
+        for channel_values in zip(*pixels)
+    )
+
+
+def resize_image_to_canvas(image, target_size, background_color=None):
+    """
+    Resize an image to fit within a target canvas while preserving aspect ratio.
+
+    The resized image is centered on a canvas that matches ``target_size``.
+    """
+    if image.size == target_size:
+        return image.copy()
+
+    if background_color is None:
+        background_color = _estimate_canvas_fill_color(image)
+
+    working = image
+    if working.mode == "P":
+        working = working.convert("RGBA")
+
+    has_alpha = working.mode in ("RGBA", "LA")
+    fitted = ImageOps.contain(working, target_size, method=Image.Resampling.LANCZOS)
+
+    if has_alpha:
+        canvas = Image.new("RGBA", target_size, (0, 0, 0, 0))
+    else:
+        if len(background_color) == 4:
+            background_color = background_color[:3]
+        canvas = Image.new("RGB", target_size, background_color)
+        if working.mode not in ("RGB", "L"):
+            fitted = fitted.convert("RGB")
+
+    offset_x = (target_size[0] - fitted.size[0]) // 2
+    offset_y = (target_size[1] - fitted.size[1]) // 2
+
+    if fitted.mode in ("RGBA", "LA"):
+        canvas.paste(fitted, (offset_x, offset_y), fitted.split()[-1])
+    else:
+        canvas.paste(fitted, (offset_x, offset_y))
+
+    return canvas

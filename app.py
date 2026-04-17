@@ -4160,6 +4160,8 @@ def resize_upload(file_path, target_dir):
         True if resized, False if no resize needed or no reference image found
     """
     try:
+        from helpers import resize_image_to_canvas
+
         # Find first existing image in directory (excluding the just-uploaded file)
         image_extensions = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
         reference_image = None
@@ -4196,28 +4198,34 @@ def resize_upload(file_path, target_dir):
                 )
                 return False
 
-            # Convert RGBA/P modes to RGB for JPEG compatibility
-            if img.mode in ("RGBA", "LA", "P"):
-                img = img.convert("RGB")
-
-            # Resize to match reference dimensions
-            resized = img.resize(
-                (target_width, target_height), Image.Resampling.LANCZOS
-            )
+            resized = resize_image_to_canvas(img, (target_width, target_height))
 
             # Save back to same path (preserve format based on extension)
             ext = os.path.splitext(file_path)[1].lower()
             if ext in (".jpg", ".jpeg"):
+                if resized.mode != "RGB":
+                    resized = resized.convert("RGB")
                 resized.save(file_path, "JPEG", quality=95)
             elif ext == ".png":
                 resized.save(file_path, "PNG")
             elif ext == ".webp":
-                resized.save(file_path, "WEBP", quality=95)
+                if resized.mode == "RGBA":
+                    resized.save(file_path, "WEBP", lossless=True)
+                else:
+                    if resized.mode != "RGB":
+                        resized = resized.convert("RGB")
+                    resized.save(file_path, "WEBP", quality=95)
+            elif ext == ".gif":
+                if resized.mode not in ("P", "L"):
+                    resized = resized.convert("P", palette=Image.ADAPTIVE)
+                resized.save(file_path, "GIF")
+            elif resized.mode == "RGBA":
+                resized.save(file_path)
             else:
                 resized.save(file_path)
 
             app_logger.info(
-                f"Resized {file_path} from {current_width}x{current_height} to {target_width}x{target_height}"
+                f"Resized {file_path} from {current_width}x{current_height} to fit within {target_width}x{target_height}"
             )
             return True
 

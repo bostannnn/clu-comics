@@ -67,13 +67,40 @@ modal_body_template = '''
     {% endfor %}
 '''
 
+
+def _directory_has_loose_files(directory):
+    """Return True when the directory contains files alongside subdirectories."""
+    with os.scandir(directory) as entries:
+        return any(entry.is_file() for entry in entries)
+
+
+def _resolve_save_root(folder_name, original_file_path):
+    """
+    Choose the directory tree that should be re-compressed back into the CBZ.
+
+    If an older edit session unwrapped into an inner folder even though the
+    extraction root still has loose files such as ComicInfo.xml, save from the
+    extraction root to preserve those files.
+    """
+    extraction_root = os.path.splitext(original_file_path)[0] + '_folder'
+
+    try:
+        same_root = os.path.realpath(folder_name) == os.path.realpath(extraction_root)
+    except OSError:
+        same_root = folder_name == extraction_root
+
+    if not same_root and os.path.isdir(extraction_root) and _directory_has_loose_files(extraction_root):
+        return extraction_root, extraction_root
+
+    return folder_name, folder_name
+
 def process_cbz_file(file_path):
     """
     Process the CBZ file:
       1. Rename the .cbz file to .zip.
       2. Create a folder based on the file name.
       3. Extract the ZIP contents into the folder.
-      4. If the ZIP contains a single directory (ignoring files), update folder_name to that inner directory.
+      4. If the ZIP contains only a single directory entry, update folder_name to that inner directory.
          (This is done recursively in case there are multiple nested directories.)
       5. Delete all .nfo, .sfv, .db and .DS_Store files.
     Returns a dictionary with 'folder_name' and 'zip_file_path'.
@@ -122,12 +149,15 @@ def process_cbz_file(file_path):
                     except Exception as e:
                         app_logger.error(f"Error deleting file {file_path}: {e}")
 
-        # Step 5: Check if the extracted content contains a single directory.
+        # Step 5: Check if the extracted content contains only a single directory.
         # Do this recursively in case the ZIP nests multiple single-directory levels.
+        # Stop unwrapping as soon as root-level files are present so metadata files
+        # like ComicInfo.xml remain part of the save tree.
         while True:
-            # List only directories, ignoring any loose files.
-            inner_dirs = [d for d in os.listdir(folder_name) if os.path.isdir(os.path.join(folder_name, d))]
-            if len(inner_dirs) == 1:
+            entries = os.listdir(folder_name)
+            inner_dirs = [d for d in entries if os.path.isdir(os.path.join(folder_name, d))]
+            loose_files = [f for f in entries if os.path.isfile(os.path.join(folder_name, f))]
+            if len(inner_dirs) == 1 and not loose_files:
                 folder_name = os.path.join(folder_name, inner_dirs[0])
                 app_logger.info(f"Found a single nested folder, updating folder_name to: {folder_name}")
             else:
@@ -228,16 +258,17 @@ def save_cbz():
         # Step 6: Rename the original .zip file to .bak.
         bak_file_path = zip_file_path + '.bak'
         os.rename(zip_file_path, bak_file_path)
-        
+        save_root, rel_base = _resolve_save_root(folder_name, original_file_path)
+
         # Step 7: Re-compress the folder contents into a .cbz file (sorted).
         # Use streaming approach to avoid loading all files into memory
         with zipfile.ZipFile(original_file_path, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as cbz:
             # Collect all files first
             file_list = []
-            for root, _, files in os.walk(folder_name):
+            for root, _, files in os.walk(save_root):
                 for file in files:
                     full_path = os.path.join(root, file)
-                    rel_path = os.path.relpath(full_path, folder_name)
+                    rel_path = os.path.relpath(full_path, rel_base)
                     file_list.append((rel_path, full_path))
             
             # Sort files for consistent ordering

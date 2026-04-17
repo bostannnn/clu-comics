@@ -154,3 +154,23 @@ class TestModifiedSCurveLut:
         # Values should generally increase (monotonic) in the 128-255 range
         for i in range(128, 255):
             assert lut[i + 1] >= lut[i]
+
+
+class TestResizeImageToCanvas:
+
+    def test_preserves_aspect_ratio_with_padding(self):
+        from PIL import Image
+        from helpers import resize_image_to_canvas
+
+        image = Image.new("RGB", (100, 50), "red")
+
+        resized = resize_image_to_canvas(
+            image,
+            (100, 100),
+            background_color=(255, 255, 255),
+        )
+
+        assert resized.size == (100, 100)
+        assert resized.getpixel((50, 10)) == (255, 255, 255)
+        assert resized.getpixel((50, 50)) == (255, 0, 0)
+        assert resized.getpixel((50, 90)) == (255, 255, 255)
