@@ -258,6 +258,26 @@ class TestMangaUpdatesProviderGetIssueMetadata:
 
     @patch("time.sleep")
     @patch("requests.request")
+    def test_category_tags_fallback_to_zero_vote_when_no_positive_votes(self, mock_request, mock_sleep):
+        from models.providers.mangaupdates_provider import MangaUpdatesProvider
+
+        mock_request.return_value = _mock_response({
+            **SAMPLE_SERIES,
+            "categories": [
+                {"category": "Student Council", "votes": 0, "votes_plus": 0, "votes_minus": 0},
+                {"category": "Beautiful Female Lead", "votes": 0, "votes_plus": 0, "votes_minus": 0},
+                {"category": "Negative Signal", "votes": -2, "votes_plus": 0, "votes_minus": 2},
+            ],
+        })
+
+        p = MangaUpdatesProvider()
+        metadata = p.get_issue_metadata("12345", "1")
+
+        assert metadata is not None
+        assert metadata["Tags"] == "Beautiful Female Lead, Student Council"
+
+    @patch("time.sleep")
+    @patch("requests.request")
     def test_author_names_are_role_split_normalized_and_deduped(self, mock_request, mock_sleep):
         from models.providers.mangaupdates_provider import MangaUpdatesProvider
 

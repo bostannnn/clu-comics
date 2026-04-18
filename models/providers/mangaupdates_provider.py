@@ -135,11 +135,17 @@ class MangaUpdatesProvider(BaseProvider):
 
     @classmethod
     def _extract_top_category_tags(cls, categories: Any) -> List[str]:
-        """Return top-voted category names from a MangaUpdates series payload."""
+        """Return top category names from a MangaUpdates series payload.
+
+        Prefer positively voted categories when available. If a series has no
+        positive-vote categories yet, fall back to zero-vote categories so new
+        or low-traffic entries still populate ComicInfo tags.
+        """
         if not isinstance(categories, list):
             return []
 
-        ranked = []
+        positive_ranked = []
+        zero_vote_names = []
         for item in categories:
             if not isinstance(item, dict):
                 continue
@@ -153,13 +159,19 @@ class MangaUpdatesProvider(BaseProvider):
             except (TypeError, ValueError):
                 votes = 0
 
-            if votes <= 0:
+            if votes < 0:
                 continue
 
-            ranked.append((votes, name))
+            if votes > 0:
+                positive_ranked.append((votes, name))
+            else:
+                zero_vote_names.append(name)
 
-        ranked.sort(key=lambda entry: (-entry[0], entry[1].lower()))
-        return [name for _, name in ranked[: cls.MAX_CATEGORY_TAGS]]
+        if positive_ranked:
+            positive_ranked.sort(key=lambda entry: (-entry[0], entry[1].lower()))
+            return [name for _, name in positive_ranked[: cls.MAX_CATEGORY_TAGS]]
+
+        return sorted(zero_vote_names, key=str.lower)[: cls.MAX_CATEGORY_TAGS]
 
     def _make_request(self, method: str, endpoint: str, json_data: Dict = None) -> Optional[Dict]:
         """Make an HTTP request to the MangaUpdates API with rate limiting."""
