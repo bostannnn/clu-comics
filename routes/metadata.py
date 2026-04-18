@@ -67,6 +67,8 @@ def _parse_cvinfo_content(content):
         "cv_url": "",
         "cv_id": "",
         "series_id": "",
+        "mangaupdates_url": "",
+        "mangaupdates_id": "",
         "publisher_name": "",
         "start_year": "",
         "extra_lines": "",
@@ -84,9 +86,31 @@ def _parse_cvinfo_content(content):
             result["cv_id"] = url_match.group(2)
             continue
 
+        mangaupdates_match = re.search(
+            r"(?:mangaupdates_url:\s*)?(https?://(?:www\.)?mangaupdates\.com/series/([^/\s?#]+))",
+            line,
+            re.IGNORECASE,
+        )
+        if mangaupdates_match and not result["mangaupdates_url"]:
+            result["mangaupdates_url"] = mangaupdates_match.group(1)
+            result["mangaupdates_id"] = mangaupdates_match.group(2)
+            continue
+
         lower = line.lower()
         if lower.startswith("series_id:"):
             result["series_id"] = line.split(":", 1)[1].strip()
+            continue
+        if lower.startswith("mangaupdates_id:"):
+            mangaupdates_id = line.split(":", 1)[1].strip()
+            try:
+                normalized_url = _normalize_mangaupdates_url(mangaupdates_id)
+            except ValueError:
+                extra_lines.append(line)
+                continue
+
+            result["mangaupdates_id"] = mangaupdates_id
+            if not result["mangaupdates_url"]:
+                result["mangaupdates_url"] = normalized_url
             continue
         if lower.startswith("publisher_name:"):
             result["publisher_name"] = line.split(":", 1)[1].strip()
@@ -96,6 +120,12 @@ def _parse_cvinfo_content(content):
             continue
 
         extra_lines.append(line)
+
+    if result["mangaupdates_id"] and not result["mangaupdates_url"]:
+        try:
+            result["mangaupdates_url"] = _normalize_mangaupdates_url(result["mangaupdates_id"])
+        except ValueError:
+            result["mangaupdates_id"] = ""
 
     result["extra_lines"] = "\n".join(extra_lines)
     return result
@@ -117,10 +147,27 @@ def _normalize_cvinfo_url(value):
     return f"https://comicvine.gamespot.com/volume/4050-{match.group(1)}/"
 
 
+def _normalize_mangaupdates_url(value):
+    """Normalize a MangaUpdates series URL or series ID to a canonical URL."""
+    value = (value or "").strip()
+    if not value:
+        return ""
+
+    if re.fullmatch(r"[^/\s?#:]+", value):
+        return f"https://www.mangaupdates.com/series/{value}"
+
+    match = re.search(r"mangaupdates\.com/series/([^/\s?#]+)", value, re.IGNORECASE)
+    if not match:
+        raise ValueError("MangaUpdates URL must look like https://www.mangaupdates.com/series/<id>")
+
+    return f"https://www.mangaupdates.com/series/{match.group(1)}"
+
+
 def _build_cvinfo_content(data):
     """Build cvinfo text from structured fields."""
     cv_url = _normalize_cvinfo_url(data.get("cv_url") or data.get("cv_id"))
     series_id = str(data.get("series_id") or "").strip()
+    mangaupdates_url = _normalize_mangaupdates_url(data.get("mangaupdates_url") or data.get("mangaupdates_id"))
     publisher_name = str(data.get("publisher_name") or "").strip()
     start_year = str(data.get("start_year") or "").strip()
     extra_lines_raw = str(data.get("extra_lines") or "")
@@ -130,11 +177,14 @@ def _build_cvinfo_content(data):
     if series_id and not re.fullmatch(r"\d+", series_id):
         raise ValueError("Metron series ID must be numeric")
 
+    has_structured_mangaupdates = bool(mangaupdates_url)
     lines = []
     if cv_url:
         lines.append(cv_url)
     if series_id:
         lines.append(f"series_id: {series_id}")
+    if mangaupdates_url:
+        lines.append(f"mangaupdates_url: {mangaupdates_url}")
     if publisher_name:
         lines.append(f"publisher_name: {publisher_name}")
     if start_year:
@@ -150,6 +200,12 @@ def _build_cvinfo_content(data):
             or lower.startswith("series_id:")
             or lower.startswith("publisher_name:")
             or lower.startswith("start_year:")
+        ):
+            continue
+        if has_structured_mangaupdates and (
+            lower.startswith("mangaupdates_id:")
+            or lower.startswith("mangaupdates_url:")
+            or "mangaupdates.com/series/" in lower
         ):
             continue
         lines.append(line)

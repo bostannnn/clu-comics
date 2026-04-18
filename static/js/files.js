@@ -6455,6 +6455,7 @@ function promptForCVInfo(directoryPath, panel) {
   // Clear the input fields
   document.getElementById('cvInfoUrlInput').value = '';
   document.getElementById('metronIdInput').value = '';
+  document.getElementById('mangaupdatesUrlInput').value = '';
   document.getElementById('cvInfoPublisherInput').value = '';
   document.getElementById('cvInfoStartYearInput').value = '';
   document.getElementById('cvInfoExtraLinesInput').value = '';
@@ -6485,6 +6486,7 @@ function openCVInfoEditor(filePath, panel) {
       document.getElementById('cvInfoPanel').value = panel;
       document.getElementById('cvInfoUrlInput').value = data.cv_url || data.cv_id || '';
       document.getElementById('metronIdInput').value = data.series_id || '';
+      document.getElementById('mangaupdatesUrlInput').value = data.mangaupdates_url || data.mangaupdates_id || '';
       document.getElementById('cvInfoPublisherInput').value = data.publisher_name || '';
       document.getElementById('cvInfoStartYearInput').value = data.start_year || '';
       document.getElementById('cvInfoExtraLinesInput').value = data.extra_lines || '';
@@ -6507,6 +6509,7 @@ function openCVInfoEditor(filePath, panel) {
 function saveCVInfo() {
   const cvUrl = document.getElementById('cvInfoUrlInput').value.trim();
   const metronId = document.getElementById('metronIdInput').value.trim();
+  const mangaupdatesUrl = document.getElementById('mangaupdatesUrlInput').value.trim();
   const publisherName = document.getElementById('cvInfoPublisherInput').value.trim();
   const startYear = document.getElementById('cvInfoStartYearInput').value.trim();
   const extraLines = document.getElementById('cvInfoExtraLinesInput').value;
@@ -6514,7 +6517,7 @@ function saveCVInfo() {
   const directoryPath = document.getElementById('cvInfoDirectoryPath').value;
   const panel = document.getElementById('cvInfoPanel').value;
 
-  if (!cvUrl && !metronId && !publisherName && !startYear && !extraLines.trim()) {
+  if (!cvUrl && !metronId && !mangaupdatesUrl && !publisherName && !startYear && !extraLines.trim()) {
     CLU.showToast('Error', 'Enter at least one CVINFO field before saving', 'error');
     return;
   }
@@ -6543,6 +6546,7 @@ function saveCVInfo() {
       directory: directoryPath,
       cv_url: cvUrl,
       series_id: metronId,
+      mangaupdates_url: mangaupdatesUrl,
       publisher_name: publisherName,
       start_year: startYear,
       extra_lines: extraLines

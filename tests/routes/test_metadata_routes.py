@@ -142,6 +142,7 @@ class TestCvinfoRoutes:
         cvinfo.write_text(
             "https://comicvine.gamespot.com/volume/4050-167796/\n"
             "series_id: 12345\n"
+            "mangaupdates_id: abc123\n"
             "publisher_name: Image\n"
             "start_year: 2015\n"
             "mangadex_id: abc123\n",
@@ -156,8 +157,32 @@ class TestCvinfoRoutes:
         assert data["success"] is True
         assert data["cv_id"] == "167796"
         assert data["series_id"] == "12345"
+        assert data["mangaupdates_id"] == "abc123"
+        assert data["mangaupdates_url"] == "https://www.mangaupdates.com/series/abc123"
         assert data["publisher_name"] == "Image"
         assert data["start_year"] == "2015"
+        assert "mangaupdates_id: abc123" not in data["extra_lines"]
+        assert "mangadex_id: abc123" in data["extra_lines"]
+
+    def test_get_cvinfo_preserves_malformed_mangaupdates_id_in_extra_lines(self, client, tmp_path):
+        folder = tmp_path / "Series"
+        folder.mkdir()
+        cvinfo = folder / "cvinfo"
+        cvinfo.write_text(
+            "mangaupdates_id: abc 123\n"
+            "mangadex_id: abc123\n",
+            encoding="utf-8",
+        )
+
+        with patch("routes.metadata.is_valid_library_path", return_value=True):
+            resp = client.get(f"/api/cvinfo?path={cvinfo}")
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["success"] is True
+        assert data["mangaupdates_id"] == ""
+        assert data["mangaupdates_url"] == ""
+        assert "mangaupdates_id: abc 123" in data["extra_lines"]
         assert "mangadex_id: abc123" in data["extra_lines"]
 
     def test_get_cvinfo_requires_cvinfo_path(self, client, tmp_path):
@@ -184,9 +209,15 @@ class TestCvinfoRoutes:
                     "path": str(cvinfo),
                     "cv_url": "167796",
                     "series_id": "12345",
+                    "mangaupdates_url": "abc123",
                     "publisher_name": "Image",
                     "start_year": "2015",
-                    "extra_lines": "mangadex_id: abc123\npublisher_name: ignore-me",
+                    "extra_lines": (
+                        "mangadex_id: abc123\n"
+                        "mangaupdates_title: Ayakashi Koi Emaki\n"
+                        "mangaupdates_url: https://www.mangaupdates.com/series/ignore-me\n"
+                        "publisher_name: ignore-me"
+                    ),
                 },
             )
 
@@ -194,10 +225,56 @@ class TestCvinfoRoutes:
         content = cvinfo.read_text(encoding="utf-8")
         assert "https://comicvine.gamespot.com/volume/4050-167796/" in content
         assert "series_id: 12345" in content
+        assert "mangaupdates_url: https://www.mangaupdates.com/series/abc123" in content
         assert "publisher_name: Image" in content
         assert "start_year: 2015" in content
         assert "mangadex_id: abc123" in content
+        assert "mangaupdates_title: Ayakashi Koi Emaki" in content
         assert "ignore-me" not in content
+
+    def test_save_cvinfo_structured_strips_stale_mangaupdates_id_lines(self, client, tmp_path):
+        folder = tmp_path / "Series"
+        folder.mkdir()
+        cvinfo = folder / "cvinfo"
+
+        with patch("routes.metadata.is_valid_library_path", return_value=True), \
+             patch("routes.metadata.is_path_in_any_root", return_value=False):
+            resp = client.post(
+                "/api/save-cvinfo",
+                json={
+                    "path": str(cvinfo),
+                    "mangaupdates_url": "new123",
+                    "extra_lines": (
+                        "mangaupdates_id: old456\n"
+                        "mangadex_id: abc123"
+                    ),
+                },
+            )
+
+        assert resp.status_code == 200
+        content = cvinfo.read_text(encoding="utf-8")
+        assert "mangaupdates_url: https://www.mangaupdates.com/series/new123" in content
+        assert "mangaupdates_id: old456" not in content
+        assert "mangadex_id: abc123" in content
+
+    def test_save_cvinfo_preserves_malformed_mangaupdates_id_without_structured_value(self, client, tmp_path):
+        folder = tmp_path / "Series"
+        folder.mkdir()
+        cvinfo = folder / "cvinfo"
+
+        with patch("routes.metadata.is_valid_library_path", return_value=True), \
+             patch("routes.metadata.is_path_in_any_root", return_value=False):
+            resp = client.post(
+                "/api/save-cvinfo",
+                json={
+                    "path": str(cvinfo),
+                    "extra_lines": "mangaupdates_id: abc 123",
+                },
+            )
+
+        assert resp.status_code == 200
+        content = cvinfo.read_text(encoding="utf-8")
+        assert content == "mangaupdates_id: abc 123"
 
     def test_save_cvinfo_rejects_invalid_start_year(self, client, tmp_path):
         folder = tmp_path / "Series"
@@ -259,6 +336,25 @@ class TestCvinfoRoutes:
         assert "publisher_name: Image" in content
         assert "start_year: 2015" in content
         assert "comicvine.gamespot.com" not in content
+
+    def test_save_cvinfo_allows_mangaupdates_only_structured_content(self, client, tmp_path):
+        folder = tmp_path / "Series"
+        folder.mkdir()
+        cvinfo = folder / "cvinfo"
+
+        with patch("routes.metadata.is_valid_library_path", return_value=True), \
+             patch("routes.metadata.is_path_in_any_root", return_value=False):
+            resp = client.post(
+                "/api/save-cvinfo",
+                json={
+                    "path": str(cvinfo),
+                    "mangaupdates_url": "abc123",
+                },
+            )
+
+        assert resp.status_code == 200
+        content = cvinfo.read_text(encoding="utf-8")
+        assert content == "mangaupdates_url: https://www.mangaupdates.com/series/abc123"
 
 
 def _make_cbz(path, with_comicinfo=True):
