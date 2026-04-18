@@ -468,6 +468,9 @@ def _write_selected_manga_cvinfo(cvinfo_path, provider_type, series_id, title=""
         if lines:
             f.write("\n".join(lines) + "\n")
 
+    if provider_type == 'mangaupdates':
+        comicvine.write_cvinfo_manga_fields(cvinfo_path, {'mangaupdates_id': str(series_id)})
+
     return True
 
 

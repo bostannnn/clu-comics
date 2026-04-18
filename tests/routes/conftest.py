@@ -92,6 +92,7 @@ def _make_mock_app_module(data_dir, target_dir):
     mock.index_built = True
     # Functions that routes call
     mock.auto_fetch_metron_metadata = MagicMock(side_effect=lambda p: p)
+    mock.auto_fetch_mangaupdates_metadata = MagicMock(side_effect=lambda p: p)
     mock.auto_fetch_comicvine_metadata = MagicMock(side_effect=lambda p: p)
     mock.log_file_if_in_data = MagicMock()
     mock.update_index_on_move = MagicMock()

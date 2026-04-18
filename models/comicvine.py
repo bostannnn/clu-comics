@@ -966,6 +966,21 @@ def parse_cvinfo_volume_id(cvinfo_path: str) -> Optional[int]:
         return None
 
 
+def should_defer_mangaupdates_to_comicvine(
+    cvinfo_path: str, comicvine_api_key: Optional[str]
+) -> bool:
+    """
+    Determine whether MangaUpdates auto-fetch should defer to ComicVine.
+
+    When a folder already has a ComicVine volume in cvinfo and ComicVine is
+    configured, ComicVine provides more precise issue-level metadata than the
+    MangaUpdates series-level fallback.
+    """
+    if not str(comicvine_api_key or "").strip():
+        return False
+    return parse_cvinfo_volume_id(cvinfo_path) is not None
+
+
 def find_cvinfo_in_folder(folder_path: str) -> Optional[str]:
     """
     Look for a cvinfo file in a folder (case-insensitive).
@@ -1083,8 +1098,55 @@ def write_cvinfo_fields(cvinfo_path: str, publisher_name: Optional[str], start_y
 
 MANGA_CVINFO_KEYS = [
     'mangadex_id', 'mangadex_title', 'mangadex_alt_title',
-    'mangaupdates_id', 'mangaupdates_title', 'mangaupdates_alt_title',
+    'mangaupdates_id', 'mangaupdates_url', 'mangaupdates_title', 'mangaupdates_alt_title',
 ]
+
+
+def _mangaupdates_series_url(series_id: Optional[str]) -> Optional[str]:
+    """Build a canonical MangaUpdates series URL from a cached series id."""
+    series_id = str(series_id or "").strip()
+    if not series_id:
+        return None
+    return f"https://www.mangaupdates.com/series/{series_id}"
+
+
+def parse_cvinfo_for_mangaupdates_id(cvinfo_path: str) -> Optional[str]:
+    """
+    Parse a cvinfo file for a MangaUpdates series identifier.
+
+    Supported formats:
+    - mangaupdates_id: 12345
+    - mangaupdates_url: https://www.mangaupdates.com/series/12345
+    - https://www.mangaupdates.com/series/12345
+
+    Args:
+        cvinfo_path: Path to the cvinfo file
+
+    Returns:
+        MangaUpdates series ID as a string, or None if not found
+    """
+    try:
+        with open(cvinfo_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        match = re.search(r"mangaupdates_id:\s*([^\s]+)", content, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+
+        match = re.search(
+            r"(?:mangaupdates_url:\s*)?https?://(?:www\.)?mangaupdates\.com/series/([^/\s?#]+)",
+            content,
+            re.IGNORECASE,
+        )
+        if match:
+            return match.group(1).strip()
+
+        return None
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        app_logger.error(f"Error parsing cvinfo for MangaUpdates ID: {e}")
+        return None
 
 
 def read_cvinfo_manga_fields(cvinfo_path: str) -> Dict[str, Optional[str]]:
@@ -1112,6 +1174,12 @@ def read_cvinfo_manga_fields(cvinfo_path: str) -> Dict[str, Optional[str]]:
     except Exception as e:
         app_logger.error(f"Error reading manga cvinfo fields from {cvinfo_path}: {e}")
 
+    mangaupdates_id = result.get('mangaupdates_id') or parse_cvinfo_for_mangaupdates_id(cvinfo_path)
+    if mangaupdates_id:
+        result['mangaupdates_id'] = mangaupdates_id
+        if not result.get('mangaupdates_url'):
+            result['mangaupdates_url'] = _mangaupdates_series_url(mangaupdates_id)
+
     return result
 
 
@@ -1127,12 +1195,33 @@ def write_cvinfo_manga_fields(cvinfo_path: str, fields: Dict[str, str]) -> bool:
         True if successful, False otherwise
     """
     try:
+        raw_present = set()
+        try:
+            with open(cvinfo_path, 'r', encoding='utf-8') as f:
+                for raw_line in f:
+                    line = raw_line.strip()
+                    for key in MANGA_CVINFO_KEYS:
+                        if line.startswith(f'{key}:'):
+                            raw_present.add(key)
+                            break
+        except FileNotFoundError:
+            pass
+
         existing = read_cvinfo_manga_fields(cvinfo_path)
+        normalized_fields = {key: value for key, value in (fields or {}).items() if value}
+
+        mangaupdates_id = normalized_fields.get('mangaupdates_id') or existing.get('mangaupdates_id')
+        if (
+            mangaupdates_id
+            and not normalized_fields.get('mangaupdates_url')
+            and 'mangaupdates_url' not in raw_present
+        ):
+            normalized_fields['mangaupdates_url'] = _mangaupdates_series_url(mangaupdates_id)
 
         lines_to_add = []
         for key in MANGA_CVINFO_KEYS:
-            if key in fields and fields[key] and not existing.get(key):
-                lines_to_add.append(f"{key}: {fields[key]}")
+            if key in normalized_fields and normalized_fields[key] and key not in raw_present:
+                lines_to_add.append(f"{key}: {normalized_fields[key]}")
 
         if not lines_to_add:
             return True

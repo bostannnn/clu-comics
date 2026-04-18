@@ -813,9 +813,10 @@ def process_incoming_wanted_issues():
                             os.rename(temp_dest, final_path)
                             app_logger.info(f"Renamed: {filename} -> {new_filename}")
 
-                    # Auto-fetch metadata (try Metron first, then ComicVine as fallback)
+                    # Auto-fetch metadata (Metron first, then MangaUpdates, then ComicVine)
                     app_logger.info(f"Auto-fetching metadata for: {final_path}")
                     final_path = auto_fetch_metron_metadata(final_path)
+                    final_path = auto_fetch_mangaupdates_metadata(final_path)
                     final_path = auto_fetch_comicvine_metadata(final_path)
 
                     # Add to file_index immediately so the file is searchable/visible
@@ -4145,6 +4146,153 @@ def auto_fetch_metron_metadata(destination_path):
             app_logger.warning(f"Metron unavailable during auto-fetch metadata: {e}")
         else:
             app_logger.error(f"Error in auto-fetch Metron metadata: {e}")
+        return destination_path
+
+
+def auto_fetch_mangaupdates_metadata(destination_path):
+    """
+    Automatically fetch MangaUpdates metadata for moved files if conditions are met.
+    Only triggers for non-root /data directories that have a cvinfo file containing
+    a MangaUpdates series ID or URL.
+
+    Returns:
+        The final file path (renamed path if file was renamed, original path otherwise)
+    """
+    try:
+        from models.providers.mangaupdates_provider import MangaUpdatesProvider
+        from models.providers.base import extract_issue_number
+        from models.comicvine import (
+            add_comicinfo_to_archive,
+            find_cvinfo_in_folder,
+            generate_comicinfo_xml,
+            parse_cvinfo_for_mangaupdates_id,
+            read_cvinfo_manga_fields,
+            should_defer_mangaupdates_to_comicvine,
+            write_cvinfo_manga_fields,
+        )
+        from core.comicinfo import read_comicinfo_from_zip
+
+        if os.path.isfile(destination_path):
+            folder_path = os.path.dirname(destination_path)
+            target_file = destination_path
+        else:
+            folder_path = destination_path
+            target_file = None
+
+        data_dir = DATA_DIR
+        rel_path = os.path.relpath(folder_path, data_dir)
+        rel_path_normalized = rel_path.replace("\\", "/")
+        if rel_path == "." or "/" not in rel_path_normalized:
+            app_logger.debug(
+                f"Skipping MangaUpdates metadata for root-level directory: {folder_path}"
+            )
+            return destination_path
+
+        cvinfo_path = find_cvinfo_in_folder(folder_path)
+        if not cvinfo_path:
+            app_logger.debug(
+                f"No cvinfo file found in {folder_path}, skipping MangaUpdates metadata"
+            )
+            return destination_path
+
+        if should_defer_mangaupdates_to_comicvine(
+            cvinfo_path, app.config.get("COMICVINE_API_KEY", "")
+        ):
+            app_logger.debug(
+                f"ComicVine context present in {cvinfo_path}, deferring MangaUpdates auto-fetch"
+            )
+            return destination_path
+
+        cached = read_cvinfo_manga_fields(cvinfo_path)
+        series_id = parse_cvinfo_for_mangaupdates_id(cvinfo_path) or cached.get("mangaupdates_id")
+        if not series_id:
+            app_logger.debug(
+                f"No MangaUpdates series context found in {cvinfo_path}, skipping MangaUpdates metadata"
+            )
+            return destination_path
+
+        preferred_title = cached.get("mangaupdates_title")
+        alternate_title = cached.get("mangaupdates_alt_title")
+        if not cached.get("mangaupdates_url"):
+            write_cvinfo_manga_fields(cvinfo_path, {"mangaupdates_id": str(series_id)})
+
+        provider = MangaUpdatesProvider()
+
+        if target_file:
+            files_to_process = [target_file]
+        else:
+            files_to_process = [
+                os.path.join(folder_path, f)
+                for f in os.listdir(folder_path)
+                if f.lower().endswith((".cbz", ".cbr"))
+            ]
+
+        processed = 0
+        renamed_path = None
+
+        for file_path in files_to_process:
+            existing = read_comicinfo_from_zip(file_path)
+            existing_notes = existing.get("Notes", "").strip() if existing else ""
+            if existing_notes and "Scraped metadata from Amazon" not in existing_notes:
+                app_logger.debug(f"Skipping {file_path} - already has metadata")
+                continue
+
+            issue_number = extract_issue_number(os.path.basename(file_path))
+            if not issue_number:
+                app_logger.warning(f"Could not extract issue number from {file_path}")
+                continue
+
+            metadata = provider.get_issue_metadata(
+                str(series_id),
+                issue_number,
+                preferred_title=preferred_title,
+                alternate_title=alternate_title,
+            )
+            if not metadata:
+                continue
+
+            xml_content = generate_comicinfo_xml(metadata)
+            if add_comicinfo_to_archive(file_path, xml_content):
+                processed += 1
+                app_logger.info(f"Added MangaUpdates metadata to {file_path}")
+
+                old_path = file_path
+                new_path, was_renamed = rename_comic_from_metadata(file_path, metadata)
+                if was_renamed and file_path == target_file:
+                    renamed_path = new_path
+                if was_renamed:
+                    file_path = new_path
+                    from core.database import update_file_index_entry
+
+                    update_file_index_entry(
+                        old_path,
+                        name=os.path.basename(new_path),
+                        new_path=new_path,
+                        parent=os.path.dirname(new_path),
+                    )
+
+                from core.database import update_file_index_from_comicinfo
+
+                update_file_index_from_comicinfo(file_path, metadata)
+
+        if processed > 0:
+            app_logger.info(
+                f"Auto-fetched MangaUpdates metadata: {processed} files processed"
+            )
+
+            final_path = renamed_path if renamed_path else destination_path
+            if final_path.lower().endswith(".cbz"):
+                from core.metadata_scanner import queue_file_for_scan, PRIORITY_NEW_FILE
+
+                queue_file_for_scan(final_path, PRIORITY_NEW_FILE)
+                app_logger.debug(
+                    f"Queued for metadata scan: {os.path.basename(final_path)}"
+                )
+
+        return renamed_path if renamed_path else destination_path
+
+    except Exception as e:
+        app_logger.error(f"Error in auto-fetch MangaUpdates metadata: {e}")
         return destination_path
 
 

@@ -14,6 +14,7 @@ class TestReadCvinfoMangaFields:
         assert result['mangadex_id'] is None
         assert result['mangadex_title'] is None
         assert result['mangaupdates_id'] is None
+        assert result['mangaupdates_url'] is None
 
     def test_read_file_not_found(self, tmp_path):
         """Missing file returns dict with all None values."""
@@ -21,6 +22,7 @@ class TestReadCvinfoMangaFields:
         result = read_cvinfo_manga_fields(str(tmp_path / "nonexistent"))
         assert result['mangadex_id'] is None
         assert result['mangadex_title'] is None
+        assert result['mangaupdates_url'] is None
 
     def test_read_with_data(self, tmp_path):
         """Manga fields present are parsed correctly."""
@@ -32,6 +34,7 @@ class TestReadCvinfoMangaFields:
             "mangadex_title: Angel Heart\n"
             "mangadex_alt_title: エンジェル・ハート\n"
             "mangaupdates_id: 99999\n"
+            "mangaupdates_url: https://www.mangaupdates.com/series/99999\n"
             "mangaupdates_title: Angel Heart\n",
             encoding='utf-8',
         )
@@ -40,8 +43,22 @@ class TestReadCvinfoMangaFields:
         assert result['mangadex_title'] == 'Angel Heart'
         assert result['mangadex_alt_title'] == 'エンジェル・ハート'
         assert result['mangaupdates_id'] == '99999'
+        assert result['mangaupdates_url'] == 'https://www.mangaupdates.com/series/99999'
         assert result['mangaupdates_title'] == 'Angel Heart'
         assert result['mangaupdates_alt_title'] is None
+
+    def test_read_populates_mangaupdates_id_from_url(self, tmp_path):
+        """A MangaUpdates URL is enough to recover the cached series id."""
+        from models.comicvine import read_cvinfo_manga_fields
+        cvinfo = tmp_path / "cvinfo"
+        cvinfo.write_text(
+            "mangaupdates_url: https://www.mangaupdates.com/series/12345\n",
+            encoding='utf-8',
+        )
+
+        result = read_cvinfo_manga_fields(str(cvinfo))
+        assert result['mangaupdates_id'] == '12345'
+        assert result['mangaupdates_url'] == 'https://www.mangaupdates.com/series/12345'
 
 
 class TestWriteCvinfoMangaFields:
@@ -53,11 +70,14 @@ class TestWriteCvinfoMangaFields:
         result = write_cvinfo_manga_fields(str(cvinfo), {
             'mangadex_id': 'abc-123',
             'mangadex_title': 'Test Manga',
+            'mangaupdates_id': '99999',
         })
         assert result is True
         content = cvinfo.read_text(encoding='utf-8')
         assert 'mangadex_id: abc-123' in content
         assert 'mangadex_title: Test Manga' in content
+        assert 'mangaupdates_id: 99999' in content
+        assert 'mangaupdates_url: https://www.mangaupdates.com/series/99999' in content
 
     def test_write_appends(self, tmp_path):
         """Existing cvinfo content is preserved when appending manga fields."""
@@ -80,9 +100,12 @@ class TestWriteCvinfoMangaFields:
         fields = {
             'mangadex_id': 'abc-123',
             'mangadex_title': 'Test Manga',
+            'mangaupdates_id': '99999',
         }
         write_cvinfo_manga_fields(str(cvinfo), fields)
         write_cvinfo_manga_fields(str(cvinfo), fields)
         content = cvinfo.read_text(encoding='utf-8')
         assert content.count('mangadex_id:') == 1
         assert content.count('mangadex_title:') == 1
+        assert content.count('mangaupdates_id:') == 1
+        assert content.count('mangaupdates_url:') == 1

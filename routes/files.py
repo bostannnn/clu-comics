@@ -114,7 +114,7 @@ def _save_uploaded_image_to_target(uploaded_file, target_file):
 
 def _do_move(op_id, source, destination, is_file):
     """Background thread: perform move + post-move tasks, updating app_state."""
-    from app import auto_fetch_metron_metadata, auto_fetch_comicvine_metadata, \
+    from app import auto_fetch_metron_metadata, auto_fetch_mangaupdates_metadata, auto_fetch_comicvine_metadata, \
                      log_file_if_in_data, update_index_on_move
     with memory_context("file_move"):
         try:
@@ -125,10 +125,12 @@ def _do_move(op_id, source, destination, is_file):
             final_path = destination
             if is_file:
                 final_path = auto_fetch_metron_metadata(destination)
+                final_path = auto_fetch_mangaupdates_metadata(final_path)
                 final_path = auto_fetch_comicvine_metadata(final_path)
                 log_file_if_in_data(final_path)
             else:
                 auto_fetch_metron_metadata(destination)
+                auto_fetch_mangaupdates_metadata(destination)
                 auto_fetch_comicvine_metadata(destination)
                 for root, _, files in os.walk(destination):
                     for f in files:

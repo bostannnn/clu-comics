@@ -1907,6 +1907,7 @@ class TestBatchForceMetadata:
         cvinfo_text = cvinfo_path.read_text(encoding="utf-8")
         assert "publisher_name: Existing Publisher" in cvinfo_text
         assert "mangaupdates_id: 12345" in cvinfo_text
+        assert "mangaupdates_url: https://www.mangaupdates.com/series/12345" in cvinfo_text
         assert "mangaupdates_title: Demon Love Spell" in cvinfo_text
         assert "mangaupdates_alt_title: Ayakashi Koi Emaki" in cvinfo_text
 

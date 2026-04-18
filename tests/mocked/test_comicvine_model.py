@@ -235,6 +235,41 @@ class TestParseCvinfoVolumeId:
         assert parse_cvinfo_volume_id(str(cvinfo)) is None
 
 
+class TestMangaUpdatesComicVinePrecedence:
+
+    def test_defers_to_comicvine_when_cvinfo_has_volume_and_key(self, tmp_path):
+        from models.comicvine import should_defer_mangaupdates_to_comicvine
+
+        cvinfo = tmp_path / "cvinfo"
+        cvinfo.write_text(
+            "https://comicvine.gamespot.com/volume/4050-12345/\n"
+            "mangaupdates_id: 99999\n",
+            encoding="utf-8",
+        )
+
+        assert should_defer_mangaupdates_to_comicvine(str(cvinfo), "test-key") is True
+
+    def test_does_not_defer_without_comicvine_key(self, tmp_path):
+        from models.comicvine import should_defer_mangaupdates_to_comicvine
+
+        cvinfo = tmp_path / "cvinfo"
+        cvinfo.write_text(
+            "https://comicvine.gamespot.com/volume/4050-12345/\n"
+            "mangaupdates_id: 99999\n",
+            encoding="utf-8",
+        )
+
+        assert should_defer_mangaupdates_to_comicvine(str(cvinfo), "") is False
+
+    def test_does_not_defer_without_comicvine_volume(self, tmp_path):
+        from models.comicvine import should_defer_mangaupdates_to_comicvine
+
+        cvinfo = tmp_path / "cvinfo"
+        cvinfo.write_text("mangaupdates_id: 99999\n", encoding="utf-8")
+
+        assert should_defer_mangaupdates_to_comicvine(str(cvinfo), "test-key") is False
+
+
 class TestWriteCvinfoFields:
 
     def test_updates_existing_stale_values(self, tmp_path):

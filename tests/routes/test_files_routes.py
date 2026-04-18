@@ -56,6 +56,54 @@ class TestMove:
         # Verify the background thread was started as daemon
         mock_thread.return_value.start.assert_called_once()
 
+    @patch("routes.files.memory_context")
+    @patch("routes.files.app_state")
+    @patch("routes.files.shutil.move")
+    def test_do_move_runs_mangaupdates_between_metron_and_comicvine(
+        self,
+        mock_move,
+        mock_app_state,
+        mock_memory_context,
+        tmp_path,
+    ):
+        from routes.files import _do_move
+
+        source = str(tmp_path / "comic.cbz")
+        dest = str(tmp_path / "moved.cbz")
+
+        mock_memory_context.return_value.__enter__.return_value = None
+        mock_memory_context.return_value.__exit__.return_value = None
+
+        call_order = []
+
+        def _record(name, suffix):
+            def _inner(path):
+                call_order.append((name, path))
+                return f"{path}{suffix}"
+            return MagicMock(side_effect=_inner)
+
+        mock_app = MagicMock()
+        mock_app.auto_fetch_metron_metadata = _record("metron", ".metron")
+        mock_app.auto_fetch_mangaupdates_metadata = _record("mangaupdates", ".mu")
+        mock_app.auto_fetch_comicvine_metadata = _record("comicvine", ".cv")
+        mock_app.log_file_if_in_data = MagicMock()
+        mock_app.update_index_on_move = MagicMock()
+
+        with patch.dict("sys.modules", {"app": mock_app}):
+            _do_move("op-123", source, dest, True)
+
+        assert call_order == [
+            ("metron", dest),
+            ("mangaupdates", f"{dest}.metron"),
+            ("comicvine", f"{dest}.metron.mu"),
+        ]
+        mock_app.log_file_if_in_data.assert_called_once_with(f"{dest}.metron.mu.cv")
+        mock_app.update_index_on_move.assert_called_once_with(
+            source,
+            f"{dest}.metron.mu.cv",
+        )
+        mock_app_state.complete_operation.assert_called_once()
+
 
 class TestFolderSize:
 
