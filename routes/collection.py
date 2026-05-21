@@ -31,7 +31,8 @@ from helpers.library import (
 from core.database import (
     get_directory_children, get_path_counts_batch, get_recent_files,
     invalidate_browse_cache, add_file_index_entry, delete_file_index_entry,
-    search_file_index, get_user_preference, get_mapped_series_paths_lookup
+    search_file_index, get_user_preference, get_mapped_series_paths_lookup,
+    get_files_recursive_paged,
 )
 
 collection_bp = Blueprint('collection', __name__)
@@ -132,8 +133,8 @@ def get_dashboard_sections():
 
 @collection_bp.route('/files')
 def files_page():
-    watch = config.get("SETTINGS", "WATCH", fallback="/temp")
-    target_dir = config.get("SETTINGS", "TARGET", fallback="/processed")
+    watch = current_app.config.get('WATCH') or "/downloads/temp"
+    target_dir = current_app.config.get('TARGET') or "/downloads/processed"
     return render_template('files.html', watch=watch, target_dir=target_dir)
 
 
@@ -141,7 +142,19 @@ def files_page():
 @collection_bp.route('/collection/<path:subpath>')
 def collection(subpath=''):
     """Render the visual browse page with optional path."""
-    initial_path = f'/data/{subpath}' if subpath else ''
+    # ?path= carries an absolute path verbatim — used for the default-library
+    # root and any non-default library, where embedding the absolute path in
+    # /collection/<subpath> would produce a double slash.
+    query_path = (request.args.get('path') or '').strip()
+    if query_path:
+        initial_path = query_path
+    elif subpath:
+        # Legacy clean URL: subpath is relative to the default library root.
+        default_lib = get_default_library()
+        root = default_lib['path'] if default_lib else '/data'
+        initial_path = f'{root}/{subpath}'
+    else:
+        initial_path = ''
     return render_template('collection.html',
                            initial_path=initial_path,
                            rec_enabled=config.get("SETTINGS", "REC_ENABLED", fallback="True") == "True",
@@ -152,6 +165,84 @@ def collection(subpath=''):
 def to_read_page():
     """Render the 'To Read' page showing all items marked as 'want to read'."""
     return render_template('to_read.html')
+
+
+@collection_bp.route('/library')
+def metadata_browser_page():
+    """Render the metadata-driven library browser."""
+    return render_template('metadata_browser.html')
+
+
+# =============================================================================
+# Metadata Browser API (faceted)
+# =============================================================================
+
+def _parse_metadata_filters(args):
+    """Extract drill-down filter dict from a query string."""
+    filters = {}
+    for key in ("publisher", "series"):
+        v = args.get(key)
+        if v:
+            filters[key] = [v]
+    for key in ("year_from", "year_to"):
+        v = args.get(key)
+        if v not in (None, ""):
+            try:
+                filters[key] = int(v)
+            except (TypeError, ValueError):
+                pass
+    search = args.get("search")
+    if search:
+        filters["search"] = search
+    return filters
+
+
+@collection_bp.route('/api/metadata/browse')
+def api_metadata_browse():
+    """Return card grid payload for current axis + filters."""
+    from core.database import metadata_browse
+    axis = request.args.get('axis', 'publisher')
+    if axis not in ('publisher', 'series', 'year', 'issue'):
+        return jsonify({"error": "Invalid axis"}), 400
+    sort = request.args.get('sort', 'alpha')
+    if sort not in ('alpha', 'count', 'year', 'recent'):
+        sort = 'alpha'
+    try:
+        offset = max(0, int(request.args.get('offset', 0)))
+        limit = min(500, max(1, int(request.args.get('limit', 50))))
+    except (TypeError, ValueError):
+        offset, limit = 0, 50
+
+    filters = _parse_metadata_filters(request.args)
+    result = metadata_browse(axis, filters, sort=sort, offset=offset, limit=limit)
+
+    for item in result.get('items', []):
+        cover_path = item.get('cover_path') or item.get('path')
+        if cover_path:
+            item['thumbnail_url'] = url_for('get_thumbnail', path=cover_path)
+
+    result['axis'] = axis
+    result['offset'] = offset
+    result['limit'] = limit
+    result['sort'] = sort
+    return jsonify(result)
+
+
+@collection_bp.route('/api/metadata/series-cover')
+def api_metadata_series_cover():
+    """Return a thumbnail URL for a representative file of a series."""
+    from core.database import series_representative_path
+    series = request.args.get('series')
+    publisher = request.args.get('publisher')
+    if not series:
+        return jsonify({"error": "Missing series parameter"}), 400
+    path = series_representative_path(series, publisher)
+    if not path:
+        return jsonify({"path": None, "thumbnail_url": None})
+    return jsonify({
+        "path": path,
+        "thumbnail_url": url_for('get_thumbnail', path=path),
+    })
 
 
 @collection_bp.route('/browse/<category>/<path:name>')
@@ -472,10 +563,23 @@ def api_browse_metadata():
                 'has_files': file_count > 0
             }
 
+        # Guarantee a key for every requested path so the frontend never has
+        # to guess whether a missing key means "still loading" or "no data".
+        for p in paths:
+            if p not in results:
+                results[p] = {
+                    'folder_count': 0,
+                    'file_count': 0,
+                    'has_files': False,
+                }
+
         return jsonify({"metadata": results})
 
     except Exception as e:
-        app_logger.error(f"Error fetching browse metadata: {e}")
+        app_logger.error(
+            f"Error fetching browse metadata for {paths[:3]}: {e}",
+            exc_info=True,
+        )
         return jsonify({"error": str(e)}), 500
 
 
@@ -548,87 +652,116 @@ def api_clear_browse_cache():
 
 @collection_bp.route('/api/browse-recursive')
 def api_browse_recursive():
-    """Get all files recursively from a directory and subdirectories."""
+    """
+    Paginated recursive file listing for the "All Books" view.
+
+    Query params:
+        path:   Directory path to list under (defaults to DATA_DIR).
+        offset: Pagination offset (default 0, clamped >= 0).
+        limit:  Page size (default 21, clamped 1-500).
+        letter: Optional first-letter filter ('A'-'Z' or '#').
+        search: Optional case-insensitive substring against name/ci_series.
+
+    Backed by the file_index SQLite table (kept in sync by file_watcher /
+    metadata_scanner) with sort/filter/paginate pushed into SQL — replaces
+    the previous os.walk-per-request implementation that timed out behind
+    Cloudflare on large libraries.
+
+    Response:
+        {
+          current_path, files, total, offset, limit, letters
+        }
+    """
     from app import DATA_DIR
 
-    path = request.args.get('path', '')
+    request_start = time.time()
 
-    if not path:
-        full_path = DATA_DIR
-    else:
-        full_path = path
+    path = request.args.get('path') or DATA_DIR
 
-    if not os.path.exists(full_path) or not os.path.isdir(full_path):
+    # Path-traversal guard: only paths within DATA_DIR are allowed.
+    abs_path = os.path.abspath(path)
+    abs_data = os.path.abspath(DATA_DIR)
+    try:
+        common = os.path.commonpath([abs_path, abs_data])
+    except ValueError:
+        return jsonify({"error": "Invalid path"}), 400
+    if common != abs_data:
+        return jsonify({"error": "Invalid path"}), 400
+    if not os.path.isdir(abs_path):
         return jsonify({"error": "Invalid path"}), 400
 
-    excluded_extensions = {".png", ".jpg", ".jpeg", ".gif", ".html", ".css", ".ds_store", ".json", ".db", ".xml"}
+    try:
+        offset = max(0, int(request.args.get('offset', 0)))
+    except (TypeError, ValueError):
+        offset = 0
+    try:
+        limit = max(1, min(500, int(request.args.get('limit', 21))))
+    except (TypeError, ValueError):
+        limit = 21
+
+    letter = request.args.get('letter') or None
+    if letter:
+        letter = letter.strip()
+        if not (letter == '#' or (len(letter) == 1 and letter.isalpha())):
+            letter = None
+
+    search = request.args.get('search') or None
+
+    rows, total, letters = get_files_recursive_paged(
+        path, offset=offset, limit=limit, letter=letter, search=search
+    )
+
+    excluded_extensions = {".png", ".jpg", ".jpeg", ".gif", ".html", ".css",
+                           ".ds_store", ".json", ".db", ".xml"}
     excluded_files = {"cvinfo"}
     allowed_files = {"missing.txt"}
 
     files = []
+    for row in rows:
+        filename = row['name']
+        fn_lower = filename.lower()
 
-    for root, dirs, filenames in os.walk(full_path):
-        for filename in filenames:
-            if filename.lower() in excluded_files:
-                continue
+        if fn_lower in excluded_files:
+            continue
+        if filename.startswith(('.', '-', '_')):
+            continue
+        _, ext = os.path.splitext(fn_lower)
+        if fn_lower not in allowed_files and ext in excluded_extensions:
+            continue
 
-            _, ext = os.path.splitext(filename.lower())
+        file_path = row['path']
+        rel_path = os.path.relpath(file_path, DATA_DIR)
 
-            if filename.lower() not in allowed_files and ext in excluded_extensions:
-                continue
-            if filename.startswith(('.', '-', '_')):
-                continue
+        file_info = {
+            "name": filename,
+            "path": rel_path,
+            "size": row['size'] or 0,
+            "modified": row['modified_at'],
+            "type": "file",
+            "has_comicinfo": row['has_comicinfo'],
+        }
 
-            file_path = os.path.join(root, filename)
+        if fn_lower.endswith(('.cbz', '.cbr', '.zip')):
+            file_info['has_thumbnail'] = True
+            file_info['thumbnail_url'] = url_for('get_thumbnail', path=file_path)
+        else:
+            file_info['has_thumbnail'] = bool(row['has_thumbnail']) if row['has_thumbnail'] else False
 
-            rel_path = os.path.relpath(file_path, DATA_DIR)
+        files.append(file_info)
 
-            try:
-                stat_info = os.stat(file_path)
-                file_info = {
-                    "name": filename,
-                    "path": rel_path,
-                    "size": stat_info.st_size,
-                    "modified": stat_info.st_mtime,
-                    "type": "file"
-                }
-
-                if filename.lower().endswith(('.cbz', '.cbr', '.zip')):
-                    file_info['has_thumbnail'] = True
-                    file_info['thumbnail_url'] = url_for('get_thumbnail', path=file_path)
-                else:
-                    file_info['has_thumbnail'] = False
-
-                files.append(file_info)
-            except Exception as e:
-                app_logger.warning(f"Error processing file {file_path}: {e}")
-                continue
-
-    # Sort files by series name, year, then issue number
-    def natural_sort_key(item):
-        filename = item['name']
-
-        match = re.match(r'^(.+?)\s+#?(\d+)\s*\((\d{4})\)', filename, re.IGNORECASE)
-        if match:
-            series_name = match.group(1).strip().lower()
-            issue_number = int(match.group(2))
-            year = int(match.group(3))
-            return (series_name, year, issue_number, filename.lower())
-
-        match_no_year = re.match(r'^(.+?)\s+#?(\d+)', filename, re.IGNORECASE)
-        if match_no_year:
-            series_name = match_no_year.group(1).strip().lower()
-            issue_number = int(match_no_year.group(2))
-            return (series_name, 0, issue_number, filename.lower())
-
-        return (filename.lower(), 0, 0, filename.lower())
-
-    files.sort(key=natural_sort_key)
+    elapsed = time.time() - request_start
+    app_logger.info(
+        f"/api/browse-recursive returned {len(files)} of {total} files "
+        f"for {path} (offset={offset}, limit={limit}) in {elapsed:.3f}s"
+    )
 
     return jsonify({
         "current_path": path,
         "files": files,
-        "total": len(files)
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "letters": letters,
     })
 
 
@@ -877,11 +1010,12 @@ def list_new_files():
 @collection_bp.route('/list-downloads', methods=['GET'])
 def list_downloads():
     """List directories and files in the downloads/target path."""
-    from app import (TARGET_DIR, directory_cache, cache_lock, cache_timestamps,
+    from app import (get_target_dir_live, directory_cache, cache_lock, cache_timestamps,
                      cache_stats, MAX_CACHE_SIZE, cleanup_cache, is_cache_valid,
                      get_directory_listing)
 
-    current_path = request.args.get('path', TARGET_DIR)
+    target_dir = get_target_dir_live()
+    current_path = request.args.get('path', target_dir)
 
     if not os.path.exists(current_path):
         return jsonify({"error": "Directory not found"}), 404
@@ -891,7 +1025,7 @@ def list_downloads():
 
         if is_cache_valid(current_path):
             cached_data = directory_cache[current_path]
-            parent_dir = os.path.dirname(current_path) if current_path != TARGET_DIR else None
+            parent_dir = os.path.dirname(current_path) if current_path != target_dir else None
 
             return jsonify({
                 "current_path": current_path,
@@ -911,7 +1045,7 @@ def list_downloads():
             if len(directory_cache) > MAX_CACHE_SIZE:
                 cleanup_cache()
 
-        parent_dir = os.path.dirname(current_path) if current_path != TARGET_DIR else None
+        parent_dir = os.path.dirname(current_path) if current_path != target_dir else None
 
         return jsonify({
             "current_path": current_path,

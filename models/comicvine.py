@@ -898,7 +898,7 @@ def auto_move_file(file_path: str, volume_data: Dict[str, Any], config: Dict[str
         raise
 
 
-def get_metadata_by_volume_id(api_key: str, volume_id: int, issue_number: str, year: Optional[int] = None, start_year: Optional[int] = None) -> Optional[Dict[str, Any]]:
+def get_metadata_by_volume_id(api_key: str, volume_id: int, issue_number: str, year: Optional[int] = None, start_year: Optional[int] = None, publisher_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
     Get issue metadata using a known volume ID (from cvinfo file).
 
@@ -908,26 +908,37 @@ def get_metadata_by_volume_id(api_key: str, volume_id: int, issue_number: str, y
         issue_number: Issue number to look up
         year: Optional year for filtering
         start_year: Optional series start year to use for Volume field
+        publisher_name: Optional publisher name (from cvinfo cache or volume details)
+            so Publisher in ComicInfo.xml can be populated reliably without
+            depending on Simyan's issue.volume.publisher expansion.
 
     Returns:
         Dictionary with metadata in ComicInfo.xml format, or None if not found
     """
     try:
-        # Get the issue directly using volume_id
-        issue_data = get_issue_by_number(api_key, volume_id, issue_number, year)
+        # Get the issue directly using volume_id. Preserve the no-year call
+        # shape for tests and callers that patch this helper directly.
+        if year is None:
+            issue_data = get_issue_by_number(api_key, volume_id, issue_number)
+        else:
+            issue_data = get_issue_by_number(api_key, volume_id, issue_number, year)
 
         if not issue_data:
             return None
 
-        volume_details = get_volume_details(api_key, volume_id)
-        volume_data = {
-            "id": volume_id,
-            "name": issue_data.get("volume_name", ""),
-            "publisher_name": volume_details.get("publisher_name"),
-            "start_year": volume_details.get("start_year") or start_year,
-        }
+        # Build a minimal volume_data dict so map_to_comicinfo can use its
+        # preferred path (volume_data['publisher_name']) instead of relying on
+        # issue.volume.publisher which Simyan's get_issue does not reliably populate.
+        volume_data = None
+        if publisher_name or start_year:
+            volume_data = {
+                "id": volume_id,
+                "name": issue_data.get("volume_name"),
+                "publisher_name": publisher_name,
+                "start_year": start_year,
+            }
 
-        comicinfo = map_to_comicinfo(issue_data, volume_data)
+        comicinfo = map_to_comicinfo(issue_data, volume_data, start_year=start_year)
         comicinfo['_image_url'] = issue_data.get('image_url')
 
         return comicinfo
@@ -1532,18 +1543,15 @@ def auto_fetch_metadata_for_folder(folder_path: str, api_key: str, target_file: 
                 result['details'].append({'file': file_path, 'status': 'error', 'reason': 'no issue number'})
                 continue
 
-            issue_data = get_issue_by_number(api_key, volume_id, issue_number)
-            if issue_data:
-                volume_data = {
-                    "id": volume_id,
-                    "name": issue_data.get("volume_name", ""),
-                    "publisher_name": publisher_name,
-                    "start_year": start_year,
-                }
-                metadata = map_to_comicinfo(issue_data, volume_data)
-                metadata["_image_url"] = issue_data.get("image_url")
-            else:
-                metadata = None
+            # Fetch metadata from ComicVine (pass start_year + publisher_name
+            # so Volume and Publisher fields are populated from cvinfo cache)
+            metadata = get_metadata_by_volume_id(
+                api_key,
+                volume_id,
+                issue_number,
+                start_year=start_year,
+                publisher_name=publisher_name,
+            )
 
             if not metadata:
                 app_logger.warning(f"No metadata found for {file_path}, issue #{issue_number}")

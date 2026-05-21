@@ -1,32 +1,130 @@
 import sqlite3
 import os
 import re
+import shutil
 import hashlib
 import random
+import threading
+import time
 import zipfile
 from datetime import datetime
 from typing import Optional
-from core.config import config
+from core.config import config, CONFIG_DIR
 from core.app_logging import app_logger
 
 
 def get_db_path():
-    # Ensure we get the latest config value
-    cache_dir = config.get("SETTINGS", "CACHE_DIR", fallback="/cache")
-    if not os.path.exists(cache_dir):
+    target_dir = CONFIG_DIR
+    if not os.path.exists(target_dir):
         try:
-            os.makedirs(cache_dir, exist_ok=True)
+            os.makedirs(target_dir, exist_ok=True)
         except OSError as e:
-            app_logger.error(f"Failed to create cache directory {cache_dir}: {e}")
-            # Fallback to a local directory if /cache is not writable (e.g. running locally without docker)
-            cache_dir = "cache"
-            os.makedirs(cache_dir, exist_ok=True)
+            app_logger.error(f"Failed to create config dir {target_dir}: {e}")
+            # Fallback to a local directory for dev environments without /config
+            target_dir = "config"
+            os.makedirs(target_dir, exist_ok=True)
 
-    return os.path.join(cache_dir, "comic_utils.db")
+    return os.path.join(target_dir, "comic_utils.db")
+
+
+def _db_appears_populated(db_path):
+    """Return True if the DB at db_path has any user data (file_index rows or
+    issues_read rows). Used to distinguish a freshly-created schema-only DB
+    from one with actual reading history."""
+    if not os.path.exists(db_path):
+        return False
+    try:
+        c = sqlite3.connect(db_path, timeout=5)
+        try:
+            cur = c.cursor()
+            for table in ("file_index", "issues_read", "series", "publishers"):
+                try:
+                    cur.execute(f"SELECT 1 FROM {table} LIMIT 1")
+                    if cur.fetchone() is not None:
+                        return True
+                except sqlite3.OperationalError:
+                    # Table may not exist yet on a brand-new DB; that's fine.
+                    pass
+            return False
+        finally:
+            c.close()
+    except sqlite3.Error as e:
+        app_logger.warning(f"Could not inspect {db_path} for population check: {e}")
+        return False
+
+
+def _migrate_db_to_config_dir():
+    """Move comic_utils.db (and WAL/SHM sidecars) from the legacy CACHE_DIR
+    location to CONFIG_DIR. No-op once migrated. Safe to run on every startup."""
+    legacy_dir = config.get("SETTINGS", "CACHE_DIR", fallback="/cache")
+    legacy_db = os.path.join(legacy_dir, "comic_utils.db")
+    new_db = get_db_path()
+
+    app_logger.info(
+        f"DB migration check: legacy={legacy_db} (exists={os.path.exists(legacy_db)}), "
+        f"new={new_db} (exists={os.path.exists(new_db)})"
+    )
+
+    if not os.path.exists(legacy_db):
+        return
+    try:
+        if os.path.realpath(legacy_db) == os.path.realpath(new_db):
+            app_logger.info(
+                "DB migration: legacy and new path resolve to the same file; skipping."
+            )
+            return
+    except OSError:
+        return
+
+    if os.path.exists(new_db):
+        # Both exist. If the new one is empty (schema only) and the legacy is
+        # populated, complete the move — the user almost certainly wants their
+        # real data. Otherwise leave both in place and warn.
+        legacy_populated = _db_appears_populated(legacy_db)
+        new_populated = _db_appears_populated(new_db)
+        if legacy_populated and not new_populated:
+            backup_path = new_db + ".empty.bak"
+            app_logger.warning(
+                f"DB migration: new {new_db} is empty but legacy {legacy_db} has data. "
+                f"Backing up empty DB to {backup_path} and moving legacy into place."
+            )
+            try:
+                # Move the empty new DB aside (and any sidecars) before restoring legacy.
+                shutil.move(new_db, backup_path)
+                for suffix in ("-wal", "-shm"):
+                    side = new_db + suffix
+                    if os.path.exists(side):
+                        shutil.move(side, backup_path + suffix)
+            except Exception as e:
+                app_logger.error(f"DB migration: could not set aside empty new DB: {e}")
+                return
+            # Fall through to the move-legacy block below.
+        else:
+            app_logger.warning(
+                f"DB exists at both {legacy_db} and {new_db} "
+                f"(legacy_populated={legacy_populated}, new_populated={new_populated}); "
+                f"using the new location. The legacy file is orphaned and can be deleted manually."
+            )
+            return
+
+    app_logger.info(f"Migrating SQLite DB: {legacy_db} -> {new_db}")
+    os.makedirs(os.path.dirname(new_db), exist_ok=True)
+    try:
+        shutil.move(legacy_db, new_db)
+        for suffix in ("-wal", "-shm"):
+            old_side = legacy_db + suffix
+            if os.path.exists(old_side):
+                shutil.move(old_side, new_db + suffix)
+        app_logger.info("DB migration complete.")
+    except Exception as e:
+        app_logger.error(f"DB migration failed: {e}")
+        raise
 
 
 def init_db():
     """Initialize the SQLite database and create tables if they don't exist."""
+    _migrate_db_to_config_dir()
+    _needs_tag_backfill = False
     try:
         db_path = get_db_path()
         app_logger.info(f"Initializing database at {db_path}")
@@ -155,6 +253,58 @@ def init_db():
         )
         c.execute(
             "CREATE INDEX IF NOT EXISTS idx_file_index_first_indexed ON file_index(first_indexed_at)"
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_file_index_publisher ON file_index(ci_publisher)"
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_file_index_series ON file_index(ci_series)"
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_file_index_year ON file_index(ci_year)"
+        )
+        # Covering index for GROUP BY on the publisher->series->year axis chain
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_file_index_pub_series_year"
+            " ON file_index(ci_publisher, ci_series, ci_year)"
+        )
+        # Partial index for the metadata browser base filter (comic files only).
+        # Accelerates the "type = 'file' AND name LIKE '%.cb?'" predicate that
+        # every metadata_facets / metadata_browse query starts with.
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_file_index_comics_publisher"
+            " ON file_index(ci_publisher) WHERE type = 'file'"
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_file_index_comics_series"
+            " ON file_index(ci_series) WHERE type = 'file'"
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_file_index_comics_year"
+            " ON file_index(ci_year) WHERE type = 'file'"
+        )
+
+        # -----------------------------------------------------------------
+        # file_metadata_tags: normalised key/value rows exploded from the
+        # comma-separated ci_writer / ci_penciller / ci_characters / ci_genre
+        # (etc.) columns. Replaces padded-LIKE scans with indexed equality
+        # joins for the metadata browser.
+        # -----------------------------------------------------------------
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS file_metadata_tags (
+                file_path TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                value TEXT NOT NULL,
+                PRIMARY KEY (file_path, kind, value)
+            ) WITHOUT ROWID
+        """)
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_fmt_kind_value"
+            " ON file_metadata_tags(kind, value)"
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_fmt_value"
+            " ON file_metadata_tags(value)"
         )
 
         # Create rebuild_schedule table (store file index rebuild schedule)
@@ -943,8 +1093,62 @@ def init_db():
             app_logger.debug(f"TIMEZONE migration skipped or already done: {e}")
 
         conn.commit()
+
+        # Check whether the normalised tag table needs a one-shot backfill from
+        # the existing ci_* columns. We do NOT run it synchronously here —
+        # on large libraries it blocks startup for minutes. Instead we kick
+        # off a daemon thread after init_db() returns (see below). The
+        # backfill is idempotent and safe alongside the metadata scanner.
+        _t0 = time.monotonic()
+        c.execute(
+            "SELECT 1 FROM file_index WHERE type = 'file'"
+            " AND NOT EXISTS ("
+            "   SELECT 1 FROM file_metadata_tags WHERE file_path = file_index.path"
+            " ) AND ("
+            " ci_writer IS NOT NULL AND ci_writer != ''"
+            " OR ci_penciller IS NOT NULL AND ci_penciller != ''"
+            " OR ci_characters IS NOT NULL AND ci_characters != ''"
+            " OR ci_genre IS NOT NULL AND ci_genre != ''"
+            " OR ci_inker IS NOT NULL AND ci_inker != ''"
+            " OR ci_colorist IS NOT NULL AND ci_colorist != ''"
+            " OR ci_letterer IS NOT NULL AND ci_letterer != ''"
+            " OR ci_coverartist IS NOT NULL AND ci_coverartist != ''"
+            " ) LIMIT 1"
+        )
+        _needs_tag_backfill = c.fetchone() is not None
+        _elapsed = time.monotonic() - _t0
+        if _elapsed > 1:
+            app_logger.info(f"Tag backfill check took {_elapsed:.1f}s")
+
         conn.close()
+        # A new/re-initialised DB invalidates any cached metadata browser
+        # results from a previous connection (important for test isolation).
+        invalidate_metadata_browser_cache()
         app_logger.info("Database initialized successfully")
+
+        # Run ANALYZE in a background thread so it doesn't block startup.
+        # Fresh stats help the query planner but aren't urgent.
+        def _background_analyze():
+            try:
+                _conn = get_db_connection()
+                if _conn:
+                    _t0 = time.monotonic()
+                    _conn.execute("ANALYZE")
+                    _conn.commit()
+                    _conn.close()
+                    _elapsed = time.monotonic() - _t0
+                    app_logger.info(f"Background ANALYZE completed in {_elapsed:.1f}s")
+            except Exception as e:
+                app_logger.debug(f"Background ANALYZE skipped: {e}")
+
+        threading.Thread(target=_background_analyze, daemon=True).start()
+
+        if _needs_tag_backfill:
+            app_logger.info(
+                "file_metadata_tags backfill needed — running in background"
+            )
+            _start_backfill_tags_async()
+
         return True
     except Exception as e:
         app_logger.error(f"Failed to initialize database: {e}")
@@ -971,21 +1175,22 @@ def get_db_connection():
 # =============================================================================
 
 
-def backup_database(max_backups: int = 3) -> bool:
+def backup_database(max_backups: int = 3, force: bool = False):
     """
     Create a ZIP backup of the database if it has changed since last backup.
 
     Args:
         max_backups: Maximum number of backups to retain (default 3)
+        force: When True, skip the unchanged-since-last-backup hash check.
 
     Returns:
-        True if backup created, False if skipped or error
+        Backup filename (str) on success, None if skipped, False on error.
     """
     try:
         db_path = get_db_path()
         if not os.path.exists(db_path):
             app_logger.info("Database does not exist yet, skipping backup")
-            return False
+            return None
 
         cache_dir = os.path.dirname(db_path)
 
@@ -999,14 +1204,14 @@ def backup_database(max_backups: int = 3) -> bool:
 
         current_hash = get_file_hash(db_path)
 
-        # Check last backup hash
+        # Check last backup hash unless caller forced
         hash_file = os.path.join(cache_dir, ".db_backup_hash")
-        if os.path.exists(hash_file):
+        if not force and os.path.exists(hash_file):
             with open(hash_file, "r") as f:
                 last_hash = f.read().strip()
             if last_hash == current_hash:
                 app_logger.debug("Database unchanged since last backup, skipping")
-                return False
+                return None
 
         # Create timestamped backup filename
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1034,11 +1239,204 @@ def backup_database(max_backups: int = 3) -> bool:
         # Cleanup old backups (keep only max_backups most recent)
         _cleanup_old_backups(cache_dir, max_backups)
 
-        return True
+        return backup_name
 
     except Exception as e:
         app_logger.error(f"Database backup failed: {e}")
         return False
+
+
+_BACKUP_FILENAME_RE = re.compile(r"^comic_utils_backup_\d{8}_\d{6}\.zip$")
+
+
+def list_backups():
+    """Return a list of dicts describing every backup ZIP in the DB directory.
+
+    Each dict: {filename, size, modified_at} sorted newest-first.
+    """
+    db_path = get_db_path()
+    backup_dir = os.path.dirname(db_path)
+    items = []
+    if not os.path.isdir(backup_dir):
+        return items
+    for name in os.listdir(backup_dir):
+        if not _BACKUP_FILENAME_RE.match(name):
+            continue
+        full = os.path.join(backup_dir, name)
+        try:
+            st = os.stat(full)
+        except OSError:
+            continue
+        items.append({
+            "filename": name,
+            "size": st.st_size,
+            "modified_at": st.st_mtime,
+        })
+    # Sort by filename — names embed YYYYMMDD_HHMMSS, so lexical desc = newest first.
+    # Falls back gracefully if mtimes match at filesystem resolution (Windows).
+    items.sort(key=lambda d: d["filename"], reverse=True)
+    return items
+
+
+def delete_backup(filename: str):
+    """Delete a single backup ZIP. Returns the deleted filename.
+
+    Raises ValueError on a malformed filename, FileNotFoundError if missing.
+    """
+    if not _BACKUP_FILENAME_RE.match(filename):
+        raise ValueError(f"Invalid backup filename: {filename}")
+    db_path = get_db_path()
+    backup_dir = os.path.dirname(db_path)
+    target = os.path.join(backup_dir, filename)
+    if not os.path.exists(target):
+        raise FileNotFoundError(filename)
+    os.remove(target)
+    app_logger.info(f"Backup deleted: {filename}")
+    return filename
+
+
+def get_backup_path(filename: str) -> str:
+    """Resolve a backup filename to its full filesystem path. Raises ValueError
+    on a malformed filename, FileNotFoundError if missing. Used by the download
+    route to safely locate a file inside the backup directory."""
+    if not _BACKUP_FILENAME_RE.match(filename):
+        raise ValueError(f"Invalid backup filename: {filename}")
+    db_path = get_db_path()
+    backup_dir = os.path.dirname(db_path)
+    target = os.path.join(backup_dir, filename)
+    if not os.path.exists(target):
+        raise FileNotFoundError(filename)
+    return target
+
+
+def restore_database(filename: str):
+    """Restore the database from a previous backup ZIP.
+
+    The current DB is first snapshotted to a pre-restore backup so the user
+    can roll forward if they pick the wrong file. Then the backup ZIP is
+    extracted into the DB directory, atomically replacing comic_utils.db
+    and its sidecars.
+
+    Returns dict {success, message, pre_restore_backup}. Raises ValueError
+    on invalid filename, FileNotFoundError if the backup is missing.
+    """
+    if not _BACKUP_FILENAME_RE.match(filename):
+        raise ValueError(f"Invalid backup filename: {filename}")
+
+    db_path = get_db_path()
+    backup_dir = os.path.dirname(db_path)
+    backup_path = os.path.join(backup_dir, filename)
+    if not os.path.exists(backup_path):
+        raise FileNotFoundError(filename)
+
+    # Take a safety snapshot of the current DB before clobbering it.
+    pre_restore = backup_database(max_backups=99, force=True)
+    if pre_restore is False:
+        # backup_database returns False on hard error; bail rather than restore blind.
+        raise RuntimeError("Could not create pre-restore safety backup; aborting restore.")
+
+    app_logger.info(f"Restoring database from {filename}")
+
+    # Extract the ZIP into a sibling temp dir, then move files into place.
+    tmp_dir = os.path.join(backup_dir, ".restore_tmp")
+    if os.path.exists(tmp_dir):
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    os.makedirs(tmp_dir)
+    try:
+        with zipfile.ZipFile(backup_path, "r") as zf:
+            for member in ("comic_utils.db", "comic_utils.db-wal", "comic_utils.db-shm"):
+                if member in zf.namelist():
+                    zf.extract(member, tmp_dir)
+        # Sanity check: the extracted main DB must exist.
+        new_db = os.path.join(tmp_dir, "comic_utils.db")
+        if not os.path.exists(new_db):
+            raise RuntimeError(f"Backup {filename} did not contain comic_utils.db")
+
+        # Remove existing sidecar files first so partial state doesn't survive.
+        for suffix in ("-wal", "-shm"):
+            side = db_path + suffix
+            if os.path.exists(side):
+                try:
+                    os.remove(side)
+                except OSError as e:
+                    app_logger.warning(f"Could not remove existing {side}: {e}")
+
+        # os.replace is atomic on the same filesystem.
+        os.replace(new_db, db_path)
+        for suffix in ("-wal", "-shm"):
+            extracted = os.path.join(tmp_dir, "comic_utils.db" + suffix)
+            if os.path.exists(extracted):
+                os.replace(extracted, db_path + suffix)
+
+        # Invalidate the backup hash so the next periodic backup regenerates.
+        hash_file = os.path.join(backup_dir, ".db_backup_hash")
+        try:
+            if os.path.exists(hash_file):
+                os.remove(hash_file)
+        except OSError:
+            pass
+
+        app_logger.info(f"Database restored from {filename}")
+        return {
+            "success": True,
+            "message": f"Database restored from {filename}",
+            "pre_restore_backup": pre_restore,
+        }
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def get_database_stats():
+    """Snapshot of database file sizes and per-table row counts.
+
+    Returns dict suitable for jsonify; never raises.
+    """
+    stats = {
+        "db_path": None,
+        "db_size": 0,
+        "wal_size": 0,
+        "shm_size": 0,
+        "tables": [],
+        "total_rows": 0,
+        "error": None,
+    }
+    try:
+        db_path = get_db_path()
+        stats["db_path"] = db_path
+        if os.path.exists(db_path):
+            stats["db_size"] = os.path.getsize(db_path)
+        for suffix, key in (("-wal", "wal_size"), ("-shm", "shm_size")):
+            side = db_path + suffix
+            if os.path.exists(side):
+                stats[key] = os.path.getsize(side)
+
+        if not os.path.exists(db_path):
+            return stats
+
+        conn = sqlite3.connect(db_path, timeout=5)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name NOT LIKE 'sqlite_%' ORDER BY name"
+            )
+            tables = [row[0] for row in cur.fetchall()]
+            for table in tables:
+                try:
+                    cur.execute(f'SELECT COUNT(*) FROM "{table}"')
+                    count = cur.fetchone()[0]
+                except sqlite3.Error:
+                    count = None
+                stats["tables"].append({"name": table, "rows": count})
+                if isinstance(count, int):
+                    stats["total_rows"] += count
+        finally:
+            conn.close()
+        return stats
+    except Exception as e:
+        app_logger.error(f"get_database_stats failed: {e}")
+        stats["error"] = str(e)
+        return stats
 
 
 def _cleanup_old_backups(cache_dir: str, max_backups: int):
@@ -1351,7 +1749,6 @@ def get_recent_files(limit=100):
     Returns:
         List of dictionaries containing file information, or empty list on error
     """
-    target = config.get("SETTINGS", "TARGET", fallback="/data/downloads/processed")
     try:
         conn = get_db_connection()
         if not conn:
@@ -1362,21 +1759,48 @@ def get_recent_files(limit=100):
 
         c = conn.cursor()
 
-        # Query file_index for recent comic files by first_indexed_at (when file was first added)
-        c.execute(
-            """
-            SELECT path as file_path, name as file_name, size as file_size,
-                   datetime(first_indexed_at, 'unixepoch', 'localtime') as added_at
-            FROM file_index
-            WHERE type = 'file'
-            AND (name LIKE '%.cbz' OR name LIKE '%.cbr')
-            AND first_indexed_at IS NOT NULL
-            AND parent NOT LIKE ?
-            ORDER BY first_indexed_at DESC
-            LIMIT ?
-        """,
-            (f"{target}%", limit),
-        )
+        # Only show files that live inside a known library path.
+        # This automatically excludes downloads/temp folders without a fragile blocklist.
+        libraries = get_libraries(enabled_only=True)
+        lib_paths = [lib["path"] for lib in libraries if lib.get("path")]
+
+        if lib_paths:
+            lib_clauses = " OR ".join(["path LIKE ?"] * len(lib_paths))
+            lib_params = [f"{p}/%" for p in lib_paths]
+            c.execute(
+                f"""
+                SELECT path as file_path, name as file_name, size as file_size,
+                       datetime(first_indexed_at, 'unixepoch', 'localtime') as added_at
+                FROM file_index
+                WHERE type = 'file'
+                AND (name LIKE '%.cbz' OR name LIKE '%.cbr')
+                AND first_indexed_at IS NOT NULL
+                AND ({lib_clauses})
+                ORDER BY first_indexed_at DESC
+                LIMIT ?
+            """,
+                lib_params + [limit],
+            )
+        else:
+            # Fallback: exclude both TARGET and WATCH download folders
+            from core.config import get_target_dir, get_watch_dir
+            target = get_target_dir() or "/data/downloads/processed"
+            watch = get_watch_dir() or "/downloads/temp"
+            c.execute(
+                """
+                SELECT path as file_path, name as file_name, size as file_size,
+                       datetime(first_indexed_at, 'unixepoch', 'localtime') as added_at
+                FROM file_index
+                WHERE type = 'file'
+                AND (name LIKE '%.cbz' OR name LIKE '%.cbr')
+                AND first_indexed_at IS NOT NULL
+                AND parent NOT LIKE ?
+                AND parent NOT LIKE ?
+                ORDER BY first_indexed_at DESC
+                LIMIT ?
+            """,
+                (f"{target}%", f"{watch}%", limit),
+            )
 
         rows = c.fetchall()
         conn.close()
@@ -1398,6 +1822,89 @@ def get_recent_files(limit=100):
     except Exception as e:
         app_logger.error(f"Failed to retrieve recent files: {e}")
         return []
+
+
+RECENT_FILES_WINDOW_DAYS = 30
+
+
+def get_recent_files_paginated(offset=0, limit=50):
+    """
+    Paginated sibling of get_recent_files — returns (rows, total).
+
+    Restricted to files indexed within the last RECENT_FILES_WINDOW_DAYS
+    days (currently 30). Same library/downloads filter as the unpaginated
+    helper. SELECTs `id` too so the API can return file_index.id for
+    client drill-through.
+    """
+    try:
+        import time
+
+        conn = get_db_connection()
+        if not conn:
+            return [], 0
+
+        cutoff = time.time() - (RECENT_FILES_WINDOW_DAYS * 86400)
+        c = conn.cursor()
+        libraries = get_libraries(enabled_only=True)
+        lib_paths = [lib["path"] for lib in libraries if lib.get("path")]
+
+        if lib_paths:
+            lib_clauses = " OR ".join(["path LIKE ?"] * len(lib_paths))
+            lib_params = [f"{p}/%" for p in lib_paths]
+            where = (
+                "type = 'file' "
+                "AND (name LIKE '%.cbz' OR name LIKE '%.cbr') "
+                "AND first_indexed_at IS NOT NULL "
+                "AND first_indexed_at >= ? "
+                f"AND ({lib_clauses})"
+            )
+            params = [cutoff] + lib_params
+            c.execute(f"SELECT COUNT(*) FROM file_index WHERE {where}", params)
+            total = c.fetchone()[0] or 0
+            c.execute(
+                f"""
+                SELECT id, path as file_path, name as file_name, size as file_size,
+                       datetime(first_indexed_at, 'unixepoch', 'localtime') as added_at
+                FROM file_index
+                WHERE {where}
+                ORDER BY first_indexed_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                params + [limit, offset],
+            )
+        else:
+            from core.config import get_target_dir, get_watch_dir
+            target = get_target_dir() or "/data/downloads/processed"
+            watch = get_watch_dir() or "/downloads/temp"
+            where = (
+                "type = 'file' "
+                "AND (name LIKE '%.cbz' OR name LIKE '%.cbr') "
+                "AND first_indexed_at IS NOT NULL "
+                "AND first_indexed_at >= ? "
+                "AND parent NOT LIKE ? AND parent NOT LIKE ?"
+            )
+            params = [cutoff, f"{target}%", f"{watch}%"]
+            c.execute(f"SELECT COUNT(*) FROM file_index WHERE {where}", params)
+            total = c.fetchone()[0] or 0
+            c.execute(
+                f"""
+                SELECT id, path as file_path, name as file_name, size as file_size,
+                       datetime(first_indexed_at, 'unixepoch', 'localtime') as added_at
+                FROM file_index
+                WHERE {where}
+                ORDER BY first_indexed_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                params + [limit, offset],
+            )
+
+        rows = [dict(r) for r in c.fetchall()]
+        conn.close()
+        return rows, total
+
+    except Exception as e:
+        app_logger.error(f"Failed to retrieve paginated recent files: {e}")
+        return [], 0
 
 
 #########################
@@ -1578,7 +2085,11 @@ def save_file_index_to_db(file_index):
             conn.commit()
             total_saved += len(records)
 
+        # Full rewrite wipes tag rows; metadata scan repopulates on next pass.
+        c.execute("DELETE FROM file_metadata_tags")
+        conn.commit()
         conn.close()
+        invalidate_metadata_browser_cache()
 
         app_logger.info(f"Saved {total_saved} entries to file index database")
         return True
@@ -1751,9 +2262,17 @@ def update_file_index_entry(path, name=None, new_path=None, parent=None, size=No
 
         c.execute("UPDATE file_index SET " + set_clause + " WHERE path = ?", params)
 
+        # Follow path renames in the tag table too.
+        if new_path is not None and new_path != path:
+            c.execute(
+                "UPDATE file_metadata_tags SET file_path = ? WHERE file_path = ?",
+                (new_path, path),
+            )
+
         conn.commit()
         rows_affected = c.rowcount
         conn.close()
+        invalidate_metadata_browser_cache()
 
         if rows_affected > 0:
             app_logger.debug(f"Updated file index entry: {path}")
@@ -1821,6 +2340,7 @@ def add_file_index_entry(
 
         conn.commit()
         conn.close()
+        invalidate_metadata_browser_cache()
 
         app_logger.debug(f"Added file index entry: {path}")
         return True
@@ -1856,9 +2376,17 @@ def delete_file_index_entry(path):
             (path, f"{path}/%"),
         )
 
+        # Drop normalised tag rows for this path + its descendants.
+        c.execute("DELETE FROM file_metadata_tags WHERE file_path = ?", (path,))
+        c.execute(
+            "DELETE FROM file_metadata_tags WHERE file_path LIKE ?",
+            (f"{path}/%",),
+        )
+
         conn.commit()
         rows_affected = c.rowcount
         conn.close()
+        invalidate_metadata_browser_cache()
 
         if rows_affected > 0:
             app_logger.debug(f"Deleted {rows_affected} file index entries for: {path}")
@@ -1896,6 +2424,10 @@ def delete_file_index_entries(paths, dir_paths=None):
         # Delete exact path entries
         c.executemany("DELETE FROM file_index WHERE path = ?", [(p,) for p in paths])
         total_deleted += c.rowcount
+        c.executemany(
+            "DELETE FROM file_metadata_tags WHERE file_path = ?",
+            [(p,) for p in paths],
+        )
 
         # Delete children only for directory paths
         if dir_paths:
@@ -1905,9 +2437,14 @@ def delete_file_index_entries(paths, dir_paths=None):
                     (dp, f"{dp}/%"),
                 )
                 total_deleted += c.rowcount
+                c.execute(
+                    "DELETE FROM file_metadata_tags WHERE file_path LIKE ?",
+                    (f"{dp}/%",),
+                )
 
         conn.commit()
         conn.close()
+        invalidate_metadata_browser_cache()
 
         if total_deleted > 0:
             app_logger.debug(
@@ -1934,10 +2471,12 @@ def clear_file_index_from_db():
 
         c = conn.cursor()
         c.execute("DELETE FROM file_index")
+        c.execute("DELETE FROM file_metadata_tags")
 
         conn.commit()
         rows_affected = c.rowcount
         conn.close()
+        invalidate_metadata_browser_cache()
 
         app_logger.info(f"Cleared {rows_affected} entries from file index database")
         return True
@@ -1984,6 +2523,10 @@ def sync_file_index_incremental(filesystem_entries):
         if removed_paths:
             for path in removed_paths:
                 c.execute("DELETE FROM file_index WHERE path = ?", (path,))
+                c.execute(
+                    "DELETE FROM file_metadata_tags WHERE file_path = ?",
+                    (path,),
+                )
             app_logger.info(
                 f"Removed {len(removed_paths)} orphaned entries from file_index"
             )
@@ -2021,6 +2564,9 @@ def sync_file_index_incremental(filesystem_entries):
 
         conn.commit()
         conn.close()
+
+        if new_paths or removed_paths:
+            invalidate_metadata_browser_cache()
 
         if new_paths:
             app_logger.info(f"Added {len(new_paths)} new entries to file_index")
@@ -2210,8 +2756,15 @@ def update_file_metadata(file_id, metadata_dict, scanned_at, has_comicinfo=None)
             ),
         )
 
+        # Refresh the normalised tag rows for the metadata browser.
+        c.execute("SELECT path FROM file_index WHERE id = ?", (file_id,))
+        row = c.fetchone()
+        if row and row[0]:
+            _sync_tags_for_file(conn, row[0], metadata_dict)
+
         conn.commit()
         conn.close()
+        invalidate_metadata_browser_cache()
         return True
 
     except Exception as e:
@@ -2219,14 +2772,17 @@ def update_file_metadata(file_id, metadata_dict, scanned_at, has_comicinfo=None)
         return False
 
 
-def update_metadata_scanned_at(file_id, scanned_at):
+def update_metadata_scanned_at(file_id, scanned_at, clear_has_comicinfo=False):
     """
     Mark a file as scanned without updating metadata fields.
-    Used when file has no ComicInfo.xml or on error.
 
     Args:
         file_id: ID of the file_index entry
         scanned_at: Unix timestamp (or None)
+        clear_has_comicinfo: If True, also set has_comicinfo=0. Pass True only
+            when the absence of ComicInfo.xml is definitive (file missing,
+            corrupt ZIP). Leave False for transient errors so a previously
+            correct has_comicinfo=1 isn't flipped to 0 by a one-off failure.
 
     Returns:
         True if successful, False otherwise
@@ -2237,10 +2793,16 @@ def update_metadata_scanned_at(file_id, scanned_at):
             return False
 
         c = conn.cursor()
-        c.execute(
-            "UPDATE file_index SET metadata_scanned_at = ?, has_comicinfo = 0 WHERE id = ?",
-            (scanned_at, file_id),
-        )
+        if clear_has_comicinfo:
+            c.execute(
+                "UPDATE file_index SET metadata_scanned_at = ?, has_comicinfo = 0 WHERE id = ?",
+                (scanned_at, file_id),
+            )
+        else:
+            c.execute(
+                "UPDATE file_index SET metadata_scanned_at = ? WHERE id = ?",
+                (scanned_at, file_id),
+            )
 
         conn.commit()
         conn.close()
@@ -2311,6 +2873,186 @@ def get_files_missing_comicinfo(path=None):
         return []
 
 
+def get_files_recursive_paged(
+    path_prefix,
+    offset=0,
+    limit=21,
+    letter=None,
+    search=None,
+    max_retries=3,
+):
+    """
+    Return a paged slice of file rows under path_prefix from file_index, plus
+    the total count and the set of distinct first-letter buckets present
+    under that path/search context.
+
+    Used by /api/browse-recursive to serve the "All Books" view with
+    server-side pagination, search, and letter filtering — replacing the old
+    full-tree os.walk that timed out behind Cloudflare on large libraries.
+
+    Args:
+        path_prefix: Directory path. Matches files whose path starts with
+            ``path_prefix + os.sep`` so '/data/Marvel' won't accidentally
+            match '/data/MarvelOther'.
+        offset: Pagination offset (clamped to >= 0).
+        limit: Page size (clamped to 1-500).
+        letter: Optional first-letter filter — 'A'-'Z' or '#' (non-alpha bucket).
+        search: Optional case-insensitive substring against name and ci_series.
+            LIKE wildcards in the input are escaped.
+        max_retries: Retries on SQLite "database is locked" errors.
+
+    Returns:
+        Tuple ``(rows, total, letters)``:
+            * ``rows`` — list of dicts for the current page, each containing
+              name, path, size, modified_at, has_thumbnail, has_comicinfo,
+              ci_series, ci_number, ci_year.
+            * ``total`` — count of rows matching path/letter/search.
+            * ``letters`` — sorted list of first-letter buckets present under
+              path/search (NOT filtered by letter, so the filter bar shows
+              all available buckets). Non-alpha letters collapse to '#'.
+    """
+    offset = max(0, int(offset or 0))
+    limit = max(1, min(500, int(limit or 21)))
+
+    normalized = path_prefix.rstrip("/\\")
+    like_path = normalized + os.sep + "%"
+
+    # Base WHERE shared by all three queries
+    base_clauses = ["type = 'file'", "path LIKE ?"]
+    base_params = [like_path]
+
+    # Search filter — escape LIKE wildcards in user input
+    if search and search.strip():
+        s = search.strip().lower()
+        s = s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        s_pattern = f"%{s}%"
+        base_clauses.append(
+            "(LOWER(name) LIKE ? ESCAPE '\\' "
+            "OR LOWER(IFNULL(ci_series, '')) LIKE ? ESCAPE '\\')"
+        )
+        base_params.extend([s_pattern, s_pattern])
+
+    # Letters query uses base WHERE (no letter filter) so the filter bar
+    # always shows all available buckets.
+    letters_where_sql = " AND ".join(base_clauses)
+    letters_params = list(base_params)
+
+    # Page + count queries add the letter filter (if any)
+    paged_clauses = list(base_clauses)
+    paged_params = list(base_params)
+    if letter:
+        if letter == "#":
+            paged_clauses.append(
+                "SUBSTR(COALESCE(NULLIF(TRIM(ci_series), ''), name), 1, 1) "
+                "GLOB '[^A-Za-z]'"
+            )
+        elif len(letter) == 1 and letter.isalpha():
+            paged_clauses.append(
+                "UPPER(SUBSTR(COALESCE(NULLIF(TRIM(ci_series), ''), name), 1, 1)) = ?"
+            )
+            paged_params.append(letter.upper())
+    paged_where_sql = " AND ".join(paged_clauses)
+
+    order_sql = (
+        "ORDER BY "
+        "COALESCE(NULLIF(LOWER(TRIM(ci_series)), ''), LOWER(name)) ASC, "
+        "COALESCE(CAST(NULLIF(ci_year, '') AS INTEGER), 0) ASC, "
+        "COALESCE(CAST(NULLIF(ci_number, '') AS REAL), 0) ASC, "
+        "LOWER(name) ASC"
+    )
+
+    for attempt in range(max_retries):
+        conn = None
+        try:
+            conn = get_db_connection()
+            if not conn:
+                app_logger.error(
+                    "Could not get database connection for recursive paged listing"
+                )
+                return [], 0, []
+
+            c = conn.cursor()
+
+            # 1) Page slice
+            c.execute(
+                f"""
+                SELECT name, path, size, modified_at, has_thumbnail, has_comicinfo,
+                       ci_series, ci_number, ci_year
+                FROM file_index
+                WHERE {paged_where_sql}
+                {order_sql}
+                LIMIT ? OFFSET ?
+                """,
+                (*paged_params, limit, offset),
+            )
+            rows = [dict(r) for r in c.fetchall()]
+
+            # 2) Total count for the same filtered set
+            c.execute(
+                f"SELECT COUNT(*) FROM file_index WHERE {paged_where_sql}",
+                paged_params,
+            )
+            total = c.fetchone()[0]
+
+            # 3) Distinct first letters across path/search (no letter filter)
+            c.execute(
+                f"""
+                SELECT DISTINCT
+                    UPPER(SUBSTR(COALESCE(NULLIF(TRIM(ci_series), ''), name), 1, 1))
+                    AS letter
+                FROM file_index
+                WHERE {letters_where_sql}
+                """,
+                letters_params,
+            )
+            buckets = set()
+            for row in c.fetchall():
+                ch = row[0]
+                if not ch:
+                    continue
+                if ch.isalpha():
+                    buckets.add(ch.upper())
+                else:
+                    buckets.add("#")
+            # '#' last
+            letters = sorted(buckets, key=lambda x: (x == "#", x))
+
+            conn.close()
+            return rows, total, letters
+
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e).lower() and attempt < max_retries - 1:
+                app_logger.warning(
+                    f"Database locked, retrying recursive paged listing "
+                    f"({attempt + 1}/{max_retries})..."
+                )
+                if conn:
+                    conn.close()
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            app_logger.error(
+                f"Failed to get paged recursive files for {path_prefix}: {e}"
+            )
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            return [], 0, []
+        except Exception as e:
+            app_logger.error(
+                f"Failed to get paged recursive files for {path_prefix}: {e}"
+            )
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            return [], 0, []
+
+    return [], 0, []
+
+
 def set_has_comicinfo(file_path, value=1):
     """Set has_comicinfo flag for a file by path. Used after writing ComicInfo.xml."""
     try:
@@ -2378,7 +3120,7 @@ def update_file_index_from_comicinfo(file_path, comicinfo_dict):
         ci_genre = str(comicinfo_dict.get("Genre", "") or "")
         ci_tags = str(comicinfo_dict.get("Tags", "") or "")
         ci_characters = str(comicinfo_dict.get("Characters", "") or "")
-        scanned_at = _time.time()
+        scanned_at = time.time()
 
         app_logger.info(
             f"update_file_index_from_comicinfo: series={ci_series}, "
@@ -2408,9 +3150,21 @@ def update_file_index_from_comicinfo(file_path, comicinfo_dict):
             ),
         )
 
+        _sync_tags_for_file(conn, file_path, {
+            "ci_writer": ci_writer,
+            "ci_penciller": ci_penciller,
+            "ci_inker": ci_inker,
+            "ci_colorist": ci_colorist,
+            "ci_letterer": ci_letterer,
+            "ci_coverartist": ci_coverartist,
+            "ci_characters": ci_characters,
+            "ci_genre": ci_genre,
+        })
+
         conn.commit()
         affected = c.rowcount
         conn.close()
+        invalidate_metadata_browser_cache()
 
         if affected > 0:
             app_logger.info(
@@ -2475,6 +3229,52 @@ def get_files_needing_metadata_scan(limit=1000):
 
     except Exception as e:
         app_logger.error(f"Failed to get files needing metadata scan: {e}")
+        return []
+
+
+def get_files_with_missing_comicinfo_for_rescan(limit=10000):
+    """
+    Return file_index rows where has_comicinfo=0, regardless of metadata_scanned_at.
+
+    Use this for a user-initiated force rescan of suspected-missing-XML files,
+    e.g. when ComicInfo.xml was added externally without bumping mtime — the
+    normal `get_files_needing_metadata_scan` query would skip those files.
+
+    Args:
+        limit: Maximum number of files to return
+
+    Returns:
+        List of dicts with id, path, modified_at
+    """
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return []
+
+        c = conn.cursor()
+        c.execute(
+            """
+            SELECT id, path, modified_at
+            FROM file_index
+            WHERE type = 'file'
+            AND (LOWER(path) LIKE '%.cbz' OR LOWER(path) LIKE '%.zip')
+            AND (has_comicinfo IS NULL OR has_comicinfo = 0)
+            ORDER BY modified_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+
+        rows = c.fetchall()
+        conn.close()
+
+        return [
+            {"id": r["id"], "path": r["path"], "modified_at": r["modified_at"]}
+            for r in rows
+        ]
+
+    except Exception as e:
+        app_logger.error(f"Failed to get files for missing-XML rescan: {e}")
         return []
 
 
@@ -3290,6 +4090,40 @@ def get_favorite_publishers():
     except Exception as e:
         app_logger.error(f"Failed to get favorite publishers: {e}")
         return []
+
+
+def get_favorite_publishers_paginated(offset=0, limit=50):
+    """
+    Paginated sibling of get_favorite_publishers — returns (rows, total).
+    """
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return [], 0
+
+        c = conn.cursor()
+        c.execute(
+            "SELECT COUNT(*) FROM publishers WHERE favorite = 1 AND path IS NOT NULL"
+        )
+        total = c.fetchone()[0] or 0
+
+        c.execute(
+            """
+            SELECT id, name, path as publisher_path, created_at
+            FROM publishers
+            WHERE favorite = 1 AND path IS NOT NULL
+            ORDER BY path
+            LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
+        )
+        rows = [dict(r) for r in c.fetchall()]
+        conn.close()
+        return rows, total
+
+    except Exception as e:
+        app_logger.error(f"Failed to get paginated favorite publishers: {e}")
+        return [], 0
 
 
 def is_favorite_publisher(publisher_path):
@@ -4124,6 +4958,857 @@ def get_files_by_metadata_grouped(field_name, value):
         return {"groups": [], "total": 0}
 
 
+# =============================================================================
+# Metadata Browser (faceted, Kavita-style)
+# =============================================================================
+
+# Columns we allow filtering/grouping on. Keys are public facet names;
+# values are (column, is_list) where is_list means the column is a
+# comma-separated list; list-kind facets are answered from
+# file_metadata_tags (indexed join), scalar facets from ci_* columns.
+_METADATA_FACET_COLUMNS = {
+    "publisher":  ("ci_publisher",  False),
+    "series":     ("ci_series",     False),
+    "writer":     ("ci_writer",     True),
+    "penciller":  ("ci_penciller",  True),
+    "inker":      ("ci_inker",      True),
+    "colorist":   ("ci_colorist",   True),
+    "letterer":   ("ci_letterer",   True),
+    "coverartist":("ci_coverartist",True),
+    "characters": ("ci_characters", True),
+    "genre":      ("ci_genre",      True),
+}
+
+# Ordered tuple of (kind, source_column) used by the tag populate/backfill
+# helpers. `kind` matches the public facet name above.
+_TAG_KINDS = [
+    ("writer",      "ci_writer"),
+    ("penciller",   "ci_penciller"),
+    ("inker",       "ci_inker"),
+    ("colorist",    "ci_colorist"),
+    ("letterer",    "ci_letterer"),
+    ("coverartist", "ci_coverartist"),
+    ("characters",  "ci_characters"),
+    ("genre",       "ci_genre"),
+]
+
+
+def _split_tag_values(raw):
+    """Split a comma-separated ci_* column into a set of clean tokens."""
+    if not raw:
+        return ()
+    out = []
+    seen = set()
+    for part in raw.split(","):
+        v = part.strip()
+        if v and v not in seen:
+            seen.add(v)
+            out.append(v)
+    return tuple(out)
+
+
+def _sync_tags_for_file(conn, file_path, ci_values):
+    """
+    Replace the file_metadata_tags rows for `file_path` with tokens derived
+    from ci_values (a dict of {ci_column: raw_text}).
+    """
+    c = conn.cursor()
+    c.execute("DELETE FROM file_metadata_tags WHERE file_path = ?", (file_path,))
+    rows = []
+    for kind, column in _TAG_KINDS:
+        raw = ci_values.get(column)
+        for v in _split_tag_values(raw):
+            rows.append((file_path, kind, v))
+    if rows:
+        c.executemany(
+            "INSERT OR IGNORE INTO file_metadata_tags(file_path, kind, value) VALUES (?, ?, ?)",
+            rows,
+        )
+
+
+_backfill_thread = None
+
+
+def _backfill_file_metadata_tags(conn, chunk_size=500, progress_cb=None):
+    """
+    Populate file_metadata_tags from the current ci_* columns in file_index.
+
+    Skips files that already have tag rows (so it's safe to re-run and safe
+    alongside the metadata scanner, which may be writing concurrently).
+    Processes files in chunks and commits between chunks to keep the write
+    lock short — other readers stay responsive.
+    """
+    c = conn.cursor()
+    columns = [col for _, col in _TAG_KINDS]
+    c.execute(
+        "SELECT COUNT(*) FROM file_index WHERE type = 'file'"
+        " AND NOT EXISTS ("
+        "   SELECT 1 FROM file_metadata_tags WHERE file_path = file_index.path"
+        " ) AND ("
+        + " OR ".join(col + " IS NOT NULL AND " + col + " != ''" for col in columns)
+        + ")"
+    )
+    remaining = c.fetchone()[0]
+    total = 0
+    if progress_cb:
+        progress_cb(done=0, remaining=remaining)
+
+    while True:
+        c.execute(
+            "SELECT path, " + ", ".join(columns) +
+            " FROM file_index WHERE type = 'file'"
+            " AND NOT EXISTS ("
+            "   SELECT 1 FROM file_metadata_tags WHERE file_path = file_index.path"
+            " ) LIMIT ?",
+            (chunk_size,),
+        )
+        rows = c.fetchall()
+        if not rows:
+            break
+
+        batch = []
+        for row in rows:
+            path = row[0]
+            for (kind, _), raw in zip(_TAG_KINDS, row[1:]):
+                for v in _split_tag_values(raw):
+                    batch.append((path, kind, v))
+        if batch:
+            c.executemany(
+                "INSERT OR IGNORE INTO file_metadata_tags(file_path, kind, value) VALUES (?, ?, ?)",
+                batch,
+            )
+        else:
+            # No ci_* data on these rows — still need to mark them processed.
+            # Insert a sentinel (kind='__none__') so NOT EXISTS short-circuits
+            # on the next iteration.
+            c.executemany(
+                "INSERT OR IGNORE INTO file_metadata_tags(file_path, kind, value) VALUES (?, '__none__', '')",
+                [(r[0],) for r in rows],
+            )
+        conn.commit()
+        total += len(batch)
+        invalidate_metadata_browser_cache()  # let the UI see progress
+        if progress_cb:
+            progress_cb(done=total, remaining=max(0, remaining - len(rows)))
+
+    # Clean up any sentinel rows we may have written.
+    c.execute("DELETE FROM file_metadata_tags WHERE kind = '__none__'")
+    conn.commit()
+    app_logger.info(f"file_metadata_tags backfill inserted {total} rows")
+
+
+def _start_backfill_tags_async():
+    """
+    Kick off the file_metadata_tags backfill in a daemon thread so app
+    startup isn't blocked. Safe to call multiple times — only one backfill
+    runs at a time and the work is idempotent (skips already-tagged files).
+    """
+    global _backfill_thread
+    if _backfill_thread is not None and _backfill_thread.is_alive():
+        return
+
+    def _runner():
+        try:
+            app_logger.info("file_metadata_tags backfill started (background)")
+            conn = get_db_connection()
+            if not conn:
+                app_logger.warning("Backfill: could not open db connection")
+                return
+            try:
+                _backfill_file_metadata_tags(conn)
+            finally:
+                conn.close()
+            app_logger.info("file_metadata_tags backfill finished")
+        except Exception as e:
+            app_logger.error(f"file_metadata_tags backfill failed: {e}")
+
+    _backfill_thread = threading.Thread(
+        target=_runner, name="metadata-tags-backfill", daemon=True
+    )
+    _backfill_thread.start()
+
+
+# ---- In-memory TTL cache for the metadata browser -------------------------
+
+_MB_CACHE_TTL = 45.0   # seconds
+_MB_CACHE_MAX = 256
+_mb_cache = {}
+_mb_cache_lock = threading.Lock()
+_mb_cache_version = 0   # bumped on any file_index mutation
+
+
+def _mb_cache_key(prefix, *args):
+    def norm(v):
+        if isinstance(v, dict):
+            return tuple(sorted((k, norm(x)) for k, x in v.items()))
+        if isinstance(v, (list, tuple, set)):
+            return tuple(sorted(norm(x) for x in v))
+        return v
+    return (prefix, _mb_cache_version) + tuple(norm(a) for a in args)
+
+
+def _mb_cache_get(key):
+    with _mb_cache_lock:
+        hit = _mb_cache.get(key)
+        if not hit:
+            return None
+        expires, value = hit
+        if expires < time.monotonic():
+            _mb_cache.pop(key, None)
+            return None
+        return value
+
+
+def _mb_cache_put(key, value):
+    with _mb_cache_lock:
+        if len(_mb_cache) >= _MB_CACHE_MAX:
+            # Evict the closest-to-expiry entry. Cheap and approximate.
+            oldest = min(_mb_cache.items(), key=lambda kv: kv[1][0])[0]
+            _mb_cache.pop(oldest, None)
+        _mb_cache[key] = (time.monotonic() + _MB_CACHE_TTL, value)
+
+
+def invalidate_metadata_browser_cache():
+    """Bump the cache version — call whenever file_index rows change."""
+    global _mb_cache_version
+    with _mb_cache_lock:
+        _mb_cache_version += 1
+        _mb_cache.clear()
+
+
+def _build_metadata_where(filters):
+    """
+    Build a SQL WHERE clause + params list from a filter dict.
+
+    filters keys:
+        publisher, series -> list[str] (scalar IN)
+        year_from, year_to -> int/str (inclusive range on ci_year)
+        search -> str (case-insensitive LIKE on name/ci_series/ci_title)
+
+    Returns (where_sql, params) where where_sql includes the leading "WHERE".
+    Always restricts to comic files (cbz/cbr) in the file_index.
+    """
+    clauses = [
+        "type = 'file'",
+        "(LOWER(name) LIKE '%.cbz' OR LOWER(name) LIKE '%.cbr')",
+    ]
+    params = []
+
+    for facet, column in (("publisher", "ci_publisher"), ("series", "ci_series")):
+        values = filters.get(facet) if filters else None
+        if not values:
+            continue
+        if isinstance(values, str):
+            values = [values]
+        cleaned = [v for v in values if v not in (None, "")]
+        if not cleaned:
+            continue
+        placeholders = ",".join("?" * len(cleaned))
+        clauses.append(column + " IN (" + placeholders + ")")
+        params.extend(cleaned)
+
+    if filters:
+        yf = filters.get("year_from")
+        yt = filters.get("year_to")
+        if yf not in (None, ""):
+            clauses.append("CAST(ci_year AS INTEGER) >= ?")
+            params.append(int(yf))
+        if yt not in (None, ""):
+            clauses.append("CAST(ci_year AS INTEGER) <= ?")
+            params.append(int(yt))
+
+        search = filters.get("search")
+        if search:
+            clauses.append(
+                "(LOWER(name) LIKE ? OR LOWER(COALESCE(ci_series,'')) LIKE ?"
+                " OR LOWER(COALESCE(ci_title,'')) LIKE ?)"
+            )
+            pat = f"%{search.lower()}%"
+            params.extend([pat, pat, pat])
+
+    return "WHERE " + " AND ".join(clauses), params
+
+
+def metadata_browse(axis, filters, sort="alpha", offset=0, limit=50):
+    """
+    Return the grid payload for the metadata browser. Cached in-memory with
+    a short TTL; invalidated whenever file_index rows change.
+
+    axis='publisher' -> grouped by ci_publisher (publisher tiles)
+    axis='series'    -> grouped by ci_series (series cards)
+    axis='year'      -> grouped by decade, or by year when year_from/year_to
+                        already span a single decade; a `series` filter
+                        forces issue rows.
+    axis='issue'     -> flat list of issue files
+
+    sort: 'alpha' | 'count' | 'year' | 'recent'
+    Returns {items, total, level}
+    """
+    filters = dict(filters or {})
+    cache_key = _mb_cache_key("browse", axis, filters, sort, offset, limit)
+    cached = _mb_cache_get(cache_key)
+    if cached is not None:
+        return cached
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return {"items": [], "total": 0, "level": "issue"}
+        c = conn.cursor()
+
+        # When a single series is selected we always drop to issue rows.
+        series_selected = filters.get("series")
+        if series_selected and axis != "issue":
+            axis = "issue"
+
+        if axis == "issue":
+            where_sql, params = _build_metadata_where(filters)
+            c.execute(
+                "SELECT COUNT(*) AS n FROM file_index " + where_sql, params
+            )
+            total = c.fetchone()["n"]
+
+            order = "ci_series COLLATE NOCASE, CAST(ci_number AS INTEGER), ci_number, name COLLATE NOCASE"
+            if sort == "recent":
+                order = "first_indexed_at DESC, name COLLATE NOCASE"
+            elif sort == "year":
+                order = "CAST(ci_year AS INTEGER) DESC, ci_series COLLATE NOCASE, CAST(ci_number AS INTEGER)"
+            c.execute(
+                "SELECT name, path, size, ci_title, ci_series, ci_number,"
+                " ci_year, ci_publisher, has_comicinfo"
+                " FROM file_index " + where_sql +
+                " ORDER BY " + order + " LIMIT ? OFFSET ?",
+                params + [limit, offset],
+            )
+            items = []
+            for r in c.fetchall():
+                items.append({
+                    "name": r["name"],
+                    "path": r["path"],
+                    "size": r["size"] or 0,
+                    "title": r["ci_title"] or "",
+                    "series": r["ci_series"] or "",
+                    "number": r["ci_number"] or "",
+                    "year": r["ci_year"] or "",
+                    "publisher": r["ci_publisher"] or "",
+                    "has_comicinfo": r["has_comicinfo"],
+                })
+            conn.close()
+            out = {"items": items, "total": total, "level": "issue"}
+            _mb_cache_put(cache_key, out)
+            return out
+
+        if axis == "publisher":
+            column = "ci_publisher"
+            where_sql, params = _build_metadata_where(filters)
+            c.execute(
+                "SELECT " + column + " AS v, COUNT(*) AS n,"
+                " MIN(path) AS cover_path"
+                " FROM file_index " + where_sql +
+                " AND " + column + " IS NOT NULL AND " + column + " != ''"
+                " GROUP BY " + column,
+                params,
+            )
+            rows = c.fetchall()
+            total = len(rows)
+            order_key = {
+                "alpha": lambda r: (r["v"] or "").lower(),
+                "count": lambda r: -r["n"],
+                "year":  lambda r: (r["v"] or "").lower(),
+                "recent": lambda r: (r["v"] or "").lower(),
+            }.get(sort, lambda r: (r["v"] or "").lower())
+            rows = sorted(rows, key=order_key)
+            sliced = rows[offset: offset + limit]
+            items = [
+                {
+                    "value": r["v"],
+                    "name": r["v"],
+                    "count": r["n"],
+                    "cover_path": r["cover_path"],
+                }
+                for r in sliced
+            ]
+            conn.close()
+            out = {"items": items, "total": total, "level": "publisher"}
+            _mb_cache_put(cache_key, out)
+            return out
+
+        if axis == "series":
+            where_sql, params = _build_metadata_where(filters)
+            c.execute(
+                "SELECT ci_series AS v, ci_publisher AS publisher,"
+                " COUNT(*) AS n, MIN(CAST(ci_year AS INTEGER)) AS year,"
+                " MIN(path) AS cover_path"
+                " FROM file_index " + where_sql +
+                " AND ci_series IS NOT NULL AND ci_series != ''"
+                " GROUP BY ci_series, ci_publisher",
+                params,
+            )
+            rows = c.fetchall()
+            total = len(rows)
+            order_key = {
+                "alpha": lambda r: ((r["v"] or "").lower(), r["year"] or 0),
+                "count": lambda r: -r["n"],
+                "year":  lambda r: -(r["year"] or 0),
+                "recent": lambda r: -(r["year"] or 0),
+            }.get(sort, lambda r: ((r["v"] or "").lower(), r["year"] or 0))
+            rows = sorted(rows, key=order_key)
+            sliced = rows[offset: offset + limit]
+            items = [
+                {
+                    "value": r["v"],
+                    "name": r["v"],
+                    "publisher": r["publisher"] or "",
+                    "count": r["n"],
+                    "year": r["year"] or "",
+                    "cover_path": r["cover_path"],
+                }
+                for r in sliced
+            ]
+            conn.close()
+            out = {"items": items, "total": total, "level": "series"}
+            _mb_cache_put(cache_key, out)
+            return out
+
+        if axis == "year":
+            where_sql, params = _build_metadata_where(filters)
+            yf = filters.get("year_from")
+            yt = filters.get("year_to")
+            single_decade = (
+                yf not in (None, "") and yt not in (None, "")
+                and (int(yt) // 10) == (int(yf) // 10)
+            )
+            if single_decade:
+                bucket_sql = "CAST(ci_year AS INTEGER)"
+                level = "year"
+            else:
+                bucket_sql = "(CAST(ci_year AS INTEGER) / 10) * 10"
+                level = "decade"
+            c.execute(
+                "SELECT " + bucket_sql + " AS v, COUNT(*) AS n,"
+                " MIN(path) AS cover_path"
+                " FROM file_index " + where_sql +
+                " AND ci_year IS NOT NULL AND ci_year != ''"
+                " GROUP BY v ORDER BY v DESC",
+                params,
+            )
+            rows = c.fetchall()
+            total = len(rows)
+            if sort == "count":
+                rows = sorted(rows, key=lambda r: -r["n"])
+            elif sort == "alpha":
+                rows = sorted(rows, key=lambda r: r["v"] or 0)
+            sliced = rows[offset: offset + limit]
+            items = []
+            for r in sliced:
+                val = r["v"]
+                label = f"{val}s" if level == "decade" else str(val)
+                items.append({
+                    "value": val,
+                    "name": label,
+                    "count": r["n"],
+                    "cover_path": r["cover_path"],
+                })
+            conn.close()
+            out = {"items": items, "total": total, "level": level}
+            _mb_cache_put(cache_key, out)
+            return out
+
+        conn.close()
+        return {"items": [], "total": 0, "level": "issue"}
+    except Exception as e:
+        app_logger.error(f"metadata_browse failed (axis={axis}): {e}")
+        return {"items": [], "total": 0, "level": axis}
+
+
+# =============================================================================
+# Filesystem-axis browsing for /api/v1/library/* (mirrors /api/browse layout)
+# =============================================================================
+
+
+def _prefix_range_bounds(path_prefix):
+    """
+    Return ((lo, hi), (lo_alt, hi_alt)) tuples for path-prefix range scans.
+
+    SQLite's `LIKE 'prefix%'` does NOT use a regular index unless
+    `case_sensitive_like = ON`, which the project does not set globally.
+    A literal range scan (`path >= lo AND path < hi`) on a non-collated index
+    DOES work and is orders of magnitude faster on large libraries.
+
+    file_index may store paths with either '/' or '\\' separators depending
+    on the platform that populated it, so we return both variants.
+
+    For separator '/' (0x2F) the next codepoint is '0' (0x30).
+    For separator '\\' (0x5C) the next codepoint is ']' (0x5D).
+    """
+    base = path_prefix.rstrip("/").rstrip("\\")
+    fwd_lo = base + "/"
+    fwd_hi = base + "0"
+    bck_lo = base + "\\"
+    bck_hi = base + "]"
+    return (fwd_lo, fwd_hi), (bck_lo, bck_hi)
+
+
+def _batch_count_comics_under(conn, paths):
+    """
+    Return {path: comic_count} for each subtree path.
+
+    One range-scan query per path — the path predicate sits in the WHERE
+    clause so SQLite can use idx_file_index_path. On a 1M-row file_index a
+    typical series subtree reads ~200 rows instead of the whole table.
+    """
+    if not paths:
+        return {}
+
+    counts = {}
+    c = conn.cursor()
+    for p in paths:
+        (fwd_lo, fwd_hi), (bck_lo, bck_hi) = _prefix_range_bounds(p)
+        c.execute(
+            """
+            SELECT COUNT(*) FROM file_index
+            WHERE ((path >= ? AND path < ?) OR (path >= ? AND path < ?))
+              AND type = 'file'
+              AND (LOWER(name) LIKE '%.cbz' OR LOWER(name) LIKE '%.cbr')
+            """,
+            (fwd_lo, fwd_hi, bck_lo, bck_hi),
+        )
+        row = c.fetchone()
+        counts[p] = (row[0] if row else 0) or 0
+    return counts
+
+
+def _batch_has_top_level_comics(conn, paths):
+    """
+    Return {path: bool} indicating whether each path has at least one direct
+    CBZ/CBR child (parent = path, type='file'). Distinct from
+    _batch_count_comics_under, which is recursive.
+
+    Used by filesystem_browse_series to detect nested-only series — series
+    folders whose comics live entirely in volume subfolders.
+    """
+    if not paths:
+        return {}
+    out = {}
+    chunk_size = 100
+    c = conn.cursor()
+    for i in range(0, len(paths), chunk_size):
+        chunk = paths[i: i + chunk_size]
+        placeholders = ",".join(["?"] * len(chunk))
+        c.execute(
+            f"SELECT parent FROM file_index "
+            f"WHERE type = 'file' AND parent IN ({placeholders}) "
+            f"AND (LOWER(name) LIKE '%.cbz' OR LOWER(name) LIKE '%.cbr') "
+            f"GROUP BY parent",
+            chunk,
+        )
+        present = {row["parent"] for row in c.fetchall()}
+        for p in chunk:
+            out[p] = p in present
+    return out
+
+
+def _batch_subdirectories(conn, paths):
+    """
+    Return {path: [subdir_name, ...]} for each parent path.
+
+    Single-roundtrip lookup of direct child directories. Used for volume
+    detection on nested series.
+    """
+    if not paths:
+        return {}
+    out = {p: [] for p in paths}
+    chunk_size = 100
+    c = conn.cursor()
+    for i in range(0, len(paths), chunk_size):
+        chunk = paths[i: i + chunk_size]
+        placeholders = ",".join(["?"] * len(chunk))
+        c.execute(
+            f"SELECT parent, name FROM file_index "
+            f"WHERE type = 'directory' AND parent IN ({placeholders})",
+            chunk,
+        )
+        for row in c.fetchall():
+            out.setdefault(row["parent"], []).append(row["name"])
+    return out
+
+
+def filesystem_browse_publishers(data_dir, offset=0, limit=50):
+    """
+    Direct child directories of `data_dir` from file_index, with a recursive
+    comic-file count for each. Returns the same envelope as metadata_browse:
+        {"items": [{name, path, has_thumbnail, count}], "total": N}
+
+    Cached via the metadata-browser TTL cache, which is invalidated whenever
+    file_index mutates (see invalidate_metadata_browser_cache callers).
+    """
+    if not data_dir:
+        return {"items": [], "total": 0, "level": "publisher"}
+    cache_key = _mb_cache_key("fs_publishers", data_dir)
+    cached = _mb_cache_get(cache_key)
+    if cached is not None:
+        items = cached
+    else:
+        try:
+            directories, _files = get_directory_children(data_dir)
+            conn = get_db_connection()
+            counts = {}
+            if conn:
+                try:
+                    counts = _batch_count_comics_under(
+                        conn, [d["path"] for d in directories]
+                    )
+                finally:
+                    conn.close()
+            items = [
+                {
+                    # `value` matches metadata-axis semantics so the same
+                    # client model deserialises both modes. The folder name
+                    # round-trips back as the next-level `?publisher=` /
+                    # `?series=` parameter; `path` is also exposed for
+                    # clients that want unambiguous identification.
+                    "value": d["name"],
+                    "name": d["name"],
+                    "path": d["path"],
+                    "has_thumbnail": d.get("has_thumbnail", False),
+                    "count": counts.get(d["path"], 0),
+                }
+                for d in directories
+            ]
+            items.sort(key=lambda r: (r["name"] or "").lower())
+            _mb_cache_put(cache_key, items)
+        except Exception as e:
+            app_logger.error(f"filesystem_browse_publishers failed: {e}")
+            return {"items": [], "total": 0, "level": "publisher"}
+    total = len(items)
+    return {
+        "items": items[offset: offset + limit],
+        "total": total,
+        "level": "publisher",
+    }
+
+
+def compute_volumes_for_paths(folder_paths):
+    """
+    For each folder path, return its volume subfolder names if and only if:
+      - the folder has no top-level CBZ/CBR files of its own, AND
+      - every comic-bearing direct subdirectory itself has top-level CBZ/CBR
+        files (i.e. all comic-bearing children are leaves).
+
+    A publisher folder whose series include a mix of multi-volume and flat
+    layouts will fail the second condition (its multi-volume series children
+    are non-leaf), so publishers are not mis-labelled as multi-volume series.
+
+    Returns: {folder_path: [volume_name, ...]} (sorted case-insensitively).
+    Paths with no volumes are omitted from the dict.
+
+    Per-path results are cached for `_MB_CACHE_TTL` seconds via the shared
+    metadata-browser cache; mutations to file_index call
+    invalidate_metadata_browser_cache() which clears these entries.
+
+    Used by filesystem_browse_series and the /library/to-read endpoint to
+    surface the same volume metadata in both places.
+    """
+    out = {}
+    if not folder_paths:
+        return out
+    uncached = []
+    seen = set()
+    for p in folder_paths:
+        if not p or p in seen:
+            continue
+        seen.add(p)
+        cached = _mb_cache_get(_mb_cache_key("vols_for_path", p))
+        if cached is None:
+            uncached.append(p)
+        elif cached:
+            out[p] = cached
+    if not uncached:
+        return out
+    conn = get_db_connection()
+    if not conn:
+        return out
+    fresh = {}
+    try:
+        counts = _batch_count_comics_under(conn, uncached)
+        nested_candidates = [p for p in uncached if counts.get(p, 0) > 0]
+        top_counts = _batch_has_top_level_comics(conn, nested_candidates)
+        nested_only = [
+            p for p in nested_candidates
+            if not top_counts.get(p)
+        ]
+        subdir_map = _batch_subdirectories(conn, nested_only)
+        candidate_volume_paths = []
+        candidate_index = {}
+        for parent_path, names in subdir_map.items():
+            for name in names:
+                vol_path = os.path.join(parent_path, name)
+                candidate_volume_paths.append(vol_path)
+                candidate_index[vol_path] = (parent_path, name)
+        volume_counts = _batch_count_comics_under(
+            conn, candidate_volume_paths
+        )
+        volume_top_counts = _batch_has_top_level_comics(
+            conn, candidate_volume_paths
+        )
+        per_parent = {}
+        for vol_path, (parent_path, name) in candidate_index.items():
+            if volume_counts.get(vol_path, 0) > 0:
+                per_parent.setdefault(parent_path, []).append(
+                    (name, bool(volume_top_counts.get(vol_path)))
+                )
+        for parent_path, entries in per_parent.items():
+            if entries and all(is_leaf for _name, is_leaf in entries):
+                names = sorted(
+                    (name for name, _ in entries),
+                    key=lambda n: (n or "").lower(),
+                )
+                fresh[parent_path] = names
+    finally:
+        conn.close()
+    for p in uncached:
+        # Cache empty list as the "computed: no volumes" sentinel so repeat
+        # calls skip the work; truthy entries propagate to the response.
+        _mb_cache_put(_mb_cache_key("vols_for_path", p), fresh.get(p, []))
+    out.update(fresh)
+    return out
+
+
+def filesystem_browse_series(publisher_path, offset=0, limit=50):
+    """Direct child directories of a publisher folder. Cached, batched counts.
+
+    Each item carries a `volumes` field when the series folder has no
+    top-level CBZ/CBR files but contains subfolders that recursively hold
+    comics. The field is omitted for flat single-volume series.
+    """
+    if not publisher_path:
+        return {"items": [], "total": 0, "level": "series"}
+    cache_key = _mb_cache_key("fs_series", publisher_path)
+    cached = _mb_cache_get(cache_key)
+    if cached is not None:
+        items = cached
+    else:
+        try:
+            directories, _files = get_directory_children(publisher_path)
+            series_paths = [d["path"] for d in directories]
+            counts = {}
+            conn = get_db_connection()
+            if conn:
+                try:
+                    counts = _batch_count_comics_under(conn, series_paths)
+                finally:
+                    conn.close()
+            volumes_by_series = compute_volumes_for_paths(series_paths)
+            items = []
+            for d in directories:
+                # `value` matches metadata-axis semantics so the same
+                # client model deserialises both modes. The folder name
+                # round-trips back as the next-level `?publisher=` /
+                # `?series=` parameter; `path` is also exposed for
+                # clients that want unambiguous identification.
+                item = {
+                    "value": d["name"],
+                    "name": d["name"],
+                    "path": d["path"],
+                    "has_thumbnail": d.get("has_thumbnail", False),
+                    "count": counts.get(d["path"], 0),
+                }
+                vols = volumes_by_series.get(d["path"])
+                if vols:
+                    item["volumes"] = vols
+                items.append(item)
+            items.sort(key=lambda r: (r["name"] or "").lower())
+            _mb_cache_put(cache_key, items)
+        except Exception as e:
+            app_logger.error(f"filesystem_browse_series failed: {e}")
+            return {"items": [], "total": 0, "level": "series"}
+    total = len(items)
+    return {
+        "items": items[offset: offset + limit],
+        "total": total,
+        "level": "series",
+    }
+
+
+def filesystem_browse_issues(series_path, offset=0, limit=50):
+    """
+    Direct CBZ/CBR/PDF children of a series folder, joined to file_index for
+    the canonical id. Returns shape compatible with /issue/<id>/* endpoints.
+    """
+    if not series_path:
+        return {"items": [], "total": 0, "level": "issue"}
+    try:
+        _dirs, files = get_directory_children(series_path)
+        comic_files = [
+            f for f in files
+            if (f.get("name") or "").lower().endswith((".cbz", ".cbr", ".pdf"))
+        ]
+        comic_files.sort(key=lambda r: (r.get("name") or "").lower())
+
+        # Map paths → file_index.id in a single query.
+        id_map = {}
+        if comic_files:
+            conn = get_db_connection()
+            if conn:
+                try:
+                    placeholders = ",".join(["?"] * len(comic_files))
+                    paths = [f["path"] for f in comic_files]
+                    c = conn.cursor()
+                    c.execute(
+                        f"SELECT id, path FROM file_index WHERE path IN ({placeholders})",
+                        paths,
+                    )
+                    for row in c.fetchall():
+                        id_map[row["path"]] = row["id"]
+                finally:
+                    conn.close()
+
+        items = [
+            {
+                "id": id_map.get(f["path"]),
+                "name": f["name"],
+                "path": f["path"],
+                "size": f.get("size", 0),
+                "has_comicinfo": f.get("has_comicinfo"),
+            }
+            for f in comic_files
+        ]
+        total = len(items)
+        return {
+            "items": items[offset: offset + limit],
+            "total": total,
+            "level": "issue",
+        }
+    except Exception as e:
+        app_logger.error(f"filesystem_browse_issues failed: {e}")
+        return {"items": [], "total": 0, "level": "issue"}
+
+
+def series_representative_path(series, publisher=None):
+    """Find a representative file path for a series (earliest issue)."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return None
+        c = conn.cursor()
+        where = ["type = 'file'", "ci_series = ?"]
+        params = [series]
+        if publisher:
+            where.append("ci_publisher = ?")
+            params.append(publisher)
+        c.execute(
+            "SELECT path FROM file_index WHERE " + " AND ".join(where) +
+            " ORDER BY CAST(ci_number AS INTEGER), ci_number, name COLLATE NOCASE"
+            " LIMIT 1",
+            params,
+        )
+        row = c.fetchone()
+        conn.close()
+        return row["path"] if row else None
+    except Exception as e:
+        app_logger.error(f"series_representative_path failed: {e}")
+        return None
+
+
 def is_issue_read(issue_path):
     """
     Check if an issue has been read.
@@ -4310,6 +5995,41 @@ def get_to_read_items(limit=None):
     except Exception as e:
         app_logger.error(f"Failed to get 'to read' items: {e}")
         return []
+
+
+def get_to_read_items_paginated(offset=0, limit=50):
+    """
+    Paginated sibling of get_to_read_items — returns (rows, total).
+    """
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return [], 0
+
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM to_read")
+        total = c.fetchone()[0] or 0
+
+        c.execute(
+            """
+            SELECT path, type, created_at FROM to_read
+            ORDER BY created_at DESC
+            LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
+        )
+        rows = []
+        for row in c.fetchall():
+            item = dict(row)
+            item["name"] = compute_display_name(item["path"])
+            rows.append(item)
+
+        conn.close()
+        return rows, total
+
+    except Exception as e:
+        app_logger.error(f"Failed to get paginated 'to read' items: {e}")
+        return [], 0
 
 
 def is_to_read(path):
@@ -4551,6 +6271,63 @@ def set_user_preference(key, value, category="general"):
 
 
 # =============================================================================
+# API Token (long-lived bearer token for the /api/v1/* mobile/desktop client)
+# =============================================================================
+
+
+def get_api_token():
+    """Return the stored API token, or None if not generated yet."""
+    return get_user_preference("api_token", default=None)
+
+
+def rotate_api_token():
+    """
+    Generate a fresh API token, persist it under user_preferences, and return it.
+    Overwrites any existing token (used to revoke old clients).
+    """
+    import secrets
+
+    token = secrets.token_urlsafe(32)
+    set_user_preference("api_token", token, category="security")
+    return token
+
+
+def ensure_api_token():
+    """
+    Return the existing API token, generating one on first call.
+    Use this in places where the token must exist (e.g. tests / first-run).
+    For runtime auth checks prefer get_api_token() so an unset token reports
+    'API disabled' rather than silently bootstrapping.
+    """
+    existing = get_api_token()
+    if existing:
+        return existing
+    return rotate_api_token()
+
+
+_API_BROWSE_MODES = ("metadata", "filesystem")
+
+
+def get_api_browse_mode():
+    """
+    Return the saved /api/v1/library/* browse mode. One of {'metadata',
+    'filesystem'}. Defaults to 'metadata' (the original behaviour) when
+    nothing is persisted.
+    """
+    raw = get_user_preference("api_browse_mode", default="metadata")
+    if isinstance(raw, str):
+        raw = raw.lower()
+    return raw if raw in _API_BROWSE_MODES else "metadata"
+
+
+def set_api_browse_mode(mode):
+    """Persist the API browse mode. Returns True on success, False on invalid input."""
+    if not isinstance(mode, str) or mode.lower() not in _API_BROWSE_MODES:
+        return False
+    return set_user_preference("api_browse_mode", mode.lower(), category="security")
+
+
+# =============================================================================
 # Reading Positions (bookmark reading progress in comics)
 # =============================================================================
 
@@ -4691,6 +6468,90 @@ def get_all_reading_positions():
     except Exception as e:
         app_logger.error(f"Failed to get all reading positions: {e}")
         return []
+
+
+def get_reading_positions_since(unix_ts):
+    """
+    Get reading positions whose updated_at is at or after a given unix timestamp.
+
+    Args:
+        unix_ts: Unix epoch seconds (int). Pass 0 to get all rows.
+
+    Returns:
+        List of dicts with comic_path, page_number, total_pages, time_spent,
+        updated_at (ISO TIMESTAMP), and updated_at_unix (int seconds).
+    """
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return []
+
+        c = conn.cursor()
+        c.execute(
+            """
+            SELECT comic_path, page_number, total_pages, time_spent, updated_at,
+                   CAST(strftime('%s', updated_at) AS INTEGER) AS updated_at_unix
+            FROM reading_positions
+            WHERE CAST(strftime('%s', updated_at) AS INTEGER) >= ?
+            ORDER BY updated_at ASC
+            """,
+            (int(unix_ts),),
+        )
+
+        rows = c.fetchall()
+        conn.close()
+
+        return [dict(row) for row in rows]
+
+    except Exception as e:
+        app_logger.error(f"Failed to get reading positions since {unix_ts}: {e}")
+        return []
+
+
+def get_reading_positions_since_paginated(unix_ts, offset=0, limit=50):
+    """
+    Paginated variant of get_reading_positions_since: returns
+    (rows, total_count_across_all_pages) for the same WHERE clause.
+
+    Used by /api/v1/progress/since so a long-offline client can sync without
+    pulling every row in one response.
+    """
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return [], 0
+        try:
+            c = conn.cursor()
+            ts_int = int(unix_ts)
+            c.execute(
+                """
+                SELECT COUNT(*) AS n FROM reading_positions
+                WHERE CAST(strftime('%s', updated_at) AS INTEGER) >= ?
+                """,
+                (ts_int,),
+            )
+            total = c.fetchone()["n"]
+
+            c.execute(
+                """
+                SELECT comic_path, page_number, total_pages, time_spent, updated_at,
+                       CAST(strftime('%s', updated_at) AS INTEGER) AS updated_at_unix
+                FROM reading_positions
+                WHERE CAST(strftime('%s', updated_at) AS INTEGER) >= ?
+                ORDER BY updated_at ASC
+                LIMIT ? OFFSET ?
+                """,
+                (ts_int, int(limit), int(offset)),
+            )
+            rows = [dict(r) for r in c.fetchall()]
+            return rows, total
+        finally:
+            conn.close()
+    except Exception as e:
+        app_logger.error(
+            f"Failed to get paginated reading positions since {unix_ts}: {e}"
+        )
+        return [], 0
 
 
 def get_continue_reading_items(limit=10):
@@ -5816,9 +7677,13 @@ def save_series_mapping(series_data, mapped_path, cover_image=None):
 
         c = conn.cursor()
 
-        # Extract publisher_id
-        publisher = series_data.get("publisher", {})
-        publisher_id = publisher.get("id") if isinstance(publisher, dict) else None
+        # Extract publisher_id — handle both nested {"publisher": {"id": ...}} (API
+        # model dump) and flat "publisher_id" (DB row from get_series_by_id)
+        publisher = series_data.get("publisher")
+        if isinstance(publisher, dict) and publisher.get("id"):
+            publisher_id = publisher.get("id")
+        else:
+            publisher_id = series_data.get("publisher_id")
 
         # Handle status - can be string or object
         status = series_data.get("status")
@@ -5892,6 +7757,146 @@ def save_series_mapping(series_data, mapped_path, cover_image=None):
     except Exception as e:
         app_logger.error(f"Failed to save series mapping: {e}")
         return False
+
+
+def upsert_publisher_by_name(name, publisher_id=None):
+    """
+    Look up a publisher by name (case-insensitive); insert if missing.
+
+    Used by pull-list import to re-link series rows to a publisher on a fresh
+    DB, where the publisher_id from the export may not exist locally.
+
+    Args:
+        name: Publisher name to look up or create.
+        publisher_id: Optional Metron publisher id; used when inserting if
+            the name isn't found and the id is also unused.
+
+    Returns:
+        The publisher id (existing or new), or None if name is falsy.
+    """
+    if not name:
+        return None
+    conn = None
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return None
+        c = conn.cursor()
+        c.execute(
+            "SELECT id FROM publishers WHERE name = ? COLLATE NOCASE LIMIT 1",
+            (name,),
+        )
+        row = c.fetchone()
+        if row:
+            return row["id"] if hasattr(row, "keys") else row[0]
+
+        if publisher_id is not None:
+            c.execute("SELECT 1 FROM publishers WHERE id = ?", (publisher_id,))
+            if not c.fetchone():
+                c.execute(
+                    "INSERT INTO publishers (id, name, created_at) "
+                    "VALUES (?, ?, CURRENT_TIMESTAMP)",
+                    (publisher_id, name),
+                )
+                conn.commit()
+                return publisher_id
+
+        c.execute(
+            "INSERT INTO publishers (name, created_at) VALUES (?, CURRENT_TIMESTAMP)",
+            (name,),
+        )
+        conn.commit()
+        return c.lastrowid
+    except Exception as e:
+        app_logger.error(f"upsert_publisher_by_name failed for {name!r}: {e}")
+        return None
+    finally:
+        if conn:
+            conn.close()
+
+
+def import_series_row(entry):
+    """
+    Insert or update a single series row from a pull-list import payload.
+
+    On conflict only mapped_path and series_subscription are updated;
+    synced metadata (name, status, desc, cover_image, etc.) is preserved.
+    Does not call any external API.
+
+    Args:
+        entry: Dict shaped like the export schema (must contain "id").
+
+    Returns:
+        "inserted" if a new row was created, "updated" if an existing row
+        was modified.
+
+    Raises:
+        ValueError: if entry is missing a usable series id.
+        RuntimeError: if the database is unavailable.
+    """
+    if not isinstance(entry, dict):
+        raise ValueError("Series entry must be an object")
+    series_id = entry.get("id")
+    if not isinstance(series_id, int):
+        raise ValueError("Missing or invalid series id")
+
+    conn = get_db_connection()
+    if not conn:
+        raise RuntimeError("Database unavailable")
+    try:
+        c = conn.cursor()
+
+        # Resolve publisher_id: prefer an exact id match if it exists,
+        # otherwise upsert by name.
+        publisher_id = entry.get("publisher_id")
+        if publisher_id is not None:
+            c.execute("SELECT 1 FROM publishers WHERE id = ?", (publisher_id,))
+            if not c.fetchone():
+                publisher_id = None
+        if publisher_id is None:
+            publisher_id = upsert_publisher_by_name(
+                entry.get("publisher_name"), entry.get("publisher_id")
+            )
+
+        c.execute("SELECT 1 FROM series WHERE id = ?", (series_id,))
+        existed = c.fetchone() is not None
+
+        c.execute(
+            """
+            INSERT INTO series (
+                id, name, sort_name, volume, status, publisher_id,
+                imprint, volume_year, year_end, cv_id, gcd_id,
+                resource_url, mapped_path, series_subscription,
+                created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT(id) DO UPDATE SET
+                mapped_path = excluded.mapped_path,
+                series_subscription = excluded.series_subscription,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                series_id,
+                entry.get("name"),
+                entry.get("sort_name"),
+                entry.get("volume"),
+                entry.get("status"),
+                publisher_id,
+                entry.get("imprint"),
+                entry.get("volume_year"),
+                entry.get("year_end"),
+                entry.get("cv_id"),
+                entry.get("gcd_id"),
+                entry.get("resource_url"),
+                entry.get("mapped_path"),
+                entry.get("series_subscription"),
+            ),
+        )
+        conn.commit()
+        return "updated" if existed else "inserted"
+    finally:
+        conn.close()
 
 
 def update_series_desc(series_id, desc):

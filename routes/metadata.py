@@ -1115,6 +1115,19 @@ def cbz_bulk_clear_comicinfo():
     return jsonify({"success": True, "op_id": op_id, "total": total})
 
 
+@metadata_bp.route('/api/metadata/rescan-missing-xml', methods=['POST'])
+def api_rescan_missing_xml():
+    """
+    Force re-scan of every file currently flagged has_comicinfo=0.
+
+    Picks up files where ComicInfo.xml was added externally without bumping
+    mtime — the normal incremental scan query skips those.
+    """
+    from core.metadata_scanner import queue_missing_xml_for_rescan
+    queued = queue_missing_xml_for_rescan()
+    return jsonify({"success": True, "queued": queued})
+
+
 # =============================================================================
 # Save CVInfo
 # =============================================================================
@@ -1157,7 +1170,8 @@ def get_cvinfo():
 @metadata_bp.route('/api/save-cvinfo', methods=['POST'])
 def save_cvinfo():
     """Save a cvinfo file in the specified directory."""
-    from app import TARGET_DIR
+    from app import get_target_dir_live
+    TARGET_DIR = get_target_dir_live()
 
     data = request.get_json() or {}
     file_path = (data.get('path') or '').strip()
@@ -1500,7 +1514,8 @@ def _sync_file_index_after_xml_update(directory, xml_field, value, result):
 def update_xml():
     """Update a field in ComicInfo.xml for all CBZ files in a directory."""
     from models.update_xml import update_field_in_cbz_files
-    from app import TARGET_DIR
+    from app import get_target_dir_live
+    TARGET_DIR = get_target_dir_live()
 
     try:
         data = request.get_json()
@@ -1593,7 +1608,8 @@ def batch_metadata():
        - Try Metron first, then ComicVine, then GCD
     """
     from core.comicinfo import read_comicinfo_from_zip
-    from app import TARGET_DIR
+    from app import get_target_dir_live
+    TARGET_DIR = get_target_dir_live()
 
     op_id = None
 
@@ -1998,8 +2014,9 @@ def batch_metadata():
                         metron_id_added = True
                         app_logger.info(f"Added Metron data to cvinfo: series_id={series_id}, publisher={series_details.get('publisher_name')}, year={series_details.get('year_began')}")
 
-        # Step 4: Read start_year from cvinfo for ComicVine calls (for Volume field)
-        if os.path.exists(cvinfo_path):
+        # Step 4: Read start_year + publisher_name from cvinfo for ComicVine calls
+        # (Volume and Publisher fields in ComicInfo.xml)
+        if (not cvinfo_start_year or not cvinfo_publisher_name) and os.path.exists(cvinfo_path):
             cvinfo_fields = comicvine.read_cvinfo_fields(cvinfo_path)
             if not cvinfo_start_year:
                 cvinfo_start_year = cvinfo_fields.get('start_year')
@@ -2168,10 +2185,15 @@ def batch_metadata():
                                     comicvine_api_key,
                                     cv_volume_id,
                                     issue_data,
+                                    publisher_name=cvinfo_publisher_name,
                                     start_year=cvinfo_start_year,
                                     cvinfo_path=cvinfo_path,
                                 )
-                                metadata = comicvine.map_to_comicinfo(issue_data, volume_data)
+                                metadata = comicvine.map_to_comicinfo(
+                                    issue_data,
+                                    volume_data,
+                                    start_year=volume_data.get('start_year') or cvinfo_start_year,
+                                )
                                 metadata["_image_url"] = issue_data.get("image_url")
                                 source = 'ComicVine'
                                 app_logger.info(f"Found metadata from ComicVine for {filename}")

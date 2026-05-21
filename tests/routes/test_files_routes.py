@@ -425,6 +425,86 @@ class TestApplyFolderRenamePattern:
         assert "No comic files found" in data["message"]
 
 
+class TestSmartRenamePreview:
+
+    def test_missing_directory(self, client):
+        resp = client.post("/smart-rename/preview", json={})
+        assert resp.status_code == 400
+
+    def test_nonexistent_directory(self, client):
+        resp = client.post("/smart-rename/preview",
+                           json={"directory": "/nope/abs/path"})
+        assert resp.status_code == 404
+
+    @patch("routes.files.is_critical_path", return_value=True)
+    @patch("routes.files.get_critical_path_error_message", return_value="Protected")
+    def test_critical_path_rejected(self, mock_msg, mock_crit, client, tmp_path):
+        resp = client.post("/smart-rename/preview",
+                           json={"directory": str(tmp_path)})
+        assert resp.status_code == 403
+
+    @patch("routes.files.is_critical_path", return_value=False)
+    def test_returns_plan(self, mock_crit, client, tmp_path):
+        # Build a directory with cvinfo + series.json + one file
+        d = tmp_path / "Sandman"
+        d.mkdir()
+        (d / "cvinfo").write_text("https://comicvine.gamespot.com/volume/4050-1/\n")
+        (d / "series.json").write_text(
+            '{"metadata": {"name": "Sandman", "volume": 2, "year": 1989}}'
+        )
+        (d / "Sandman 1.cbz").write_bytes(b"x")
+
+        with patch("core.database.get_user_preference",
+                   side_effect=lambda key, default=None: {
+                       "enable_custom_rename": True,
+                       "custom_rename_pattern": "{series_name} {volume_number} {issue_number} ({year})",
+                       "smart_rename_recursive": False,
+                   }.get(key, default)):
+            resp = client.post("/smart-rename/preview",
+                               json={"directory": str(d), "recursive": False})
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["success"] is True
+        assert len(data["plan"]["directories"]) == 1
+        dir_entry = data["plan"]["directories"][0]
+        assert dir_entry["status"] == "ok"
+        # The file should still exist (preview does not rename)
+        assert (d / "Sandman 1.cbz").exists()
+
+
+class TestSmartRenameApply:
+
+    @patch("routes.files.is_critical_path", return_value=False)
+    def test_apply_renames_files(self, mock_crit, client, tmp_path):
+        d = tmp_path / "Sandman"
+        d.mkdir()
+        (d / "cvinfo").write_text("https://comicvine.gamespot.com/volume/4050-1/\n")
+        (d / "series.json").write_text(
+            '{"metadata": {"name": "Sandman", "volume": 2, "year": 1989}}'
+        )
+        (d / "Sandman 1.cbz").write_bytes(b"x")
+
+        with patch("core.database.get_user_preference",
+                   side_effect=lambda key, default=None: {
+                       "enable_custom_rename": True,
+                       "custom_rename_pattern": "{series_name} {volume_number} {issue_number} ({year})",
+                   }.get(key, default)):
+            resp = client.post("/smart-rename",
+                               json={"directory": str(d), "recursive": False})
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["success"] is True
+        assert data["summary"]["renamed"] == 1
+        assert (d / "Sandman v2 001 (1989).cbz").exists()
+
+    def test_apply_with_invalid_plan(self, client):
+        resp = client.post("/smart-rename",
+                           json={"plan": {"root": "/nonexistent/path"}})
+        assert resp.status_code == 400
+
+
 class TestDelete:
 
     @patch("routes.files.is_critical_path", return_value=False)
@@ -501,16 +581,30 @@ class TestTrashInfo:
 
 class TestTrashList:
 
+    @patch("routes.files.get_trash_manifest", return_value={
+        "a.cbz": {"original_path": "/data/comics/a.cbz", "deleted_at": 1000},
+    })
     @patch("routes.files.get_trash_contents", return_value=[
         {"name": "a.cbz", "path": "/trash/a.cbz", "size": 100, "is_dir": False, "mtime": 1000},
     ])
-    def test_trash_list(self, mock_contents, client):
+    def test_trash_list(self, mock_contents, mock_manifest, client):
         resp = client.get("/api/trash/list")
         assert resp.status_code == 200
         data = resp.get_json()
         assert data["enabled"] is True
         assert len(data["items"]) == 1
         assert data["items"][0]["name"] == "a.cbz"
+        assert data["items"][0]["original_path"] == "/data/comics/a.cbz"
+
+    @patch("routes.files.get_trash_manifest", return_value={})
+    @patch("routes.files.get_trash_contents", return_value=[
+        {"name": "old.cbz", "path": "/trash/old.cbz", "size": 50, "is_dir": False, "mtime": 900},
+    ])
+    def test_trash_list_no_manifest_entry(self, mock_contents, mock_manifest, client):
+        """Items without manifest entry have original_path=None."""
+        resp = client.get("/api/trash/list")
+        data = resp.get_json()
+        assert data["items"][0]["original_path"] is None
 
 
 class TestTrashEmpty:
@@ -544,6 +638,42 @@ class TestTrashDeleteItem:
     def test_not_found(self, mock_del, client):
         resp = client.post("/api/trash/delete", json={"name": "nope.cbz"})
         assert resp.status_code == 404
+
+
+class TestTrashRestore:
+
+    @patch("routes.files.restore_from_trash",
+           return_value={"success": True, "restored_path": "/data/DC/Batman/issue1.cbz"})
+    def test_restore_item(self, mock_restore, client):
+        resp = client.post("/api/trash/restore", json={"name": "issue1.cbz"})
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["success"] is True
+        assert data["restored_path"] == "/data/DC/Batman/issue1.cbz"
+        mock_restore.assert_called_once_with("issue1.cbz")
+
+    def test_missing_name(self, client):
+        resp = client.post("/api/trash/restore", json={})
+        assert resp.status_code == 400
+
+    @patch("routes.files.restore_from_trash",
+           return_value={"success": False, "error": "A file already exists at the original location",
+                         "conflict": True, "original_path": "/data/DC/issue1.cbz"})
+    def test_conflict(self, mock_restore, client):
+        resp = client.post("/api/trash/restore", json={"name": "issue1.cbz"})
+        assert resp.status_code == 409
+        data = resp.get_json()
+        assert data.get("conflict") is True
+
+    @patch("routes.files.restore_from_trash",
+           return_value={"success": False,
+                         "error": "No original path recorded for this item. Use drag-and-drop to restore it manually.",
+                         "no_manifest": True})
+    def test_no_manifest(self, mock_restore, client):
+        resp = client.post("/api/trash/restore", json={"name": "orphan.cbz"})
+        assert resp.status_code == 400
+        data = resp.get_json()
+        assert data.get("no_manifest") is True
 
 
 class TestCreateFolder:
@@ -624,7 +754,6 @@ class TestGetImageData:
         data = resp.get_json()
         assert data["success"] is True
         assert data["imageData"].startswith("data:image/jpeg")
-
 
 class TestReplaceImage:
 
@@ -735,3 +864,137 @@ class TestReplaceImage:
             assert replaced.size == (12, 8)
             pixel = replaced.convert("RGB").getpixel((0, 0))
             assert pixel[0] > pixel[2]
+
+
+class TestConvertPreview:
+
+    def test_missing_directory(self, client):
+        resp = client.get("/api/convert/preview")
+        assert resp.status_code == 400
+
+    @patch("routes.files.is_valid_library_path", return_value=False)
+    def test_outside_library(self, mock_valid, client, tmp_path):
+        resp = client.get(f"/api/convert/preview?directory={tmp_path}")
+        assert resp.status_code == 403
+        assert resp.get_json()["success"] is False
+
+    @patch("routes.files.is_valid_library_path", return_value=True)
+    def test_nonexistent_directory(self, mock_valid, client):
+        resp = client.get("/api/convert/preview?directory=/nonexistent/path")
+        assert resp.status_code == 404
+
+    @patch("routes.files.is_valid_library_path", return_value=True)
+    def test_counts_recursively(self, mock_valid, client, tmp_path):
+        # Top-level .cbr
+        (tmp_path / "top.cbr").write_bytes(b"x")
+        # Nested .rar two levels deep — must be found because the endpoint
+        # forces recursion regardless of the CONVERT_SUBDIRECTORIES flag.
+        nested = tmp_path / "pubA" / "series"
+        nested.mkdir(parents=True)
+        (nested / "issue.rar").write_bytes(b"x")
+        (nested / "ignored.cbz").write_bytes(b"x")
+
+        resp = client.get(f"/api/convert/preview?directory={tmp_path}")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["success"] is True
+        assert data["count"] == 2
+        assert data["directory"] == str(tmp_path)
+
+    @patch("routes.files.is_valid_library_path", return_value=True)
+    def test_zero_count(self, mock_valid, client, tmp_path):
+        (tmp_path / "already.cbz").write_bytes(b"x")
+        resp = client.get(f"/api/convert/preview?directory={tmp_path}")
+        assert resp.status_code == 200
+        assert resp.get_json()["count"] == 0
+
+
+class TestUploadToFolderOpsIntegration:
+    """The upload route should register an operation with app_state so the
+    Global Operations Indicator in the navbar can show progress."""
+
+    def test_upload_registers_operation_and_returns_op_id(self, client, tmp_path):
+        from io import BytesIO
+
+        target = tmp_path / "uploads"
+        target.mkdir()
+
+        # PNG signature is the only thing the route inspects (via extension).
+        png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+        data = {
+            "target_dir": str(target),
+            "files": [(BytesIO(png_bytes), "a.png"), (BytesIO(png_bytes), "b.png")],
+        }
+
+        resp = client.post(
+            "/upload-to-folder",
+            data=data,
+            content_type="multipart/form-data",
+        )
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert body["success"] is True
+        assert body["total_uploaded"] == 2
+        assert body.get("op_id"), "upload response must include op_id"
+
+        ops = client.get("/api/operations").get_json()["operations"]
+        match = next((o for o in ops if o["id"] == body["op_id"]), None)
+        assert match is not None, "registered op should appear in /api/operations"
+        assert match["op_type"] == "upload"
+        # On success the framework clamps current to total
+        assert match["current"] == match["total"] == 2
+        assert match["status"] == "completed"
+
+    def test_upload_no_target_dir_does_not_register_op(self, client):
+        # Validation failure should not register an op, regardless of any ops
+        # left over from prior tests in the session.
+        before = {o["id"] for o in client.get("/api/operations").get_json()["operations"]}
+
+        resp = client.post(
+            "/upload-to-folder",
+            data={},
+            content_type="multipart/form-data",
+        )
+        assert resp.status_code == 400
+
+        after = {o["id"] for o in client.get("/api/operations").get_json()["operations"]}
+        assert after.issubset(before), "validation failure must not register a new op"
+
+
+class TestCropCover:
+
+    def test_missing_target(self, client):
+        resp = client.post("/crop-cover", json={})
+        assert resp.status_code == 400
+        assert resp.get_json()["success"] is False
+
+    def test_file_not_found(self, client):
+        resp = client.post("/crop-cover", json={"target": "/nope/missing.cbz"})
+        assert resp.status_code == 404
+        assert resp.get_json()["success"] is False
+
+    def test_non_cbz_rejected(self, client, tmp_path):
+        f = tmp_path / "not_a_cbz.txt"
+        f.write_text("hello")
+        resp = client.post("/crop-cover", json={"target": str(f)})
+        assert resp.status_code == 400
+        assert "not a CBZ" in resp.get_json()["error"]
+
+    @patch("routes.files.is_critical_path", return_value=True)
+    @patch("routes.files.get_critical_path_error_message", return_value="Protected")
+    def test_critical_path_blocked(self, mock_msg, mock_crit, client, tmp_path):
+        f = tmp_path / "comic.cbz"
+        f.write_bytes(b"fake")
+        resp = client.post("/crop-cover", json={"target": str(f)})
+        assert resp.status_code == 403
+
+    @patch("routes.files.is_critical_path", return_value=False)
+    @patch("cbz_ops.crop.handle_cbz_file")
+    def test_crop_success(self, mock_handle, mock_crit, client, tmp_path):
+        f = tmp_path / "comic.cbz"
+        f.write_bytes(b"fake")
+        resp = client.post("/crop-cover", json={"target": str(f)})
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["success"] is True
+        mock_handle.assert_called_once_with(str(f))

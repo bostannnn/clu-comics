@@ -21,9 +21,12 @@ services:
             ## Additional folder if you want to use Folder Monitoring.
             - "/f/downloads:/downloads"
             - 'config-volume:/config'
-            - '/path/to/cache:/cache' # Maps local folder to container for DB and thumbnails
+            - '/path/to/cache:/cache' # Maps local folder for thumbnail cache (the SQLite DB lives in /config)
         environment:
             - FLASK_ENV=development
+            ## Optional: Set username and password to require login
+            # - CLU_USERNAME=admin
+            # - CLU_PASSWORD=changeme
             ## Set to 'yes' if you want to use folder monitoring.
             - MONITOR=yes/no
             ## Set the User ID (PUID) and Group ID (PGID) for the container.
@@ -42,6 +45,8 @@ services:
             #- GCD_MYSQL_DATABASE=gcd_data
             #- GCD_MYSQL_USER=clu
             #- GCD_MYSQL_PASSWORD=strong-user-password
+            - CLU_USERNAME=[USERNAME]
+            - CLU_PASSWORD=[PASSWORD]
         #networks:
         #    - gcd-network
 

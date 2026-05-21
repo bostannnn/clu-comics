@@ -21,6 +21,8 @@
     }
 </style>
 
+{% include 'partials/toast_container.html' %}
+
 <div class="container-lg">
     <h2 class="text-primary-emphasis">App Settings</h2>
     <div class="mt-4">
@@ -51,6 +53,10 @@
                 <button class="nav-link" id="system-perf-tab" data-bs-toggle="tab" data-bs-target="#system-perf"
                     type="button" role="tab" aria-controls="system-perf" aria-selected="false">System and
                     Performance</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="database-tab" data-bs-toggle="tab" data-bs-target="#database"
+                    type="button" role="tab" aria-controls="database" aria-selected="false">Database</button>
             </li>
             <li class="nav-item" role="presentation">
                 <button class="nav-link" id="personalization-tab" data-bs-toggle="tab" data-bs-target="#personalization"
@@ -450,6 +456,142 @@
                         </div>
                     </div>
 
+                    <!-- Smart Rename -->
+                    <hr class="my-4">
+                    <h5>Smart Rename</h5>
+                    <p class="text-muted">
+                        Renames files using values from <code>series.json</code> and the issue
+                        number parsed from each filename, instead of regex-matching the whole
+                        name. Available from the folder three-dots menu on the Files page.
+                    </p>
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="form-check form-switch mb-2">
+                                <input class="form-check-input" type="checkbox" role="switch"
+                                    id="smartRenamePreviewEnabled" name="smartRenamePreviewEnabled"
+                                    {% if smartRenamePreviewEnabled %}checked{% endif %}>
+                                <label class="form-check-label" for="smartRenamePreviewEnabled">
+                                    Preview Before Renaming
+                                </label>
+                                <small class="form-text text-muted d-block">
+                                    Show a modal of planned renames and require Apply before any
+                                    file is touched. Turn off to rename immediately on click.
+                                </small>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="form-check form-switch mb-2">
+                                <input class="form-check-input" type="checkbox" role="switch"
+                                    id="smartRenameRecursive" name="smartRenameRecursive"
+                                    {% if smartRenameRecursive %}checked{% endif %}>
+                                <label class="form-check-label" for="smartRenameRecursive">
+                                    Recurse Into Subfolders
+                                </label>
+                                <small class="form-text text-muted d-block">
+                                    Walk subdirectories and process each one that has its own
+                                    <code>cvinfo</code>/<code>series.json</code>.
+                                </small>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="row mt-2">
+                        <div class="col-md-12">
+                            <label for="smartRenameExcludeTerms" class="form-label">Skip files containing
+                                (comma-separated):</label>
+                            <input type="text" id="smartRenameExcludeTerms" name="smartRenameExcludeTerms"
+                                class="form-control" value="{{ smartRenameExcludeTerms }}"
+                                placeholder="Annual,Special">
+                            <small class="form-text text-muted">
+                                Case-insensitive substring match against the filename. Useful when
+                                Annuals/Specials share a folder with the main series — they have their
+                                own issue numbering and shouldn't be renamed onto the main slots.
+                                Leave blank to skip nothing.
+                            </small>
+                        </div>
+                    </div>
+
+                    <!-- Filename Character Cleanup -->
+                    <hr class="my-4">
+                    <h5>Filename Character Cleanup</h5>
+                    <p class="text-muted">
+                        Apply after pattern substitution to every rename (custom and default logic).
+                        The file extension is always preserved.
+                    </p>
+
+                    <div class="row">
+                        <!-- Spaces -->
+                        <div class="col-md-6">
+                            <div class="form-check form-switch mb-2">
+                                <input class="form-check-input" type="checkbox" role="switch"
+                                    id="renameCleanSpacesEnabled" name="renameCleanSpacesEnabled"
+                                    {% if renameCleanSpacesEnabled %}checked{% endif %}>
+                                <label class="form-check-label" for="renameCleanSpacesEnabled">Clean Spaces in
+                                    Filenames</label>
+                            </div>
+                            <div class="mb-2">
+                                <div class="form-check form-check-inline">
+                                    <input class="form-check-input" type="radio" name="renameCleanSpacesMode"
+                                        id="renameCleanSpacesModeRemove" value="remove"
+                                        {% if renameCleanSpacesMode == 'remove' %}checked{% endif %}>
+                                    <label class="form-check-label" for="renameCleanSpacesModeRemove">Remove</label>
+                                </div>
+                                <div class="form-check form-check-inline">
+                                    <input class="form-check-input" type="radio" name="renameCleanSpacesMode"
+                                        id="renameCleanSpacesModeReplace" value="replace"
+                                        {% if renameCleanSpacesMode != 'remove' %}checked{% endif %}>
+                                    <label class="form-check-label" for="renameCleanSpacesModeReplace">Replace</label>
+                                </div>
+                            </div>
+                            <label for="renameCleanSpacesReplacement" class="form-label">Replace with:</label>
+                            <input type="text" id="renameCleanSpacesReplacement"
+                                name="renameCleanSpacesReplacement" maxlength="8" class="form-control"
+                                value="{{ renameCleanSpacesReplacement }}" placeholder="_">
+                            <small class="form-text text-muted">
+                                Example: <code>Batman 001</code> → <code>Batman_001</code>
+                            </small>
+                        </div>
+
+                        <!-- Special Characters -->
+                        <div class="col-md-6">
+                            <div class="form-check form-switch mb-2">
+                                <input class="form-check-input" type="checkbox" role="switch"
+                                    id="renameCleanSpecialsEnabled" name="renameCleanSpecialsEnabled"
+                                    {% if renameCleanSpecialsEnabled %}checked{% endif %}>
+                                <label class="form-check-label" for="renameCleanSpecialsEnabled">Clean Special
+                                    Characters</label>
+                            </div>
+                            <label for="renameCleanSpecialsCharset" class="form-label">Characters to clean
+                                (literal):</label>
+                            <input type="text" id="renameCleanSpecialsCharset" name="renameCleanSpecialsCharset"
+                                class="form-control" value="{{ renameCleanSpecialsCharset }}"
+                                placeholder="&amp;!@#'">
+                            <small class="form-text text-muted">Each character is treated literally, not as
+                                regex.</small>
+                            <div class="mt-2 mb-2">
+                                <div class="form-check form-check-inline">
+                                    <input class="form-check-input" type="radio" name="renameCleanSpecialsMode"
+                                        id="renameCleanSpecialsModeRemove" value="remove"
+                                        {% if renameCleanSpecialsMode != 'replace' %}checked{% endif %}>
+                                    <label class="form-check-label" for="renameCleanSpecialsModeRemove">Remove</label>
+                                </div>
+                                <div class="form-check form-check-inline">
+                                    <input class="form-check-input" type="radio" name="renameCleanSpecialsMode"
+                                        id="renameCleanSpecialsModeReplace" value="replace"
+                                        {% if renameCleanSpecialsMode == 'replace' %}checked{% endif %}>
+                                    <label class="form-check-label" for="renameCleanSpecialsModeReplace">Replace</label>
+                                </div>
+                            </div>
+                            <label for="renameCleanSpecialsReplacement" class="form-label">Replace with:</label>
+                            <input type="text" id="renameCleanSpecialsReplacement"
+                                name="renameCleanSpecialsReplacement" maxlength="8" class="form-control"
+                                value="{{ renameCleanSpecialsReplacement }}">
+                            <small class="form-text text-muted">
+                                Replacements cannot contain Windows-reserved characters:
+                                <code>&lt; &gt; : " / \ | ? *</code>
+                            </small>
+                        </div>
+                    </div>
+
                 </div>
 
                 <!-- Save Button for Tab 1 -->
@@ -647,8 +789,73 @@
 
                 <!-- Metadata API Settings -->
                 <div class="container p-4 border rounded shadow-sm mb-4">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <div>
+                            <h4><i class="bi bi-key me-2"></i>Client API Access</h4>
+                            <p class="text-muted mb-0">Generate a long-lived bearer token for the offline mobile/desktop
+                                reader app. The client sends it as <code>Authorization: Bearer &lt;token&gt;</code> on
+                                every request to <code>/api/v1/*</code>.</p>
+                        </div>
+                        <span id="apiTokenStatusBadge" class="badge bg-secondary">
+                            <i class="bi bi-x-circle me-1"></i>Not Configured
+                        </span>
+                    </div>
 
+                    <div class="row align-items-end">
+                        <div class="col-md-9">
+                            <label for="apiTokenField" class="form-label">API Token</label>
+                            <div class="input-group">
+                                <input type="password" class="form-control password-field" id="apiTokenField"
+                                    placeholder="No token generated yet" readonly autocomplete="off">
+                                <button class="btn btn-outline-secondary" type="button" id="apiTokenToggleBtn"
+                                    title="Show / hide token">
+                                    <i class="bi bi-eye"></i>
+                                </button>
+                                <button class="btn btn-outline-secondary" type="button" id="apiTokenCopyBtn"
+                                    title="Copy to clipboard" disabled>
+                                    <i class="bi bi-clipboard"></i>
+                                </button>
+                            </div>
+                            <small class="form-text text-muted">
+                                Treat this token like a password. Anyone with it can read your library and reading
+                                progress over <code>/api/v1/*</code>. Rotate it to revoke access from old clients.
+                            </small>
+                        </div>
+                        <div class="col-md-3 mt-3 mt-md-0">
+                            <button class="btn btn-primary w-100" type="button" id="apiTokenRotateBtn">
+                                <i class="bi bi-arrow-repeat me-1"></i><span id="apiTokenRotateLabel">Generate
+                                    Token</span>
+                            </button>
+                        </div>
+                    </div>
 
+                    <hr class="my-4">
+
+                    <div>
+                        <label class="form-label fw-semibold mb-1">Default browse mode for the API</label>
+                        <p class="text-muted small mb-2">
+                            Controls how the offline reader navigates your library. Clients can override per request
+                            with <code>?mode=metadata</code> or <code>?mode=filesystem</code>.
+                        </p>
+                        <div class="btn-group" role="group" aria-label="Default API browse mode">
+                            <input type="radio" class="btn-check" name="apiBrowseMode" id="apiBrowseModeMetadata"
+                                value="metadata" autocomplete="off">
+                            <label class="btn btn-outline-primary" for="apiBrowseModeMetadata">
+                                <i class="bi bi-tags me-1"></i>Metadata view
+                            </label>
+                            <input type="radio" class="btn-check" name="apiBrowseMode" id="apiBrowseModeFilesystem"
+                                value="filesystem" autocomplete="off">
+                            <label class="btn btn-outline-primary" for="apiBrowseModeFilesystem">
+                                <i class="bi bi-folder me-1"></i>Filesystem view
+                            </label>
+                        </div>
+                        <small class="form-text text-muted d-block mt-2">
+                            <strong>Metadata view</strong> groups by publisher / series read from each file's
+                            <code>ComicInfo.xml</code>.
+                            <strong>Filesystem view</strong> mirrors the folders under your data directory — same as
+                            the main <code>/collection</code> browser.
+                        </small>
+                    </div>
                 </div>
 
                 <!-- Komga Reading Sync -->
@@ -898,381 +1105,6 @@
                     </div>
                 </div>
 
-                <!-- File Index Management Settings -->
-                <div class="container p-4 border rounded shadow-sm mb-4">
-                    <h4>Index & Sync Management</h4>
-                    <p class="text-muted">
-                        Manage the application's file search index stored in SQLite. The index provides fast searching
-                        across your entire library.
-                        <br><br>
-                        <strong>How it works:</strong> The file index is stored persistently in the database and
-                        automatically updates when you move, rename, or delete files.
-                        You can manually rebuild it or schedule automatic rebuilds to ensure data accuracy.
-                    </p>
-
-                    <!-- Index Status Display -->
-                    <div class="row mb-3">
-                        <div class="col-md-12">
-                            <div class="alert alert-info">
-                                <div class="row">
-                                    <div class="col-md-4">
-                                        <strong>Index Status:</strong><br>
-                                        <span id="indexStatus">Checking...</span>
-                                    </div>
-                                    <div class="col-md-4">
-                                        <strong>Last Rebuild:</strong><br>
-                                        <span id="lastRebuild">Checking...</span>
-                                    </div>
-                                    <div class="col-md-4">
-                                        <strong>Next Scheduled:</strong><br>
-                                        <span id="nextScheduled">Not scheduled</span>
-                                    </div>
-                                </div>
-                                <div class="row mt-2">
-                                    <div class="col-md-12 text-center">
-                                        <button type="button" class="btn btn-sm btn-outline-info"
-                                            onclick="updateIndexStatus()" title="Refresh index status">
-                                            <i class="bi bi-arrow-clockwise"></i> Refresh Status
-                                        </button>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Manual Rebuild Button -->
-                    <div class="row mb-3">
-                        <div class="col-md-12">
-                            <button type="button" class="btn btn-primary w-100" onclick="rebuildFileIndex()"
-                                title="Manually rebuild the file index">
-                                <i class="bi bi-arrow-clockwise"></i> Rebuild File Index Now
-                            </button>
-                            <small class="form-text text-muted">
-                                Manually rebuild the entire file index. This scans all files in your data directory and
-                                updates the database. Use this if search results seem outdated.
-                            </small>
-                        </div>
-                    </div>
-
-                    <!-- Scheduled Rebuild Configuration -->
-                    <hr>
-                    <h5 class="mt-3 mb-3">Automatic Rebuild Schedule</h5>
-                    <p class="text-muted">Configure automatic file index rebuilds to keep your search results
-                        up-to-date.</p>
-
-                    <div class="row">
-                        <div class="col-md-4">
-                            <label for="rebuildFrequency" class="form-label">Rebuild Frequency:</label>
-                            <select class="form-select" id="rebuildFrequency" name="rebuildFrequency">
-                                <option value="disabled">Disabled</option>
-                                <option value="daily">Daily</option>
-                                <option value="weekly">Weekly</option>
-                            </select>
-                            <small class="form-text text-muted">
-                                How often the file index should automatically rebuild.
-                            </small>
-                        </div>
-
-                        <div class="col-md-4">
-                            <label for="rebuildTime" class="form-label">Rebuild Time:</label>
-                            <input type="time" class="form-control" id="rebuildTime" name="rebuildTime" value="02:00">
-                            <small class="form-text text-muted">
-                                Time of day to run the rebuild (in your timezone).
-                            </small>
-                        </div>
-
-                        <div class="col-md-4" id="weekdaySelectContainer" style="display: none;">
-                            <label for="rebuildWeekday" class="form-label">Day of Week:</label>
-                            <select class="form-select" id="rebuildWeekday" name="rebuildWeekday">
-                                <option value="0">Monday</option>
-                                <option value="1">Tuesday</option>
-                                <option value="2">Wednesday</option>
-                                <option value="3">Thursday</option>
-                                <option value="4">Friday</option>
-                                <option value="5">Saturday</option>
-                                <option value="6">Sunday</option>
-                            </select>
-                            <small class="form-text text-muted">
-                                Which day of the week to run the rebuild.
-                            </small>
-                        </div>
-                    </div>
-
-                    <div class="row mt-3">
-                        <div class="col-md-12">
-                            <button type="button" class="btn btn-success w-100" onclick="saveRebuildSchedule()"
-                                title="Save the rebuild schedule">
-                                <i class="bi bi-floppy"></i> Save Schedule
-                            </button>
-                        </div>
-                    </div>
-
-                    <!-- GetComics Scrape Index Build Schedule -->
-                    <hr>
-                    <h5 class="mt-3 mb-3">GetComics Scrape Index Schedule</h5>
-                    <p class="text-muted">
-                        Pre-populate the GetComics scrape index by scraping sitemap URLs for tracked series.
-                        The scrape index stores page titles, issue info, and download links locally so future
-                        wanted-issues searches don't need to hit GetComics live.
-                    </p>
-
-                    <div class="row mb-3">
-                        <div class="col-md-12">
-                            <div class="alert alert-info">
-                                <div class="row">
-                                    <div class="col-md-4">
-                                        <strong>Scrape Index:</strong><br>
-                                        <span id="scrapeIndexCount">Loading...</span> entries
-                                    </div>
-                                    <div class="col-md-4">
-                                        <strong>Next Scheduled:</strong><br>
-                                        <span id="nextScrapeIndexSchedule">Checking...</span>
-                                    </div>
-                                    <div class="col-md-4">
-                                        <button type="button" class="btn btn-sm btn-outline-info"
-                                            onclick="updateScrapeIndexStatus()" title="Refresh status">
-                                            <i class="bi bi-arrow-clockwise"></i> Refresh
-                                        </button>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="row">
-                        <div class="col-md-4">
-                            <label for="scrapeIndexFrequency" class="form-label">Scrape Frequency:</label>
-                            <select class="form-select" id="scrapeIndexFrequency" name="scrapeIndexFrequency">
-                                <option value="disabled">Disabled</option>
-                                <option value="daily">Daily</option>
-                                <option value="weekly">Weekly</option>
-                            </select>
-                            <small class="form-text text-muted">
-                                How often to build the scrape index.
-                            </small>
-                        </div>
-
-                        <div class="col-md-4">
-                            <label for="scrapeIndexTime" class="form-label">Scrape Time:</label>
-                            <input type="time" class="form-control" id="scrapeIndexTime" name="scrapeIndexTime"
-                                value="03:00">
-                            <small class="form-text text-muted">
-                                Time of day to run the scrape (in your timezone).
-                            </small>
-                        </div>
-
-                        <div class="col-md-4" id="scrapeIndexWeekdaySelectContainer" style="display: none;">
-                            <label for="scrapeIndexWeekday" class="form-label">Day of Week:</label>
-                            <select class="form-select" id="scrapeIndexWeekday" name="scrapeIndexWeekday">
-                                <option value="0">Monday</option>
-                                <option value="1">Tuesday</option>
-                                <option value="2">Wednesday</option>
-                                <option value="3">Thursday</option>
-                                <option value="4">Friday</option>
-                                <option value="5">Saturday</option>
-                                <option value="6">Sunday</option>
-                            </select>
-                            <small class="form-text text-muted">
-                                Which day of the week to run the scrape.
-                            </small>
-                        </div>
-                    </div>
-
-                    <div class="row mt-3">
-                        <div class="col-md-12">
-                            <button type="button" class="btn btn-success w-100" onclick="saveScrapeIndexSchedule()"
-                                title="Save the scrape index schedule">
-                                <i class="bi bi-floppy"></i> Save Scrape Index Schedule
-                            </button>
-                        </div>
-                    </div>
-
-                    <!-- Scheduled Series Sync Configuration -->
-                    <hr>
-                    <h5 class="mt-3 mb-3">Automatic Series Sync Schedule</h5>
-                    <p class="text-muted">Configure automatic syncing of tracked series from Metron API to check for new
-                        issues.</p>
-
-                    <div class="row">
-                        <div class="col-md-4">
-                            <label for="syncFrequency" class="form-label">Sync Frequency:</label>
-                            <select class="form-select" id="syncFrequency" name="syncFrequency">
-                                <option value="disabled">Disabled</option>
-                                <option value="daily">Daily</option>
-                                <option value="weekly">Weekly</option>
-                            </select>
-                            <small class="form-text text-muted">
-                                How often to sync series data from Metron API.
-                            </small>
-                        </div>
-
-                        <div class="col-md-4">
-                            <label for="syncTime" class="form-label">Sync Time:</label>
-                            <input type="time" class="form-control" id="syncTime" name="syncTime" value="03:00">
-                            <small class="form-text text-muted">
-                                Time of day to run the sync (in your timezone).
-                            </small>
-                        </div>
-
-                        <div class="col-md-4" id="syncWeekdaySelectContainer" style="display: none;">
-                            <label for="syncWeekday" class="form-label">Day of Week:</label>
-                            <select class="form-select" id="syncWeekday" name="syncWeekday">
-                                <option value="0">Monday</option>
-                                <option value="1">Tuesday</option>
-                                <option value="2">Wednesday</option>
-                                <option value="3">Thursday</option>
-                                <option value="4">Friday</option>
-                                <option value="5">Saturday</option>
-                                <option value="6">Sunday</option>
-                            </select>
-                            <small class="form-text text-muted">
-                                Which day of the week to run the sync.
-                            </small>
-                        </div>
-                    </div>
-
-                    <div class="row mt-3">
-                        <div class="col-md-6">
-                            <button type="button" class="btn btn-success w-100" onclick="saveSyncSchedule()"
-                                title="Save the sync schedule">
-                                <i class="bi bi-floppy"></i> Save Sync Schedule
-                            </button>
-                        </div>
-                        <div class="col-md-6">
-                            <button type="button" class="btn btn-outline-primary w-100" onclick="runSyncNow()"
-                                title="Run sync immediately">
-                                <i class="bi bi-arrow-repeat"></i> Sync Now
-                            </button>
-                        </div>
-                    </div>
-                    <div class="row mt-2">
-                        <div class="col-md-12">
-                            <small class="text-muted" id="lastSyncDisplay"></small>
-                        </div>
-                    </div>
-
-                    <!-- GetComics Auto-Download Configuration -->
-                    <hr>
-                    <h5 class="mt-3 mb-3">GetComics Auto-Download Schedule</h5>
-                    <p class="text-muted">Automatically search GetComics for wanted issues (with today's release date or
-                        later) and queue downloads.</p>
-
-                    <!-- Weekly Packs Warning Banner -->
-                    <div id="weeklyPacksWarning" class="alert alert-info d-none mb-3">
-                        <i class="bi bi-info-circle me-2"></i>
-                        <strong>Weekly Packs Enabled:</strong> Individual issue auto-download is disabled because Weekly
-                        Packs is enabled.
-                        <a href="{{ url_for('downloads.weekly_packs') }}">Manage Weekly Packs</a>
-                    </div>
-
-                    <div class="row">
-                        <div class="col-md-4">
-                            <label for="getcomicsFrequency" class="form-label">Download Frequency:</label>
-                            <select class="form-select" id="getcomicsFrequency" name="getcomicsFrequency">
-                                <option value="disabled">Disabled</option>
-                                <option value="daily">Daily</option>
-                                <option value="weekly">Weekly</option>
-                            </select>
-                            <small class="form-text text-muted">
-                                How often to search GetComics for wanted issues.
-                            </small>
-                        </div>
-
-                        <div class="col-md-4">
-                            <label for="getcomicsTime" class="form-label">Download Time:</label>
-                            <input type="time" class="form-control" id="getcomicsTime" name="getcomicsTime"
-                                value="03:00">
-                            <small class="form-text text-muted">
-                                Time of day to search and download (in your timezone).
-                            </small>
-                        </div>
-
-                        <div class="col-md-4" id="getcomicsWeekdaySelectContainer" style="display: none;">
-                            <label for="getcomicsWeekday" class="form-label">Day of Week:</label>
-                            <select class="form-select" id="getcomicsWeekday" name="getcomicsWeekday">
-                                <option value="0">Monday</option>
-                                <option value="1">Tuesday</option>
-                                <option value="2">Wednesday</option>
-                                <option value="3">Thursday</option>
-                                <option value="4">Friday</option>
-                                <option value="5">Saturday</option>
-                                <option value="6">Sunday</option>
-                            </select>
-                            <small class="form-text text-muted">
-                                Which day of the week to run the download.
-                            </small>
-                        </div>
-                    </div>
-
-                    <div class="row mt-3">
-                        <div class="col-md-6">
-                            <button type="button" class="btn btn-success w-100" onclick="saveGetcomicsSchedule()"
-                                title="Save the GetComics schedule">
-                                <i class="bi bi-floppy"></i> Save GetComics Schedule
-                            </button>
-                        </div>
-                        <div class="col-md-6">
-                            <button type="button" class="btn btn-outline-primary w-100" onclick="runGetcomicsNow()"
-                                title="Run GetComics download immediately">
-                                <i class="bi bi-cloud-download"></i> Download Now
-                            </button>
-                        </div>
-                    </div>
-                    <div class="row mt-2">
-                        <div class="col-md-12">
-                            <small class="text-muted" id="lastGetcomicsDisplay"></small>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Reading List Sync Schedule -->
-                <div class="container p-4 border rounded shadow-sm mb-4">
-                    <h4><i class="bi bi-arrow-repeat me-2"></i>Reading List Sync Schedule</h4>
-                    <p class="text-muted">Automatically sync GitHub-sourced reading lists to detect changes.</p>
-
-                    <div class="row">
-                        <div class="col-md-4">
-                            <label for="rlSyncFrequency" class="form-label">Sync Frequency:</label>
-                            <select class="form-select" id="rlSyncFrequency">
-                                <option value="disabled">Disabled</option>
-                                <option value="daily">Daily</option>
-                                <option value="weekly">Weekly</option>
-                            </select>
-                        </div>
-
-                        <div class="col-md-4">
-                            <label for="rlSyncTime" class="form-label">Sync Time:</label>
-                            <input type="time" class="form-control" id="rlSyncTime" value="04:00">
-                        </div>
-
-                        <div class="col-md-4" id="rlSyncWeekdayContainer" style="display: none;">
-                            <label for="rlSyncWeekday" class="form-label">Day of Week:</label>
-                            <select class="form-select" id="rlSyncWeekday">
-                                <option value="0">Monday</option>
-                                <option value="1">Tuesday</option>
-                                <option value="2">Wednesday</option>
-                                <option value="3">Thursday</option>
-                                <option value="4">Friday</option>
-                                <option value="5">Saturday</option>
-                                <option value="6">Sunday</option>
-                            </select>
-                        </div>
-                    </div>
-
-                    <div class="row mt-3">
-                        <div class="col-md-12">
-                            <button type="button" class="btn btn-success w-100" onclick="saveRlSyncSchedule()">
-                                <i class="bi bi-floppy"></i> Save Reading List Sync Schedule
-                            </button>
-                        </div>
-                    </div>
-                    <div class="row mt-2">
-                        <div class="col-md-12">
-                            <small class="text-muted" id="lastRlSyncDisplay"></small>
-                        </div>
-                    </div>
-                </div>
-
                 <!-- Missing Issue Configuration -->
                 <div class="container p-4 border rounded shadow-sm mb-4">
                     <h4>Missing Issue Configuration</h4>
@@ -1384,6 +1216,72 @@
                     </button>
                 </div>
 
+            </div>
+
+            <!-- ========================================== -->
+            <!-- TAB: Database -->
+            <!-- ========================================== -->
+            <div class="tab-pane fade" id="database" role="tabpanel" aria-labelledby="database-tab">
+
+                <!-- Database Stats -->
+                <div class="container p-4 border rounded shadow-sm mb-4">
+                    <h4 class="mb-2">Current Database</h4>
+                    <p class="text-muted">SQLite file size and row counts per table.</p>
+                    <div class="row g-3 small mb-3">
+                        <div class="col-12 col-md-6"><strong>Path:</strong> <code id="dbStatsPath">–</code></div>
+                        <div class="col-6 col-md-3"><strong>DB size:</strong> <span id="dbStatsSize">–</span></div>
+                        <div class="col-6 col-md-3"><strong>WAL / SHM:</strong> <span id="dbStatsWal">–</span></div>
+                        <div class="col-6 col-md-3"><strong>Tables:</strong> <span id="dbStatsTableCount">–</span></div>
+                        <div class="col-6 col-md-3"><strong>Total rows:</strong> <span id="dbStatsTotalRows">–</span></div>
+                    </div>
+                    <div class="table-responsive" style="max-height: 320px;">
+                        <table class="table table-sm table-striped align-middle mb-0">
+                            <thead class="sticky-top bg-body">
+                                <tr><th>Table</th><th class="text-end">Rows</th></tr>
+                            </thead>
+                            <tbody id="dbStatsTablesBody">
+                                <tr><td colspan="2" class="text-muted text-center">Loading…</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Backups -->
+                <div class="container p-4 border rounded shadow-sm mb-4">
+                    <div class="d-flex align-items-start justify-content-between mb-2">
+                        <div>
+                            <h4 class="mb-0">Backups</h4>
+                            <p class="text-muted mb-0">Auto-created on container start (when the DB has changed). Up to 3 retained, plus any manual or pre-restore snapshots.</p>
+                        </div>
+                        <button id="dbBackupNowBtn" type="button" class="btn btn-primary btn-sm">
+                            <i class="bi bi-floppy me-1"></i> Back up now
+                        </button>
+                    </div>
+                    <div class="small mb-3">
+                        <strong>Last backup:</strong> <span id="dbLastBackup">–</span>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table table-sm align-middle mb-0">
+                            <thead>
+                                <tr>
+                                    <th>Filename</th>
+                                    <th>Created</th>
+                                    <th class="text-end">Size</th>
+                                    <th class="text-end">Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="dbBackupsBody">
+                                <tr><td colspan="4" class="text-muted text-center">Loading…</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="alert alert-warning small mt-3 mb-0">
+                        <i class="bi bi-exclamation-triangle me-1"></i>
+                        Restoring replaces the current database. A safety snapshot of the
+                        current DB is taken automatically just before restore. Restart the
+                        app after restoring to ensure all background workers reload state.
+                    </div>
+                </div>
             </div>
 
             <!-- ========================================== -->
@@ -1614,10 +1512,60 @@
     </div>
 </div>
 
+<!-- Convert Library Confirmation Modal -->
+<div class="modal fade" id="convertLibraryModal" tabindex="-1" aria-labelledby="convertLibraryModalLabel" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="convertLibraryModalLabel"><i class="bi bi-file-earmark-zip me-2"></i>Convert Entire Library to CBZ</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p class="mb-1"><strong>Library:</strong> <span id="convertLibraryName"></span></p>
+        <p class="text-muted small"><code id="convertLibraryPath"></code></p>
+
+        <div id="convertLibraryLoading" class="text-center my-3">
+          <div class="spinner-border spinner-border-sm" role="status">
+            <span class="visually-hidden">Scanning...</span>
+          </div>
+          <span class="ms-2">Scanning library for RAR/CBR files...</span>
+        </div>
+
+        <div id="convertLibraryResult" class="alert alert-info" style="display: none;">
+          <i class="bi bi-info-circle me-1"></i>
+          <strong><span id="convertLibraryCount">0</span></strong> RAR/CBR file(s) will be converted to CBZ.
+        </div>
+
+        <div id="convertLibraryEmpty" class="alert alert-secondary" style="display: none;">
+          <i class="bi bi-check-circle me-1"></i>
+          No RAR or CBR files were found in this library — nothing to convert.
+        </div>
+
+        <div id="convertLibraryError" class="alert alert-danger" style="display: none;"></div>
+
+        <div class="alert alert-warning mb-0">
+          <i class="bi bi-exclamation-triangle me-1"></i>
+          <strong>Originals will be deleted</strong> after each file is successfully converted. This action cannot be undone.
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-warning" id="confirmConvertLibraryBtn" disabled>
+          <i class="bi bi-file-earmark-zip me-1"></i>Convert All
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+<!-- End of Convert Library Modal -->
+
 {% endblock %}
 
 {% block scripts %}
 {{ super() }}
+<script src="{{ url_for('static', filename='js/clu-utils.js') }}?v={{ range(1000, 9999) | random }}"></script>
+<script src="{{ url_for('static', filename='js/clu-streaming.js') }}?v={{ range(1000, 9999) | random }}"></script>
+<script src="{{ url_for('static', filename='js/database_panel.js') }}?v={{ range(1000, 9999) | random }}"></script>
 <script>
     // Toast notification system for config.html
     function showToast(message, type = 'info', duration = 5000) {
@@ -1746,6 +1694,16 @@
             deletedFiles: document.getElementById('deletedFiles')?.value || '',
             enableCustomRename: document.getElementById('enableCustomRename')?.checked || false,
             customRenamePattern: document.getElementById('customRenamePattern')?.value || '',
+            renameCleanSpacesEnabled: document.getElementById('renameCleanSpacesEnabled')?.checked || false,
+            renameCleanSpacesMode: document.querySelector('input[name="renameCleanSpacesMode"]:checked')?.value || 'replace',
+            renameCleanSpacesReplacement: document.getElementById('renameCleanSpacesReplacement')?.value || '_',
+            renameCleanSpecialsEnabled: document.getElementById('renameCleanSpecialsEnabled')?.checked || false,
+            renameCleanSpecialsCharset: document.getElementById('renameCleanSpecialsCharset')?.value || '',
+            renameCleanSpecialsMode: document.querySelector('input[name="renameCleanSpecialsMode"]:checked')?.value || 'remove',
+            renameCleanSpecialsReplacement: document.getElementById('renameCleanSpecialsReplacement')?.value || '',
+            smartRenamePreviewEnabled: document.getElementById('smartRenamePreviewEnabled')?.checked ?? true,
+            smartRenameRecursive: document.getElementById('smartRenameRecursive')?.checked ?? true,
+            smartRenameExcludeTerms: document.getElementById('smartRenameExcludeTerms')?.value ?? '',
             enableAutoRename: document.getElementById('enableAutoRename')?.checked || false,
             enableAutoMove: document.getElementById('enableAutoMove')?.checked || false,
             customMovePattern: document.getElementById('customMovePattern')?.value || '',
@@ -1901,20 +1859,10 @@
         btn.disabled = true;
         btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Saving...';
 
-        const offset = getTimezoneOffset();
         const data = {
             operationTimeout: document.getElementById('operationTimeout')?.value || '3600',
             largeFileThreshold: document.getElementById('largeFileThreshold')?.value || '500',
             timezone: document.getElementById('timezone')?.value || 'UTC',
-            rebuildFrequency: document.getElementById('rebuildFrequency')?.value || 'disabled',
-            rebuildTime: localToUtc(document.getElementById('rebuildTime')?.value || '02:00', offset),
-            rebuildWeekday: document.getElementById('rebuildWeekday')?.value || '0',
-            syncFrequency: document.getElementById('syncFrequency')?.value || 'disabled',
-            syncTime: localToUtc(document.getElementById('syncTime')?.value || '03:00', offset),
-            syncWeekday: document.getElementById('syncWeekday')?.value || '0',
-            getcomicsFrequency: document.getElementById('getcomicsFrequency')?.value || 'disabled',
-            getcomicsTime: localToUtc(document.getElementById('getcomicsTime')?.value || '04:00', offset),
-            getcomicsWeekday: document.getElementById('getcomicsWeekday')?.value || '0',
             ignored_terms: document.getElementById('ignored_terms')?.value || '',
             ignored_files: document.getElementById('ignored_files')?.value || '',
             enableDebugLogging: document.getElementById('enableDebugLogging')?.checked || false,
@@ -2145,12 +2093,6 @@
         // Initialize custom move pattern preview
         initializeMovePreview();
 
-        // Initialize file index status display
-        setTimeout(updateIndexStatus, 1000);
-
-        // Load current schedule configuration
-        setTimeout(loadRebuildSchedule, 1500);
-
         // Clear cache button handler
         document.getElementById('clearCacheBtn').addEventListener('click', function () {
             const button = this;
@@ -2192,72 +2134,12 @@
                 });
         });
 
-        // Show/hide weekday selector based on frequency
-        document.getElementById('rebuildFrequency').addEventListener('change', function () {
-            const weekdayContainer = document.getElementById('weekdaySelectContainer');
-            if (this.value === 'weekly') {
-                weekdayContainer.style.display = 'block';
-            } else {
-                weekdayContainer.style.display = 'none';
-            }
-        });
-
-        // Show/hide sync weekday selector based on frequency
-        document.getElementById('syncFrequency').addEventListener('change', function () {
-            const weekdayContainer = document.getElementById('syncWeekdaySelectContainer');
-            if (this.value === 'weekly') {
-                weekdayContainer.style.display = 'block';
-            } else {
-                weekdayContainer.style.display = 'none';
-            }
-        });
-
-        // Show/hide getcomics weekday selector based on frequency
-        document.getElementById('getcomicsFrequency').addEventListener('change', function () {
-            const weekdayContainer = document.getElementById('getcomicsWeekdaySelectContainer');
-            if (this.value === 'weekly') {
-                weekdayContainer.style.display = 'block';
-            } else {
-                weekdayContainer.style.display = 'none';
-            }
-        });
-
-        document.getElementById('scrapeIndexFrequency').addEventListener('change', function () {
-            const weekdayContainer = document.getElementById('scrapeIndexWeekdaySelectContainer');
-            if (this.value === 'weekly') {
-                weekdayContainer.style.display = 'block';
-            } else {
-                weekdayContainer.style.display = 'none';
-            }
-        });
-
-        // Load sync schedule on page load
-        loadSyncSchedule();
-
-        // Load getcomics schedule on page load
-        loadGetcomicsSchedule();
-
-        // Load scrape_index schedule on page load
-        loadScrapeIndexSchedule();
-
-        // Re-convert displayed schedule times when timezone changes
-        document.getElementById('timezone').addEventListener('change', function() {
-            loadRebuildSchedule();
-            loadSyncSchedule();
-            loadGetcomicsSchedule();
-            loadScrapeIndexSchedule();
-        });
-
         // Load Komga config on page load
         loadKomgaConfig();
 
-        // Load Reading List Sync schedule on page load
-        loadRlSyncSchedule();
-
-        // Show/hide RL sync weekday selector based on frequency
-        document.getElementById('rlSyncFrequency').addEventListener('change', function () {
-            document.getElementById('rlSyncWeekdayContainer').style.display = this.value === 'weekly' ? 'block' : 'none';
-        });
+        // Load Client API token state on page load
+        loadApiToken();
+        loadApiBrowseMode();
 
         // Show/hide Komga weekday selector based on frequency
         document.getElementById('komgaSyncFrequency').addEventListener('change', function () {
@@ -2266,542 +2148,176 @@
         });
     });
 
-    // File Index Management Functions
-    function rebuildFileIndex() {
-        const button = event.target.closest('button');
-        const originalText = button.innerHTML;
+    // =========================================
+    // Client API Token (mobile/desktop reader)
+    // =========================================
 
-        // Show loading state
-        button.innerHTML = '<i class="bi bi-arrow-clockwise spin"></i> Rebuilding Index...';
-        button.disabled = true;
+    function setApiTokenUi(token) {
+        const field = document.getElementById('apiTokenField');
+        const badge = document.getElementById('apiTokenStatusBadge');
+        const copyBtn = document.getElementById('apiTokenCopyBtn');
+        const rotateLabel = document.getElementById('apiTokenRotateLabel');
+        const toggleBtn = document.getElementById('apiTokenToggleBtn');
 
-        fetch('/api/rebuild-file-index', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' }
-        })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    showToast(data.message, 'success');
-                    // Update index status display
-                    updateIndexStatus();
-                } else {
-                    showToast(data.error || 'Unknown error', 'error');
-                }
-            })
-            .catch(error => {
-                console.error('Error rebuilding file index:', error);
-                showToast('Network error occurred', 'error');
-            })
-            .finally(() => {
-                // Restore button state
-                button.innerHTML = originalText;
-                button.disabled = false;
-            });
-    }
-
-    function updateIndexStatus() {
-        const indexStatusEl = document.getElementById('indexStatus');
-        const lastRebuildEl = document.getElementById('lastRebuild');
-
-        if (indexStatusEl) {
-            indexStatusEl.innerHTML = '<i class="bi bi-arrow-clockwise spin"></i> Checking...';
+        if (token) {
+            field.value = token;
+            field.placeholder = '';
+            badge.className = 'badge bg-success';
+            badge.innerHTML = '<i class="bi bi-check-circle me-1"></i>Configured';
+            copyBtn.disabled = false;
+            rotateLabel.textContent = 'Rotate Token';
+        } else {
+            field.value = '';
+            field.placeholder = 'No token generated yet';
+            field.type = 'password';
+            badge.className = 'badge bg-secondary';
+            badge.innerHTML = '<i class="bi bi-x-circle me-1"></i>Not Configured';
+            copyBtn.disabled = true;
+            rotateLabel.textContent = 'Generate Token';
+            toggleBtn.querySelector('i').className = 'bi bi-eye';
         }
-
-        fetch('/api/file-index-status', {
-            headers: { 'Cache-Control': 'no-cache' }
-        })
-            .then(response => response.json())
-            .then(data => {
-                if (indexStatusEl) {
-                    indexStatusEl.textContent = `${data.total_files || 0} files | ${data.total_directories || 0} directories`;
-                }
-                if (lastRebuildEl) {
-                    if (data.last_rebuild) {
-                        lastRebuildEl.textContent = data.last_rebuild;
-                    } else {
-                        lastRebuildEl.textContent = 'Never';
-                    }
-                }
-            })
-            .catch(error => {
-                console.error('Error fetching index status:', error);
-                if (indexStatusEl) {
-                    indexStatusEl.innerHTML = '<i class="bi bi-exclamation-triangle"></i> Error';
-                }
-            });
     }
 
-    function loadRebuildSchedule() {
-        fetch('/api/get-rebuild-schedule', {
-            headers: { 'Cache-Control': 'no-cache' }
-        })
-            .then(response => response.json())
+    function loadApiToken() {
+        fetch('/api/admin/api-token', { headers: { 'Cache-Control': 'no-cache' } })
+            .then(r => r.json())
             .then(data => {
-                if (data.success) {
-                    const schedule = data.schedule;
-                    document.getElementById('rebuildFrequency').value = schedule.frequency || 'disabled';
-                    const offset = getTimezoneOffset();
-                    document.getElementById('rebuildTime').value = utcToLocal(schedule.time || '02:00', offset);
-                    document.getElementById('rebuildWeekday').value = schedule.weekday || '0';
-
-                    // Show weekday selector if weekly
-                    const weekdayContainer = document.getElementById('weekdaySelectContainer');
-                    if (schedule.frequency === 'weekly') {
-                        weekdayContainer.style.display = 'block';
-                    } else {
-                        weekdayContainer.style.display = 'none';
-                    }
-
-                    // Update next scheduled display
-                    const nextScheduledEl = document.getElementById('nextScheduled');
-                    if (nextScheduledEl && data.next_run) {
-                        nextScheduledEl.textContent = data.next_run;
-                    } else if (nextScheduledEl) {
-                        nextScheduledEl.textContent = 'Not scheduled';
-                    }
-                }
+                if (data.success) setApiTokenUi(data.token);
             })
-            .catch(error => {
-                console.error('Error loading rebuild schedule:', error);
-            });
+            .catch(err => console.error('Failed to load API token:', err));
     }
 
-    function saveRebuildSchedule() {
-        const button = event.target.closest('button');
-        const originalText = button.innerHTML;
+    async function rotateApiToken() {
+        const existing = document.getElementById('apiTokenField').value;
+        if (existing) {
+            const ok = confirm(
+                'Rotating the token will revoke access for any client currently using the old one. Continue?'
+            );
+            if (!ok) return;
+        }
+        const btn = document.getElementById('apiTokenRotateBtn');
+        btn.disabled = true;
+        try {
+            const resp = await fetch('/api/admin/api-token/rotate', { method: 'POST' });
+            const data = await resp.json();
+            if (data.success && data.token) {
+                setApiTokenUi(data.token);
+                // Reveal so the user can copy it.
+                document.getElementById('apiTokenField').type = 'text';
+                document.getElementById('apiTokenToggleBtn').querySelector('i').className = 'bi bi-eye-slash';
+            } else {
+                alert('Failed to generate token: ' + (data.error || 'unknown error'));
+            }
+        } catch (err) {
+            alert('Failed to generate token: ' + err);
+        } finally {
+            btn.disabled = false;
+        }
+    }
 
-        button.innerHTML = '<i class="bi bi-floppy spin"></i> Saving...';
-        button.disabled = true;
+    function copyApiToken() {
+        const field = document.getElementById('apiTokenField');
+        const btn = document.getElementById('apiTokenCopyBtn');
+        if (!field.value || !btn) return;
+        const value = field.value;
 
-        const offset = getTimezoneOffset();
-        const schedule = {
-            frequency: document.getElementById('rebuildFrequency').value,
-            time: localToUtc(document.getElementById('rebuildTime').value, offset),
-            weekday: document.getElementById('rebuildWeekday').value
+        const flashSuccess = () => {
+            const icon = btn.querySelector('i');
+            const original = icon.className;
+            icon.className = 'bi bi-check2';
+            setTimeout(() => { icon.className = original; }, 1200);
         };
 
-        fetch('/api/save-rebuild-schedule', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(schedule)
-        })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    showToast(data.message, 'success');
-                    // Reload schedule to update next run time
-                    setTimeout(loadRebuildSchedule, 500);
-                } else {
-                    showToast(data.error || 'Unknown error', 'error');
-                }
-            })
-            .catch(error => {
-                console.error('Error saving schedule:', error);
-                showToast('Network error occurred', 'error');
-            })
-            .finally(() => {
-                button.innerHTML = originalText;
-                button.disabled = false;
-            });
-    }
-
-    // Scrape Index Schedule Functions
-    function updateScrapeIndexStatus() {
-        // Update entry count
-        fetch('/api/scrape-index-count', {
-            headers: { 'Cache-Control': 'no-cache' }
-        })
-            .then(response => response.json())
-            .then(data => {
-                const el = document.getElementById('scrapeIndexCount');
-                if (el) el.textContent = data.count !== undefined ? data.count : '?';
-            })
-            .catch(() => {
-                const el = document.getElementById('scrapeIndexCount');
-                if (el) el.innerHTML = '<i class="bi bi-exclamation-triangle"></i> Error';
-            });
-    }
-
-    function loadScrapeIndexSchedule() {
-        fetch('/api/get-scrape-index-schedule', {
-            headers: { 'Cache-Control': 'no-cache' }
-        })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    const schedule = data.schedule;
-                    document.getElementById('scrapeIndexFrequency').value = schedule.frequency || 'disabled';
-                    const offset = getTimezoneOffset();
-                    document.getElementById('scrapeIndexTime').value = utcToLocal(schedule.time || '03:00', offset);
-                    document.getElementById('scrapeIndexWeekday').value = schedule.weekday || '0';
-
-                    // Show weekday selector if weekly
-                    const weekdayContainer = document.getElementById('scrapeIndexWeekdaySelectContainer');
-                    if (schedule.frequency === 'weekly') {
-                        weekdayContainer.style.display = 'block';
-                    } else {
-                        weekdayContainer.style.display = 'none';
-                    }
-
-                    // Update next scheduled display
-                    const nextEl = document.getElementById('nextScrapeIndexSchedule');
-                    if (nextEl) {
-                        nextEl.textContent = data.next_run || 'Not scheduled';
-                    }
-                }
-            })
-            .catch(error => {
-                console.error('Error loading scrape_index schedule:', error);
-                const nextEl = document.getElementById('nextScrapeIndexSchedule');
-                if (nextEl) nextEl.textContent = 'Error';
-            });
-
-        // Also load entry count
-        updateScrapeIndexStatus();
-    }
-
-    function saveScrapeIndexSchedule() {
-        const button = event.target.closest('button');
-        const originalText = button.innerHTML;
-
-        button.innerHTML = '<i class="bi bi-floppy spin"></i> Saving...';
-        button.disabled = true;
-
-        const offset = getTimezoneOffset();
-        const schedule = {
-            frequency: document.getElementById('scrapeIndexFrequency').value,
-            time: localToUtc(document.getElementById('scrapeIndexTime').value, offset),
-            weekday: document.getElementById('scrapeIndexWeekday').value
+        // Legacy fallback (also used when navigator.clipboard is unavailable,
+        // e.g. plain-HTTP non-localhost contexts).
+        const legacyCopy = () => {
+            const ta = document.createElement('textarea');
+            ta.value = value;
+            ta.setAttribute('readonly', '');
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            ta.setSelectionRange(0, value.length);
+            let ok = false;
+            try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+            document.body.removeChild(ta);
+            if (ok) {
+                flashSuccess();
+            } else {
+                window.prompt('Copy this token manually (Ctrl+C / Cmd+C):', value);
+            }
         };
 
-        fetch('/api/save-scrape-index-schedule', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(schedule)
-        })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    showToast(data.message, 'success');
-                    setTimeout(loadScrapeIndexSchedule, 500);
-                } else {
-                    showToast(data.error || 'Unknown error', 'error');
-                }
-            })
-            .catch(error => {
-                console.error('Error saving scrape_index schedule:', error);
-                showToast('Network error occurred', 'error');
-            })
-            .finally(() => {
-                button.innerHTML = originalText;
-                button.disabled = false;
-            });
+        if (navigator.clipboard && window.isSecureContext) {
+            navigator.clipboard.writeText(value).then(flashSuccess).catch(legacyCopy);
+        } else {
+            legacyCopy();
+        }
     }
 
-    // Sync Schedule Functions
-    function loadSyncSchedule() {
-        fetch('/api/get-sync-schedule', {
-            headers: { 'Cache-Control': 'no-cache' }
-        })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    const schedule = data.schedule;
-                    document.getElementById('syncFrequency').value = schedule.frequency || 'disabled';
-                    const offset = getTimezoneOffset();
-                    document.getElementById('syncTime').value = utcToLocal(schedule.time || '03:00', offset);
-                    document.getElementById('syncWeekday').value = schedule.weekday || '0';
-
-                    // Show weekday selector if weekly
-                    const weekdayContainer = document.getElementById('syncWeekdaySelectContainer');
-                    if (schedule.frequency === 'weekly') {
-                        weekdayContainer.style.display = 'block';
-                    } else {
-                        weekdayContainer.style.display = 'none';
-                    }
-
-                    // Update last sync display
-                    const lastSyncEl = document.getElementById('lastSyncDisplay');
-                    if (lastSyncEl) {
-                        if (data.last_sync) {
-                            lastSyncEl.innerHTML = `<i class="bi bi-clock me-1"></i>Last sync: ${data.last_sync}`;
-                        } else {
-                            lastSyncEl.innerHTML = '<i class="bi bi-clock me-1"></i>Last sync: Never';
-                        }
-                        if (data.next_run && data.next_run !== 'Not scheduled') {
-                            lastSyncEl.innerHTML += ` | <i class="bi bi-calendar-event me-1"></i>Next: ${data.next_run}`;
-                        }
-                    }
-                }
-            })
-            .catch(error => {
-                console.error('Error loading sync schedule:', error);
-            });
+    function toggleApiTokenVisibility() {
+        const field = document.getElementById('apiTokenField');
+        const icon = document.getElementById('apiTokenToggleBtn').querySelector('i');
+        if (field.type === 'password') {
+            field.type = 'text';
+            icon.className = 'bi bi-eye-slash';
+        } else {
+            field.type = 'password';
+            icon.className = 'bi bi-eye';
+        }
     }
 
-    function saveSyncSchedule() {
-        const button = event.target.closest('button');
-        const originalText = button.innerHTML;
-
-        button.innerHTML = '<i class="bi bi-floppy spin"></i> Saving...';
-        button.disabled = true;
-
-        const offset = getTimezoneOffset();
-        const schedule = {
-            frequency: document.getElementById('syncFrequency').value,
-            time: localToUtc(document.getElementById('syncTime').value, offset),
-            weekday: document.getElementById('syncWeekday').value
-        };
-
-        fetch('/api/save-sync-schedule', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(schedule)
-        })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    showToast(data.message, 'success');
-                    // Reload schedule to update next run time
-                    setTimeout(loadSyncSchedule, 500);
-                } else {
-                    showToast(data.error || 'Unknown error', 'error');
-                }
-            })
-            .catch(error => {
-                console.error('Error saving sync schedule:', error);
-                showToast('Network error occurred', 'error');
-            })
-            .finally(() => {
-                button.innerHTML = originalText;
-                button.disabled = false;
-            });
+    function setApiBrowseModeUi(mode) {
+        const target = mode === 'filesystem' ? 'apiBrowseModeFilesystem' : 'apiBrowseModeMetadata';
+        const radio = document.getElementById(target);
+        if (radio) radio.checked = true;
     }
 
-    function runSyncNow() {
-        const button = event.target.closest('button');
-        const originalText = button.innerHTML;
-
-        button.innerHTML = '<i class="bi bi-arrow-repeat spin"></i> Syncing...';
-        button.disabled = true;
-
-        fetch('/api/run-sync-now', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' }
-        })
-            .then(response => response.json())
+    function loadApiBrowseMode() {
+        fetch('/api/admin/api-browse-mode', { headers: { 'Cache-Control': 'no-cache' } })
+            .then(r => r.json())
             .then(data => {
-                if (data.success) {
-                    showToast(data.message, 'success');
-                } else {
-                    showToast(data.error || 'Unknown error', 'error');
-                }
+                if (data.success) setApiBrowseModeUi(data.mode);
             })
-            .catch(error => {
-                console.error('Error running sync:', error);
-                showToast('Network error occurred', 'error');
-            })
-            .finally(() => {
-                button.innerHTML = originalText;
-                button.disabled = false;
-            });
+            .catch(err => console.error('Failed to load API browse mode:', err));
     }
 
-    // GetComics Schedule Functions
-    function loadGetcomicsSchedule() {
-        // First check if weekly packs is enabled
-        fetch('/api/get-weekly-packs-config', {
-            headers: { 'Cache-Control': 'no-cache' }
-        })
-            .then(response => response.json())
-            .then(wpData => {
-                const warningEl = document.getElementById('weeklyPacksWarning');
-                const frequencyEl = document.getElementById('getcomicsFrequency');
-                const timeEl = document.getElementById('getcomicsTime');
-                const weekdayEl = document.getElementById('getcomicsWeekday');
-                const saveBtn = document.querySelector('button[onclick="saveGetcomicsSchedule()"]');
-                const runBtn = document.querySelector('button[onclick="runGetcomicsNow()"]');
-
-                if (wpData.success && wpData.config && wpData.config.enabled) {
-                    // Weekly packs is enabled - show warning and disable controls
-                    if (warningEl) warningEl.classList.remove('d-none');
-                    if (frequencyEl) frequencyEl.disabled = true;
-                    if (timeEl) timeEl.disabled = true;
-                    if (weekdayEl) weekdayEl.disabled = true;
-                    if (saveBtn) saveBtn.disabled = true;
-                    if (runBtn) runBtn.disabled = true;
-                } else {
-                    // Weekly packs is disabled - hide warning and enable controls
-                    if (warningEl) warningEl.classList.add('d-none');
-                    if (frequencyEl) frequencyEl.disabled = false;
-                    if (timeEl) timeEl.disabled = false;
-                    if (weekdayEl) weekdayEl.disabled = false;
-                    if (saveBtn) saveBtn.disabled = false;
-                    if (runBtn) runBtn.disabled = false;
-                }
-            })
-            .catch(error => {
-                console.error('Error checking weekly packs status:', error);
+    async function setApiBrowseMode(mode) {
+        try {
+            const resp = await fetch('/api/admin/api-browse-mode', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mode })
             });
-
-        // Load the actual getcomics schedule
-        fetch('/api/get-getcomics-schedule', {
-            headers: { 'Cache-Control': 'no-cache' }
-        })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    const schedule = data.schedule;
-                    document.getElementById('getcomicsFrequency').value = schedule.frequency || 'disabled';
-                    const offset = getTimezoneOffset();
-                    document.getElementById('getcomicsTime').value = utcToLocal(schedule.time || '03:00', offset);
-                    document.getElementById('getcomicsWeekday').value = schedule.weekday || '0';
-
-                    // Show weekday selector if weekly
-                    const weekdayContainer = document.getElementById('getcomicsWeekdaySelectContainer');
-                    if (schedule.frequency === 'weekly') {
-                        weekdayContainer.style.display = 'block';
-                    } else {
-                        weekdayContainer.style.display = 'none';
-                    }
-
-                    // Update last run display
-                    const lastRunEl = document.getElementById('lastGetcomicsDisplay');
-                    if (lastRunEl) {
-                        if (data.last_run) {
-                            lastRunEl.innerHTML = `<i class="bi bi-clock me-1"></i>Last run: ${data.last_run}`;
-                        } else {
-                            lastRunEl.innerHTML = '<i class="bi bi-clock me-1"></i>Last run: Never';
-                        }
-                        if (data.next_run && data.next_run !== 'Not scheduled') {
-                            lastRunEl.innerHTML += ` | <i class="bi bi-calendar-event me-1"></i>Next: ${data.next_run}`;
-                        }
-                    }
-                }
-            })
-            .catch(error => {
-                console.error('Error loading getcomics schedule:', error);
-            });
+            const data = await resp.json();
+            if (data.success) {
+                showToast(`API browse mode: ${data.mode === 'filesystem' ? 'Filesystem view' : 'Metadata view'}`, 'success');
+                setApiBrowseModeUi(data.mode);
+            } else {
+                showToast(data.error || 'Failed to update browse mode', 'error');
+                loadApiBrowseMode();
+            }
+        } catch (err) {
+            showToast('Failed to update browse mode: ' + err.message, 'error');
+            loadApiBrowseMode();
+        }
     }
 
-    function saveGetcomicsSchedule() {
-        const button = event.target.closest('button');
-        const originalText = button.innerHTML;
+    document.addEventListener('DOMContentLoaded', () => {
+        const rotateBtn = document.getElementById('apiTokenRotateBtn');
+        if (rotateBtn) rotateBtn.addEventListener('click', rotateApiToken);
+        const copyBtn = document.getElementById('apiTokenCopyBtn');
+        if (copyBtn) copyBtn.addEventListener('click', copyApiToken);
+        const toggleBtn = document.getElementById('apiTokenToggleBtn');
+        if (toggleBtn) toggleBtn.addEventListener('click', toggleApiTokenVisibility);
 
-        button.innerHTML = '<i class="bi bi-floppy spin"></i> Saving...';
-        button.disabled = true;
-
-        const offset = getTimezoneOffset();
-        const schedule = {
-            frequency: document.getElementById('getcomicsFrequency').value,
-            time: localToUtc(document.getElementById('getcomicsTime').value, offset),
-            weekday: document.getElementById('getcomicsWeekday').value
-        };
-
-        fetch('/api/save-getcomics-schedule', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(schedule)
-        })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    showToast(data.message, 'success');
-                    loadGetcomicsSchedule(); // Reload to show next run time
-                } else {
-                    showToast(data.error || 'Unknown error', 'error');
-                }
-            })
-            .catch(error => {
-                console.error('Error saving getcomics schedule:', error);
-                showToast('Network error occurred', 'error');
-            })
-            .finally(() => {
-                button.innerHTML = originalText;
-                button.disabled = false;
+        document.querySelectorAll('input[name="apiBrowseMode"]').forEach(el => {
+            el.addEventListener('change', e => {
+                if (e.target.checked) setApiBrowseMode(e.target.value);
             });
-    }
-
-    function runGetcomicsNow() {
-        const button = event.target.closest('button');
-        const originalText = button.innerHTML;
-
-        button.innerHTML = '<i class="bi bi-cloud-download spin"></i> Downloading...';
-        button.disabled = true;
-
-        fetch('/api/run-getcomics-now', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' }
-        })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    showToast(data.message, 'success');
-                } else {
-                    showToast(data.error || 'Unknown error', 'error');
-                }
-            })
-            .catch(error => {
-                console.error('Error running getcomics download:', error);
-                showToast('Network error occurred', 'error');
-            })
-            .finally(() => {
-                button.innerHTML = originalText;
-                button.disabled = false;
-            });
-    }
-
-    // =========================================
-    // Reading List Sync Schedule Functions
-    // =========================================
-
-    function loadRlSyncSchedule() {
-        fetch('/api/get-reading-list-sync-schedule', {
-            headers: { 'Cache-Control': 'no-cache' }
-        })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success && data.schedule) {
-                    document.getElementById('rlSyncFrequency').value = data.schedule.frequency;
-                    document.getElementById('rlSyncTime').value = data.schedule.time;
-                    document.getElementById('rlSyncWeekday').value = data.schedule.weekday;
-                    document.getElementById('rlSyncWeekdayContainer').style.display =
-                        data.schedule.frequency === 'weekly' ? 'block' : 'none';
-
-                    if (data.next_run && data.next_run !== 'Not scheduled') {
-                        document.getElementById('lastRlSyncDisplay').textContent = 'Next run: ' + data.next_run;
-                    } else {
-                        document.getElementById('lastRlSyncDisplay').textContent = '';
-                    }
-                }
-            })
-            .catch(err => console.error('Error loading RL sync schedule:', err));
-    }
-
-    function saveRlSyncSchedule() {
-        const frequency = document.getElementById('rlSyncFrequency').value;
-        const time = document.getElementById('rlSyncTime').value;
-        const weekday = document.getElementById('rlSyncWeekday').value;
-
-        fetch('/api/save-reading-list-sync-schedule', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ frequency, time, weekday })
-        })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    showToast(data.message, 'success');
-                    loadRlSyncSchedule();
-                } else {
-                    showToast(data.error || 'Unknown error', 'error');
-                }
-            })
-            .catch(error => {
-                showToast('Error saving schedule: ' + error.message, 'error');
-            });
-    }
+        });
+    });
 
     // =========================================
     // Komga Reading Sync Functions
@@ -3072,6 +2588,22 @@
             patternInput.addEventListener('input', updateRenamePreview);
             patternInput.addEventListener('change', updateRenamePreview);
 
+            // Cleanup-related inputs also influence the preview
+            const cleanupIds = [
+                'renameCleanSpacesEnabled', 'renameCleanSpacesReplacement',
+                'renameCleanSpecialsEnabled', 'renameCleanSpecialsCharset',
+                'renameCleanSpecialsReplacement'
+            ];
+            cleanupIds.forEach(id => {
+                const el = document.getElementById(id);
+                if (el) {
+                    el.addEventListener('input', updateRenamePreview);
+                    el.addEventListener('change', updateRenamePreview);
+                }
+            });
+            document.querySelectorAll('input[name="renameCleanSpacesMode"], input[name="renameCleanSpecialsMode"]')
+                .forEach(el => el.addEventListener('change', updateRenamePreview));
+
             // Initial preview
             updateRenamePreview();
         }
@@ -3128,6 +2660,33 @@
 
         // Remove orphaned separators (e.g., trailing " - " when issue_title is empty)
         result = result.replace(/\s*-\s*(?=\(|$)/g, ' ').replace(/\s+/g, ' ').trim();
+
+        // Filename character cleanup — mirrors cbz_ops/rename.py:apply_filename_cleanup.
+        // Update both implementations in lockstep when the algorithm changes.
+        const specialsEnabled = document.getElementById('renameCleanSpecialsEnabled')?.checked;
+        const spacesEnabled = document.getElementById('renameCleanSpacesEnabled')?.checked;
+        if (specialsEnabled || spacesEnabled) {
+            if (specialsEnabled) {
+                const charset = document.getElementById('renameCleanSpecialsCharset')?.value || '';
+                const chars = new Set([...charset].filter(c => c !== ' '));
+                if (chars.size > 0) {
+                    const mode = document.querySelector('input[name="renameCleanSpecialsMode"]:checked')?.value || 'remove';
+                    const repl = mode === 'remove' ? '' : (document.getElementById('renameCleanSpecialsReplacement')?.value || '');
+                    result = [...result].map(ch => chars.has(ch) ? repl : ch).join('');
+                    result = result.replace(/\s+/g, ' ');
+                }
+            }
+            if (spacesEnabled) {
+                const mode = document.querySelector('input[name="renameCleanSpacesMode"]:checked')?.value || 'replace';
+                if (mode === 'remove') {
+                    result = result.replace(/ /g, '');
+                } else {
+                    const repl = document.getElementById('renameCleanSpacesReplacement')?.value || '';
+                    result = result.split(' ').join(repl);
+                }
+            }
+            result = result.replace(/^[\s.]+|[\s.]+$/g, '');
+        }
 
         return result;
     }
@@ -3354,6 +2913,9 @@
                             <button type="button" class="btn btn-outline-primary" onclick="editLibrary(${lib.id}, '${escapeHtml(lib.name)}', '${escapeHtml(lib.path)}')">
                                 <i class="bi bi-pencil"></i>
                             </button>
+                            <button type="button" class="btn btn-outline-warning" onclick="openConvertLibraryModal('${escapeHtml(lib.path)}', '${escapeHtml(lib.name)}')" title="Convert all RAR/CBR files in this library to CBZ">
+                                <i class="bi bi-file-earmark-zip"></i>
+                            </button>
                             <button type="button" class="btn btn-outline-${lib.enabled ? 'warning' : 'success'}" onclick="toggleLibrary(${lib.id}, ${!lib.enabled})">
                                 <i class="bi bi-${lib.enabled ? 'pause' : 'play'}"></i>
                             </button>
@@ -3469,6 +3031,69 @@
         div.textContent = text;
         return div.innerHTML;
     }
+
+    // =========================================
+    // Convert Library (per-library RAR/CBR -> CBZ)
+    // =========================================
+    function openConvertLibraryModal(path, name) {
+        if (!path) {
+            CLU.showError('Library path is missing.');
+            return;
+        }
+        const modalEl = document.getElementById('convertLibraryModal');
+        modalEl.dataset.libraryPath = path;
+
+        document.getElementById('convertLibraryName').textContent = name || 'Library';
+        document.getElementById('convertLibraryPath').textContent = path;
+
+        const loading = document.getElementById('convertLibraryLoading');
+        const result  = document.getElementById('convertLibraryResult');
+        const empty   = document.getElementById('convertLibraryEmpty');
+        const errBox  = document.getElementById('convertLibraryError');
+        const confirm = document.getElementById('confirmConvertLibraryBtn');
+
+        loading.style.display = '';
+        result.style.display  = 'none';
+        empty.style.display   = 'none';
+        errBox.style.display  = 'none';
+        confirm.disabled = true;
+
+        new bootstrap.Modal(modalEl).show();
+
+        fetch('/api/convert/preview?directory=' + encodeURIComponent(path))
+            .then(r => r.json().then(j => ({ ok: r.ok, body: j })))
+            .then(({ ok, body }) => {
+                loading.style.display = 'none';
+                if (!ok || !body.success) {
+                    errBox.textContent = body.error || 'Failed to scan library.';
+                    errBox.style.display = '';
+                    return;
+                }
+                if (body.count === 0) { empty.style.display = ''; return; }
+                document.getElementById('convertLibraryCount').textContent = body.count;
+                result.style.display = '';
+                confirm.disabled = false;
+            })
+            .catch(err => {
+                loading.style.display = 'none';
+                errBox.textContent = 'Network error while scanning library: ' + err;
+                errBox.style.display = '';
+            });
+    }
+
+    function confirmConvertLibrary() {
+        const modalEl = document.getElementById('convertLibraryModal');
+        const path = modalEl.dataset.libraryPath;
+        if (!path) return;
+        const m = bootstrap.Modal.getInstance(modalEl);
+        if (m) m.hide();
+        CLU.executeDirectoryOp('convert', path, { recursive: true });
+    }
+
+    document.addEventListener('DOMContentLoaded', function () {
+        const btn = document.getElementById('confirmConvertLibraryBtn');
+        if (btn) btn.addEventListener('click', confirmConvertLibrary);
+    });
 
     // =========================================
     // Metadata Provider Management Functions

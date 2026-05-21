@@ -237,6 +237,9 @@ from core.database import backup_database
 backup_database(max_backups=3)
 
 # Register Blueprints
+from routes.auth import auth_bp
+
+app.register_blueprint(auth_bp)
 app.register_blueprint(favorites_bp)
 app.register_blueprint(opds_bp)
 from routes.reading_lists import reading_lists_bp, prefetch_github_tree
@@ -249,6 +252,15 @@ app.register_blueprint(downloads_bp)
 from routes.files import files_bp
 
 app.register_blueprint(files_bp)
+from routes.api_v1 import api_v1_bp
+
+app.register_blueprint(api_v1_bp)
+from routes.api_v1_docs import api_docs_bp
+
+app.register_blueprint(api_docs_bp)
+from routes.admin import admin_bp
+
+app.register_blueprint(admin_bp)
 from routes.series import series_bp
 
 app.register_blueprint(series_bp)
@@ -611,7 +623,33 @@ def process_incoming_wanted_issues():
     from cbz_ops.rename import load_custom_rename_config
     from datetime import date
 
-    target_folder = app.config.get("TARGET", "/downloads/processed")
+    target_folder = (app.config.get("TARGET") or "").strip()
+    if not target_folder:
+        app_logger.error("Wanted scan aborted: TARGET is not configured.")
+        return
+
+    # Safety guard: refuse to scan the collection itself, anything inside it,
+    # or the WATCH folder. Without this a misconfigured TARGET could cause the
+    # scanner to walk /data and move files between series folders.
+    try:
+        real_target = os.path.realpath(target_folder)
+        real_data = os.path.realpath("/data")
+        if real_target == real_data or real_target.startswith(real_data + os.sep):
+            app_logger.error(
+                f"Wanted scan aborted: TARGET ({real_target}) is the data "
+                f"directory or inside it. Refusing to move files out of the collection."
+            )
+            return
+        watch_folder = (app.config.get("WATCH") or "").strip()
+        if watch_folder and os.path.realpath(watch_folder) == real_target:
+            app_logger.error(
+                f"Wanted scan aborted: TARGET equals WATCH ({real_target})."
+            )
+            return
+    except Exception as e:
+        app_logger.error(f"Wanted scan aborted: failed to validate TARGET path: {e}")
+        return
+
     if not os.path.exists(target_folder):
         app_logger.debug(f"TARGET folder does not exist: {target_folder}")
         return
@@ -1331,13 +1369,24 @@ def scheduled_sitemap_rebuild():
 
 
 def configure_sitemap_schedule():
-    """Configure the sitemap index rebuild schedule based on database settings."""
+    """Configure the sitemap index rebuild schedule based on database settings.
+
+    Auto-creates a default weekly schedule if one doesn't exist yet.
+    """
+    try:
+        from core.database import get_schedule, save_schedule
+        existing = get_schedule("sitemap")
+        if existing is None:
+            save_schedule("sitemap", frequency="weekly", time="02:00", weekday=0)
+            app_logger.info("Auto-created default sitemap schedule (weekly on Sunday at 02:00)")
+    except Exception:
+        pass
     configure_schedule("sitemap")
 
 
 # ── GetComics Scrape Index Builder ────────────────────────────────────────────
 
-def scheduled_scrape_index_build(batch_size: int = 20):
+def scheduled_scrape_index_build(batch_size: int = 300):
     """Incrementally build the scrape index by scraping unindexed sitemap URLs.
 
     Picks a series with unindexed (or partially indexed) sitemap URLs and scrapes
@@ -1348,13 +1397,16 @@ def scheduled_scrape_index_build(batch_size: int = 20):
     scrape index so live searches become faster over time.
 
     Args:
-        batch_size: Number of URLs to scrape per run (default 20).
-                    At ~7s/URL with rate limiting, 20 URLs ~2.5 min.
+        batch_size: Number of URLs to scrape per run (default 300).
+                    At ~7s/URL with rate limiting, 300 URLs ~35 min.
     """
     try:
         from core.database import get_db_connection
-        from models.getcomics import _scrape_url_to_index as _scrape_url_for_index
+        from models.getcomics import _scrape_url_to_index as _scrape_url_for_index, _ensure_urls_table
         import time
+
+        # Ensure table exists before querying
+        _ensure_urls_table()
 
         app_logger.info(f"Starting scrape index build (batch={batch_size})...")
 
@@ -1377,19 +1429,28 @@ def scheduled_scrape_index_build(batch_size: int = 20):
             list(partially_indexed) + [batch_size]
         ).fetchall()
 
-        if not rows:
+        if not unindexed:
             app_logger.info("Scrape index build: no unindexed URLs found")
             conn.close()
             return
 
-        total_urls = len(rows)
+        # Deduplicate by full_url — same URL can appear multiple times in results
+        seen = set()
+        unique_unindexed = []
+        for row in unindexed:
+            if row[2] not in seen:
+                seen.add(row[2])
+                unique_unindexed.append(row)
+        unindexed = unique_unindexed
+
+        total_urls = len(unindexed)
         scraped = 0
         errors = 0
 
-        for row in rows:
+        for row in unindexed:
             series_norm, url_slug, full_url = row
             # Rate limit: be a good GetComics citizen
-            time.sleep(1.5)
+            time.sleep(0.5)
 
             try:
                 result = _scrape_url_for_index(
@@ -1398,6 +1459,9 @@ def scheduled_scrape_index_build(batch_size: int = 20):
                     series_norm=series_norm,
                     lastmod='',
                 )
+                if result is None:
+                    # 304 Not Modified — page hasn't changed, skip (not an error)
+                    continue
                 if result:
                     scraped += 1
                 else:
@@ -2269,7 +2333,15 @@ from helpers import is_hidden
 
 # Legacy constant for backwards compatibility - use get_library_roots() instead
 DATA_DIR = "/data"  # Directory to browse (deprecated, kept for compatibility)
-TARGET_DIR = config.get("SETTINGS", "TARGET", fallback="/processed")
+
+
+def get_target_dir_live():
+    """Live accessor for the TARGET directory (reads from app.config).
+
+    Use this instead of the old module-level ``TARGET_DIR`` constant. Backed by
+    ``user_preferences`` via ``load_flask_config()``.
+    """
+    return app.config.get("TARGET") or "/downloads/processed"
 
 
 # Moved to helpers/library.py - re-exported for backward compatibility
@@ -2725,10 +2797,11 @@ def rebuild_entire_cache():
 
 def warmup_cache():
     """Proactively cache frequently accessed directories."""
-    warmup_paths = [DATA_DIR, TARGET_DIR]
+    _target = get_target_dir_live()
+    warmup_paths = [DATA_DIR, _target]
 
     # Add common subdirectories
-    for base_path in [DATA_DIR, TARGET_DIR]:
+    for base_path in [DATA_DIR, _target]:
         try:
             if os.path.exists(base_path):
                 subdirs = [
@@ -3133,6 +3206,10 @@ def api_scrape_index_count():
     """Return the current number of entries in the scrape index."""
     try:
         from core.database import get_db_connection
+        # Ensure table exists before querying
+        from models.getcomics import _ensure_urls_table
+        _ensure_urls_table()
+
         conn = get_db_connection()
         c = conn.execute("SELECT COUNT(*) FROM getcomics_urls WHERE scrape_status = 'success'")
         count = c.fetchone()[0]
@@ -3219,6 +3296,7 @@ def api_run_sync_now():
 # Global file index for fast searching
 file_index = []
 index_built = False
+_index_build_lock = threading.Lock()
 
 
 def sanitize_filename(name):
@@ -3231,11 +3309,28 @@ def sanitize_filename(name):
 
 
 def build_file_index():
-    """Build an in-memory index of all files and directories for fast searching"""
-    global file_index, index_built
+    """Build an in-memory index of all files and directories for fast searching.
+
+    Thread-safe: concurrent callers on a cold start serialize on
+    _index_build_lock and the second caller fast-returns once the first
+    has finished, preventing duplicate filesystem walks and racing writes
+    to the file_index table.
+    """
+    global index_built
 
     if index_built:
         return
+
+    with _index_build_lock:
+        # Re-check inside the lock: another thread may have finished while we waited.
+        if index_built:
+            return
+        _build_file_index_locked()
+
+
+def _build_file_index_locked():
+    """Filesystem walk + DB save. Caller must hold _index_build_lock."""
+    global file_index, index_built
 
     # Try to load from database first
     app_logger.info("Loading file index from database...")
@@ -4382,28 +4477,7 @@ def resize_upload(file_path, target_dir):
         return False
 
 
-def find_folder_thumbnail(folder_path):
-    """Find a folder thumbnail image in the given directory.
-
-    Args:
-        folder_path: Path to the directory to search
-
-    Returns:
-        Path to the thumbnail image if found, None otherwise
-    """
-    allowed_extensions = {".png", ".gif", ".jpg", ".jpeg"}
-    allowed_names = {"folder"}  # Only use folder.* thumbnails, ignore cover.*
-
-    try:
-        entries = os.listdir(folder_path)
-        for entry in entries:
-            name_without_ext, ext = os.path.splitext(entry.lower())
-            if name_without_ext in allowed_names and ext in allowed_extensions:
-                return os.path.join(folder_path, entry)
-    except (OSError, IOError):
-        pass
-
-    return None
+from helpers import find_folder_thumbnail  # noqa: E402  (re-export for callers)
 
 
 def find_folder_thumbnails_batch(folder_paths):
@@ -5903,24 +5977,20 @@ def download_file():
         return jsonify({"error": "Missing path parameter"}), 400
 
     # Security: Ensure the file path is within allowed directories
-    if not (is_valid_library_path(file_path) or is_path_in_any_root(file_path, [TARGET_DIR])):
+    normalized_path = os.path.normpath(file_path)
+    if not (
+        is_valid_library_path(normalized_path)
+        or is_path_in_any_root(normalized_path, [get_target_dir_live()])
+    ):
         return jsonify({"error": "Access denied"}), 403
 
-    if not os.path.exists(file_path) or not os.path.isfile(file_path):
-        return jsonify({"error": "File not found"}), 404
-
     try:
-        # Determine MIME type based on file extension
-        ext = os.path.splitext(file_path)[1].lower()
-        comic_mime_types = {
-            ".cbz": "application/vnd.comicbook+zip",
-            ".cbr": "application/vnd.comicbook-rar",
-            ".pdf": "application/pdf",
-            ".epub": "application/epub+zip",
-        }
-        mime_type = comic_mime_types.get(ext, "application/octet-stream")
-
-        return send_file(file_path, as_attachment=True, mimetype=mime_type)
+        from helpers import serve_comic_file
+        return serve_comic_file(
+            file_path,
+            range_header=request.headers.get("Range"),
+            as_attachment=True,
+        )
     except Exception as e:
         app_logger.error(f"Error serving file {file_path}: {e}")
         return jsonify({"error": str(e)}), 500
@@ -5935,7 +6005,11 @@ def read_text_file():
         return "Missing path parameter", 400
 
     # Security: Ensure the file path is within allowed directories
-    if not (is_valid_library_path(file_path) or is_path_in_any_root(file_path, [TARGET_DIR])):
+    normalized_path = os.path.normpath(file_path)
+    if not (
+        is_valid_library_path(normalized_path)
+        or is_path_in_any_root(normalized_path, [get_target_dir_live()])
+    ):
         return "Access denied", 403
 
     if not os.path.exists(file_path) or not os.path.isfile(file_path):
@@ -6084,8 +6158,8 @@ scrape_tasks = {}
 @app.route("/scrape")
 def scrape_page():
     """Render the scrape page"""
-    # Use TARGET_DIR directly to avoid file monitor processing
-    target_dir = config.get("SETTINGS", "TARGET", fallback="/processed")
+    # Use TARGET directly to avoid file monitor processing
+    target_dir = get_target_dir_live()
     # Get active tasks for status display
     active_tasks = []
     for task_id, task_info in scrape_tasks.items():
@@ -6103,9 +6177,7 @@ def scrape_readcomiconline():
         data = request.json
         urls = data.get("urls", [])
         # Use TARGET_DIR directly to avoid file monitor processing and overwrites
-        output_dir = data.get(
-            "output_dir", config.get("SETTINGS", "TARGET", fallback="/processed")
-        )
+        output_dir = data.get("output_dir", get_target_dir_live())
 
         if not urls:
             return jsonify({"success": False, "error": "No URLs provided"}), 400
@@ -6168,9 +6240,7 @@ def scrape_ehentai():
         data = request.json
         urls = data.get("urls", [])
         # Use TARGET_DIR directly to avoid file monitor processing and overwrites
-        output_dir = data.get(
-            "output_dir", config.get("SETTINGS", "TARGET", fallback="/processed")
-        )
+        output_dir = data.get("output_dir", get_target_dir_live())
 
         if not urls:
             return jsonify({"success": False, "error": "No URLs provided"}), 400
@@ -6229,9 +6299,7 @@ def scrape_erofus():
         data = request.json
         urls = data.get("urls", [])
         # Use TARGET_DIR directly to avoid file monitor processing and overwrites
-        output_dir = data.get(
-            "output_dir", config.get("SETTINGS", "TARGET", fallback="/processed")
-        )
+        output_dir = data.get("output_dir", get_target_dir_live())
 
         if not urls:
             return jsonify({"success": False, "error": "No URLs provided"}), 400
@@ -6429,9 +6497,34 @@ def save_file_processing_config():
         if "SETTINGS" not in config:
             config["SETTINGS"] = {}
 
-        # Update config values
-        config["SETTINGS"]["WATCH"] = data.get("watch", "/temp")
-        config["SETTINGS"]["TARGET"] = data.get("target", "/processed")
+        # WATCH / TARGET live in user_preferences (not config.ini).
+        from core.database import set_user_preference as _set_pref_path
+        new_watch = sanitize_config_value(data.get("watch", ""))
+        new_target = sanitize_config_value(data.get("target", ""))
+
+        # Reject any value that is /data or inside it — the wanted-scan would
+        # otherwise walk the collection and move library files between folders.
+        real_data = os.path.realpath("/data")
+        for label, value in (("WATCH", new_watch), ("TARGET", new_target)):
+            if not value:
+                continue
+            try:
+                real_value = os.path.realpath(value)
+            except Exception:
+                continue
+            if real_value == real_data or real_value.startswith(real_data + os.sep):
+                return jsonify({
+                    "success": False,
+                    "error": f"{label} cannot be /data or a subdirectory of it.",
+                }), 400
+
+        _set_pref_path("watch", new_watch, category="file_processing")
+        _set_pref_path("target", new_target, category="file_processing")
+        app.config["WATCH"] = new_watch or "/downloads/temp"
+        app.config["TARGET"] = new_target or "/downloads/processed"
+        from core.config import _mirror_watch_target_into_memory_config
+        _mirror_watch_target_into_memory_config()
+
         config["SETTINGS"]["AUTOCONVERT"] = str(data.get("autoConvert", False))
         config["SETTINGS"]["READ_SUBDIRECTORIES"] = str(
             data.get("readSubdirectories", False)
@@ -6493,6 +6586,92 @@ def save_file_processing_config():
             data.get("customRenamePattern", ""),
             category="file_processing",
         )
+        set_user_preference(
+            "smart_rename_preview_enabled",
+            bool(data.get("smartRenamePreviewEnabled", True)),
+            category="file_processing",
+        )
+        set_user_preference(
+            "smart_rename_recursive",
+            bool(data.get("smartRenameRecursive", True)),
+            category="file_processing",
+        )
+        set_user_preference(
+            "smart_rename_exclude_terms",
+            str(data.get("smartRenameExcludeTerms", "Annual,Special") or ""),
+            category="file_processing",
+        )
+        app.config["SMART_RENAME_PREVIEW_ENABLED"] = bool(
+            data.get("smartRenamePreviewEnabled", True)
+        )
+        app.config["SMART_RENAME_RECURSIVE"] = bool(
+            data.get("smartRenameRecursive", True)
+        )
+        app.config["SMART_RENAME_EXCLUDE_TERMS"] = str(
+            data.get("smartRenameExcludeTerms", "Annual,Special") or ""
+        )
+
+        # Validate and persist filename cleanup preferences
+        windows_illegal = set('<>:"/\\|?*')
+        for field, label in (
+            ("renameCleanSpacesReplacement", "space replacement"),
+            ("renameCleanSpecialsReplacement", "special-character replacement"),
+        ):
+            value = str(data.get(field, "") or "")
+            bad = sorted(set(value) & windows_illegal)
+            if bad:
+                return (
+                    jsonify(
+                        {
+                            "success": False,
+                            "error": (
+                                f"The {label} cannot contain Windows-reserved "
+                                f"characters: {''.join(bad)}"
+                            ),
+                        }
+                    ),
+                    400,
+                )
+
+        spaces_mode = data.get("renameCleanSpacesMode", "replace")
+        if spaces_mode not in ("remove", "replace"):
+            spaces_mode = "replace"
+        specials_mode = data.get("renameCleanSpecialsMode", "remove")
+        if specials_mode not in ("remove", "replace"):
+            specials_mode = "remove"
+
+        set_user_preference(
+            "rename_clean_spaces_enabled",
+            bool(data.get("renameCleanSpacesEnabled", False)),
+            category="file_processing",
+        )
+        set_user_preference(
+            "rename_clean_spaces_mode", spaces_mode, category="file_processing"
+        )
+        set_user_preference(
+            "rename_clean_spaces_replacement",
+            str(data.get("renameCleanSpacesReplacement", "_") or ""),
+            category="file_processing",
+        )
+        set_user_preference(
+            "rename_clean_specials_enabled",
+            bool(data.get("renameCleanSpecialsEnabled", False)),
+            category="file_processing",
+        )
+        set_user_preference(
+            "rename_clean_specials_charset",
+            str(data.get("renameCleanSpecialsCharset", "") or ""),
+            category="file_processing",
+        )
+        set_user_preference(
+            "rename_clean_specials_mode", specials_mode, category="file_processing"
+        )
+        set_user_preference(
+            "rename_clean_specials_replacement",
+            str(data.get("renameCleanSpecialsReplacement", "") or ""),
+            category="file_processing",
+        )
+
         config["SETTINGS"]["ENABLE_AUTO_MOVE"] = str(data.get("enableAutoMove", False))
         config["SETTINGS"]["CUSTOM_MOVE_PATTERN"] = data.get(
             "customMovePattern", "{publisher}/{series_name}/v{year}"
@@ -6598,19 +6777,8 @@ def save_system_perf_config():
         set_user_preference(
             "timezone", data.get("timezone", "UTC"), category="personalization"
         )
-        config["SETTINGS"]["REBUILD_FREQUENCY"] = data.get(
-            "rebuildFrequency", "disabled"
-        )
-        config["SETTINGS"]["REBUILD_TIME"] = data.get("rebuildTime", "02:00")
-        config["SETTINGS"]["REBUILD_WEEKDAY"] = data.get("rebuildWeekday", "0")
-        config["SETTINGS"]["SYNC_FREQUENCY"] = data.get("syncFrequency", "disabled")
-        config["SETTINGS"]["SYNC_TIME"] = data.get("syncTime", "03:00")
-        config["SETTINGS"]["SYNC_WEEKDAY"] = data.get("syncWeekday", "0")
-        config["SETTINGS"]["GETCOMICS_FREQUENCY"] = data.get(
-            "getcomicsFrequency", "disabled"
-        )
-        config["SETTINGS"]["GETCOMICS_TIME"] = data.get("getcomicsTime", "04:00")
-        config["SETTINGS"]["GETCOMICS_WEEKDAY"] = data.get("getcomicsWeekday", "0")
+        # Schedule fields (REBUILD_*, SYNC_*, GETCOMICS_*) are owned by the
+        # dedicated /api/save-*-schedule endpoints driven from the Schedules page.
         config["SETTINGS"]["IGNORED_TERMS"] = data.get("ignored_terms", "")
         config["SETTINGS"]["IGNORED_FILES"] = data.get("ignored_files", "")
         config["SETTINGS"]["ENABLE_DEBUG_LOGGING"] = str(
@@ -6745,18 +6913,18 @@ def config_page():
             config["SETTINGS"] = {}
 
         # Safely update config values
-        new_watch = request.form.get("watch", "/temp")
-        new_target = request.form.get("target", "/processed")
+        new_watch = sanitize_config_value(request.form.get("watch", ""))
+        new_target = sanitize_config_value(request.form.get("target", ""))
 
         # Validate that watch and target are not the same
-        if new_watch == new_target:
+        if new_watch and new_target and new_watch == new_target:
             return jsonify(
                 {"error": "Watch and target folders cannot be the same"}
             ), 400
 
         # Validate that watch and target are not subdirectories of each other
-        if new_watch.startswith(new_target + "/") or new_target.startswith(
-            new_watch + "/"
+        if new_watch and new_target and (
+            new_watch.startswith(new_target + "/") or new_target.startswith(new_watch + "/")
         ):
             return jsonify(
                 {
@@ -6764,8 +6932,29 @@ def config_page():
                 }
             ), 400
 
-        config["SETTINGS"]["WATCH"] = new_watch
-        config["SETTINGS"]["TARGET"] = new_target
+        # Reject any value that is /data or inside it.
+        real_data = os.path.realpath("/data")
+        for label, value in (("WATCH", new_watch), ("TARGET", new_target)):
+            if not value:
+                continue
+            try:
+                real_value = os.path.realpath(value)
+            except Exception:
+                continue
+            if real_value == real_data or real_value.startswith(real_data + os.sep):
+                return jsonify(
+                    {"error": f"{label} cannot be /data or a subdirectory of it."}
+                ), 400
+
+        # WATCH / TARGET live in user_preferences (not config.ini).
+        from core.database import set_user_preference as _set_pref_path
+        _set_pref_path("watch", new_watch, category="file_processing")
+        _set_pref_path("target", new_target, category="file_processing")
+        app.config["WATCH"] = new_watch or "/downloads/temp"
+        app.config["TARGET"] = new_target or "/downloads/processed"
+        from core.config import _mirror_watch_target_into_memory_config
+        _mirror_watch_target_into_memory_config()
+
         config["SETTINGS"]["IGNORED_TERMS"] = request.form.get("ignored_terms", "")
         config["SETTINGS"]["IGNORED_FILES"] = request.form.get("ignored_files", "")
         config["SETTINGS"]["IGNORED_EXTENSIONS"] = request.form.get(
@@ -6924,10 +7113,12 @@ def config_page():
         _metron_creds = None
         _cv_creds = None
 
+    from core.config import get_watch_dir, get_target_dir
+
     return render_template(
         "config.html",
-        watch=settings.get("WATCH", "/temp"),
-        target=settings.get("TARGET", "/processed"),
+        watch=get_watch_dir() or "/downloads/temp",
+        target=get_target_dir() or "/downloads/processed",
         ignored_terms=settings.get("IGNORED_TERMS", ""),
         ignored_files=settings.get("IGNORED_FILES", ""),
         ignored_extensions=settings.get("IGNORED_EXTENSIONS", ""),
@@ -6961,6 +7152,36 @@ def config_page():
         metronPassword=_metron_creds.get("password", "") if _metron_creds else "",
         enableCustomRename=settings.get("ENABLE_CUSTOM_RENAME", "False") == "True",
         customRenamePattern=settings.get("CUSTOM_RENAME_PATTERN", ""),
+        renameCleanSpacesEnabled=get_user_preference(
+            "rename_clean_spaces_enabled", default=False
+        ),
+        renameCleanSpacesMode=get_user_preference(
+            "rename_clean_spaces_mode", default="replace"
+        ),
+        renameCleanSpacesReplacement=get_user_preference(
+            "rename_clean_spaces_replacement", default="_"
+        ),
+        renameCleanSpecialsEnabled=get_user_preference(
+            "rename_clean_specials_enabled", default=False
+        ),
+        renameCleanSpecialsCharset=get_user_preference(
+            "rename_clean_specials_charset", default=""
+        ),
+        renameCleanSpecialsMode=get_user_preference(
+            "rename_clean_specials_mode", default="remove"
+        ),
+        renameCleanSpecialsReplacement=get_user_preference(
+            "rename_clean_specials_replacement", default=""
+        ),
+        smartRenamePreviewEnabled=bool(
+            get_user_preference("smart_rename_preview_enabled", default=True)
+        ),
+        smartRenameRecursive=bool(
+            get_user_preference("smart_rename_recursive", default=True)
+        ),
+        smartRenameExcludeTerms=get_user_preference(
+            "smart_rename_exclude_terms", default="Annual,Special"
+        ) or "",
         enableAutoRename=settings.get("ENABLE_AUTO_RENAME", "False") == "True",
         enableAutoMove=settings.get("ENABLE_AUTO_MOVE", "False") == "True",
         customMovePattern=settings.get(
@@ -7106,6 +7327,11 @@ def stream_logs(script_type):
         else:
             script_cmd = [f"{script_type}.py"]
 
+        # Optional per-run flags passed after the directory arg
+        extra_args = []
+        if script_type == "convert" and request.args.get("recursive") == "1":
+            extra_args.append("--recursive")
+
         def generate_logs():
             # Set longer timeout for large file operations
             timeout_seconds = int(
@@ -7120,7 +7346,7 @@ def stream_logs(script_type):
                 )
 
             process = subprocess.Popen(
-                ["python", "-u"] + script_cmd + [directory],
+                ["python", "-u"] + script_cmd + [directory] + extra_args,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -7260,6 +7486,19 @@ def index():
         convertSubdirectories=convert_subdirectories,
         rec_enabled=get_user_preference("rec_enabled", default=True),
         dashboard_sections=get_dashboard_sections(),
+    )
+
+
+#########################
+#       Schedules       #
+#########################
+@app.route("/schedules")
+def schedules_page():
+    """Scheduled tasks configuration page."""
+    return render_template(
+        "schedules.html",
+        timezone=get_user_preference("timezone", default="UTC"),
+        config=app.config,
     )
 
 
@@ -7825,15 +8064,25 @@ def build_index_background():
 
 # Cache maintenance background thread
 def cache_maintenance_background():
-    """Background thread that checks and rebuilds cache every hour."""
-    while True:
-        try:
-            time.sleep(60 * 60)  # Check every hour
-            if should_rebuild_cache():
-                with app.app_context():
-                    rebuild_entire_cache()
-        except Exception as e:
-            app_logger.error(f"Error in cache maintenance thread: {e}")
+    """Background fallback only runs if rebuild schedule is disabled.
+
+    If the user has configured the scheduler, it takes precedence.
+    Only runs a single rebuild then exits - no checking every hour.
+    """
+    try:
+        # Check if scheduler is configured - if so, skip entirely
+        from core.database import get_schedule
+        schedule = get_schedule("rebuild")
+        if schedule and schedule.get("frequency") != "disabled":
+            app_logger.info("Cache rebuild handled by scheduler - skipping background thread")
+            return
+
+        # Scheduler disabled - do one rebuild as fallback then exit
+        app_logger.info("🔄 Cache rebuild schedule disabled - running background rebuild")
+        with app.app_context():
+            rebuild_entire_cache()
+    except Exception as e:
+        app_logger.error(f"Error in cache maintenance thread: {e}")
 
 
 # Pre-build browse cache for root directory
@@ -7900,11 +8149,9 @@ def start_background_services():
     threading.Thread(target=prebuild_browse_cache, daemon=True).start()
     app_logger.info("🔄 Pre-building browse cache for root directory...")
 
-    # Start cache maintenance in background
+    # Start cache maintenance in background (only runs if scheduler is disabled)
     threading.Thread(target=cache_maintenance_background, daemon=True).start()
-    app_logger.info(
-        "🔄 Cache maintenance thread started (checks every hour, rebuilds every 6 hours)..."
-    )
+    app_logger.info("🔄 Cache maintenance thread started (fallback for disabled scheduler)")
 
     # Start file watcher
     threading.Thread(target=start_file_watcher_background, daemon=True).start()
@@ -8107,6 +8354,118 @@ def api_metadata_scan_trigger():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+############################
+# Database settings page   #
+############################
+
+
+@app.route("/api/database/stats", methods=["GET"])
+def api_database_stats():
+    """Database file sizes, per-table row counts, and last-backup info."""
+    try:
+        from core.database import get_database_stats, list_backups
+
+        stats = get_database_stats()
+        backups = list_backups()
+        last_backup = backups[0] if backups else None
+        return jsonify({
+            "success": True,
+            "stats": stats,
+            "last_backup": last_backup,
+            "backup_count": len(backups),
+        })
+    except Exception as e:
+        app_logger.error(f"api_database_stats failed: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/database/backups", methods=["GET"])
+def api_database_backups():
+    """List of available DB backups (newest first)."""
+    try:
+        from core.database import list_backups
+
+        return jsonify({"success": True, "backups": list_backups()})
+    except Exception as e:
+        app_logger.error(f"api_database_backups failed: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/database/backup", methods=["POST"])
+def api_database_backup():
+    """Force a manual backup, bypassing the unchanged-since-last-backup check."""
+    try:
+        from core.database import backup_database
+
+        result = backup_database(max_backups=3, force=True)
+        if result is False:
+            return jsonify({"success": False, "error": "Backup failed (see logs)"}), 500
+        if result is None:
+            return jsonify({"success": False, "error": "Database does not exist"}), 404
+        return jsonify({"success": True, "filename": result})
+    except Exception as e:
+        app_logger.error(f"api_database_backup failed: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/database/backups/<filename>", methods=["DELETE"])
+def api_database_backup_delete(filename):
+    """Delete a single backup ZIP."""
+    try:
+        from core.database import delete_backup
+
+        delete_backup(filename)
+        return jsonify({"success": True, "filename": filename})
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    except FileNotFoundError as e:
+        return jsonify({"success": False, "error": f"Backup not found: {e}"}), 404
+    except Exception as e:
+        app_logger.error(f"api_database_backup_delete failed: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/database/backups/<filename>/download", methods=["GET"])
+def api_database_backup_download(filename):
+    """Stream a backup ZIP to the user as a download."""
+    try:
+        from core.database import get_backup_path
+
+        full_path = get_backup_path(filename)
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    except FileNotFoundError as e:
+        return jsonify({"success": False, "error": f"Backup not found: {e}"}), 404
+    return send_file(
+        full_path,
+        as_attachment=True,
+        download_name=filename,
+        mimetype="application/zip",
+    )
+
+
+@app.route("/api/database/restore", methods=["POST"])
+def api_database_restore():
+    """Restore the DB from a previously created backup ZIP. The current DB is
+    snapshotted to a pre-restore safety backup before being replaced."""
+    try:
+        from core.database import restore_database
+
+        body = request.get_json(silent=True) or {}
+        filename = body.get("filename")
+        if not filename:
+            return jsonify({"success": False, "error": "filename is required"}), 400
+        result = restore_database(filename)
+        return jsonify(result)
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    except FileNotFoundError as e:
+        return jsonify({"success": False, "error": f"Backup not found: {e}"}), 404
+    except Exception as e:
+        app_logger.error(f"api_database_restore failed: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route("/api/recommendations", methods=["GET", "POST"])
 def api_recommendations():
     try:
@@ -8236,6 +8595,17 @@ def api_timeline():
             "stats": data["stats"],
         }
     )
+
+
+@app.cli.command("rotate-api-token")
+def rotate_api_token_command():
+    """Generate (or rotate) the long-lived API token for the /api/v1client."""
+    import click
+    from core.database import rotate_api_token
+
+    token = rotate_api_token()
+    click.echo("New API token generated. Store it securely:")
+    click.echo(token)
 
 
 if __name__ == "__main__":

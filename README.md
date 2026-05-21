@@ -55,7 +55,7 @@ services:
             - '5577:5577'
         volumes:
             - "/path/to/local/config:/config" # Maps local folder to persist settings
-            - "/path/to/local/cache:/cache" # Maps to local folder for DB and thumbnail cache
+            - "/path/to/local/cache:/cache" # Maps to local folder for thumbnail cache (the SQLite DB lives in /config)
             ## update the line below to map to your library.
             ## Map your first/main library to /data
             - "/e/Comics:/data"
@@ -77,6 +77,9 @@ services:
             - PGID=100
             ## Set the file creation mask (UMASK). 022 is a common value.
             - UMASK=022
+            ### You can enable basic authentication by setting the two values below
+            ## CLU_USERNAME=[username] - Set the username for the app.
+            ## CLU_PASSWORD=[password] - Set the password for the app.
 ```
 
 __Update your Docker Compose:__ Mapping the `/config` directory is required now to ensure that config settings are persisted on updates.

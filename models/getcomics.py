@@ -1269,7 +1269,8 @@ def score_getcomics_result(
         +15  Title tightness (zero extra words beyond series/issue/year)
         +30  Issue number match via #N or "Issue N" pattern
         +20  Issue number match via standalone bare number (lower confidence)
-        +20  Year match (softened to +/-1 if volume_year provided)
+        +20  Issue year match (title year == issue pub year — strongest signal)
+        +10  Volume year match (title year == volume start year +/-1) when issue year not found
         +10  Volume match (when both search and result have explicit volumes)
 
     Penalties:
@@ -1277,7 +1278,10 @@ def score_getcomics_result(
         -30  Sub-series detected (dash after series name OR variant keyword)
         -30  Different series (remaining text indicates different series)
         -30  The prefix swap used but remaining does not match (e.g., The Flash Gordon vs Flash Gordon)
-        -20  Wrong year explicitly present in title (softened if volume_year provided)
+        -10  Title has a year, volume_year set but no issue_year, and year doesn't match volume_year
+        -30  Title year matches NEITHER volume_year nor issue_year when both are known
+             (drops wrong-volume-reprint collisions below ACCEPT threshold)
+        -20  Wrong year explicitly present in title (when only issue year is set)
         -30  Collected edition keyword (omnibus, TPB, hardcover, etc.)
         -40  Confirmed issue mismatch (#N present but points to wrong number)
         -40  Volume mismatch (both search and result have explicit volumes but they differ)
@@ -1527,9 +1531,25 @@ def _score_year(
     if search.volume_year is not None:
         result_years = re.findall(r'\b(\d{4})\b', result_title)
         if result_years:
-            ryr = int(result_years[0])
-            if ryr == search.volume_year or abs(ryr - search.volume_year) == 1:
+            year_ints = [int(y) for y in result_years]
+            ryr = year_ints[0]
+            vol_match = (ryr == search.volume_year or abs(ryr - search.volume_year) == 1)
+            issue_match = search.year is not None and search.year in year_ints
+
+            if issue_match:
+                # Title year matches the wanted issue's publication year — strongest
+                # signal. GetComics posts for ongoing long-running series typically
+                # use the issue's pub year rather than the volume start year, so
+                # this correctly distinguishes reprints/reboots sharing an issue number.
+                score += 20
+            elif vol_match:
                 score += 10
+            elif search.year is not None:
+                # Both volume_year and issue_year are known, yet the title's year
+                # matches neither. This is a strong signal of a wrong-volume match
+                # (common on reboots sharing issue numbers) — penalize hard enough
+                # to drop a same-series-and-issue-number collision below ACCEPT.
+                score -= 30
             else:
                 score -= 10
     else:
@@ -1960,7 +1980,7 @@ def check_weekly_pack_availability(pack_url: str) -> bool:
 
         # Check if PIXELDRAIN links exist
         soup = BeautifulSoup(resp.text, 'html.parser')
-        pixeldrain_links = soup.find_all('a', href=lambda h: h and ('pixeldrain' in h.lower() or 'getcomics.org/dlds/' in h.lower()))
+        pixeldrain_links = soup.find_all('a', href=lambda h: h and ('pixeldrain' in h.lower() or 'getcomics.org/dls/' in h.lower() or 'getcomics.org/dlds/' in h.lower()))
 
         if pixeldrain_links:
             logger.info(f"Weekly pack links are available ({len(pixeldrain_links)} PIXELDRAIN links found)")
@@ -2045,12 +2065,12 @@ def parse_weekly_pack_page(pack_url: str, format_preference: str, publishers: li
                         link_text = a.get_text(strip=True).upper()
 
                         # Check if this is a PIXELDRAIN link
-                        # Can be direct pixeldrain.com URL or getcomics.org/dlds/ redirect
+                        # Can be direct pixeldrain.com URL or getcomics.org/dls/ (or legacy /dlds/) redirect
                         if 'PIXELDRAIN' in link_text or 'pixeldrain.com' in href.lower():
                             pixeldrain_link = href
                             break
                         # Check for getcomics redirect link with PIXELDRAIN in text
-                        elif 'getcomics.org/dlds/' in href.lower() and 'PIXELDRAIN' in link_text:
+                        elif ('getcomics.org/dls/' in href.lower() or 'getcomics.org/dlds/' in href.lower()) and 'PIXELDRAIN' in link_text:
                             pixeldrain_link = href
                             break
 
@@ -2090,6 +2110,9 @@ def lookup_series_urls(series_name: str) -> list[dict]:
     Returns:
         List of dicts with keys: series_norm, url_slug, full_url, category
     """
+    # Ensure table exists before querying (handles fresh databases)
+    _ensure_urls_table()
+
     # Resolve alias to canonical before looking up
     resolved = resolve_series_alias(series_name)
     series_norm, _ = normalize_series_name(resolved)
@@ -2140,6 +2163,9 @@ def build_sitemap_index(max_sitemaps: int | None = None, force_refresh: bool = F
     import xml.etree.ElementTree as ET
     from urllib.parse import urlparse
     from core.database import get_db_connection
+
+    # Ensure table exists before querying (handles fresh databases)
+    _ensure_urls_table()
 
     SITEMAP_INDEX = "https://getcomics.org/sitemap.xml"
     sitemap_urls = []
@@ -2549,6 +2575,25 @@ def _ensure_urls_table():
         conn.execute("UPDATE getcomics_urls SET scrape_status = 'empty' WHERE scrape_status = 'pending'")
         logger.info("Migrated scrape_status columns for existing getcomics_urls entries")
 
+    # Re-read columns after potential ALTER TABLE additions
+    existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(getcomics_urls)").fetchall()}
+
+    # Migration: add search_aliases and series_norm_norm columns if missing.
+    # These were added to CREATE TABLE but had no ALTER TABLE migration.
+    if 'search_aliases' not in existing_cols:
+        conn.execute("ALTER TABLE getcomics_urls ADD COLUMN search_aliases TEXT")
+        logger.info("Migrated getcomics_urls: added search_aliases column")
+
+    if 'series_norm_norm' not in existing_cols:
+        conn.execute("ALTER TABLE getcomics_urls ADD COLUMN series_norm_norm TEXT")
+        # Backfill: pre-compute normalized series_norm for existing rows
+        conn.execute("""
+            UPDATE getcomics_urls
+            SET series_norm_norm = LOWER(REPLACE(REPLACE(REPLACE(series_norm, '-', ' '), '\\u2013', ' '), '\\u2014', ' '))
+            WHERE series_norm_norm IS NULL AND series_norm IS NOT NULL
+        """)
+        logger.info("Migrated getcomics_urls: added series_norm_norm column")
+
     # Migration: remove spurious UNIQUE constraint on full_url.
     # The old CREATE TABLE had "full_url TEXT NOT NULL UNIQUE" which was
     # incorrect — multiple page entries can share the same full_url (each
@@ -2823,6 +2868,9 @@ def add_series_alias(alias: str, canonical: str) -> bool:
     """
     Register an alias → canonical series mapping.
 
+    Also syncs the alias into getcomics_urls.search_aliases for the canonical
+    series, so both alias systems stay consistent.
+
     Args:
         alias: The alias name (e.g., "Spider-Man")
         canonical: The canonical series name (e.g., "Amazing Spider-Man")
@@ -2834,7 +2882,10 @@ def add_series_alias(alias: str, canonical: str) -> bool:
         return False
     if alias.strip().lower() == canonical.strip().lower():
         return False  # Can't alias to itself
+
     _ensure_alias_table()
+    _ensure_urls_table()
+
     from core.database import get_db_connection
     conn = get_db_connection()
     try:
@@ -2848,6 +2899,26 @@ def add_series_alias(alias: str, canonical: str) -> bool:
             canonical.strip(),
             _normalize_alias(canonical),
         ))
+
+        # Also sync to getcomics_urls.search_aliases so both alias systems stay in sync
+        norm_canonical = _normalize_alias(canonical)
+        existing_row = conn.execute(
+            "SELECT search_aliases FROM getcomics_urls WHERE LOWER(REPLACE(REPLACE(series_norm, '-', ' '), '\u2013', ' ')) = ? LIMIT 1",
+            (norm_canonical,)
+        ).fetchone()
+        existing_aliases = existing_row[0] if existing_row else ""
+        existing_list = [a.strip() for a in existing_aliases.split(',') if a.strip()] if existing_aliases else []
+        norm_alias = _normalize_alias(alias)
+        if norm_alias not in existing_list:
+            existing_list.append(norm_alias)
+        new_aliases = ','.join(existing_list)
+
+        conn.execute("""
+            UPDATE getcomics_urls
+            SET search_aliases = ?
+            WHERE LOWER(REPLACE(REPLACE(series_norm, '-', ' '), '\u2013', ' ')) = ?
+        """, (new_aliases, norm_canonical))
+
         conn.commit()
         return True
     except Exception:
@@ -2860,6 +2931,9 @@ def delete_series_alias(alias: str) -> bool:
     """
     Remove an alias mapping.
 
+    Also removes the alias from getcomics_urls.search_aliases for all
+    matching entries, so both alias systems stay in sync.
+
     Args:
         alias: The alias to remove
 
@@ -2867,13 +2941,41 @@ def delete_series_alias(alias: str) -> bool:
         True if deleted, False if not found
     """
     _ensure_alias_table()
+    _ensure_urls_table()
     from core.database import get_db_connection
     conn = get_db_connection()
+
+    # First look up the canonical series for this alias so we can update search_aliases
+    norm_alias = _normalize_alias(alias)
+    canonical_row = conn.execute(
+        "SELECT canonical FROM getcomics_series_aliases WHERE alias_norm = ?",
+        (norm_alias,)
+    ).fetchone()
+
     c = conn.execute(
         "DELETE FROM getcomics_series_aliases WHERE alias_norm = ?",
-        (_normalize_alias(alias),)
+        (norm_alias,)
     )
     deleted = c.rowcount > 0
+
+    # Also remove from getcomics_urls.search_aliases so both systems stay in sync
+    if deleted and canonical_row:
+        norm_canonical = _normalize_alias(canonical_row[0])
+        existing_row = conn.execute(
+            "SELECT search_aliases FROM getcomics_urls WHERE LOWER(REPLACE(REPLACE(series_norm, '-', ' '), '\u2013', ' ')) = ? LIMIT 1",
+            (norm_canonical,)
+        ).fetchone()
+        if existing_row and existing_row[0]:
+            existing_list = [a.strip() for a in existing_row[0].split(',') if a.strip()]
+            if norm_alias in existing_list:
+                existing_list.remove(norm_alias)
+                new_aliases = ','.join(existing_list)
+                conn.execute("""
+                    UPDATE getcomics_urls
+                    SET search_aliases = ?
+                    WHERE LOWER(REPLACE(REPLACE(series_norm, '-', ' '), '\u2013', ' ')) = ?
+                """, (new_aliases, norm_canonical))
+
     conn.commit()
     conn.close()
     return deleted
@@ -2918,6 +3020,8 @@ def _scrape_url_to_index(url: str, url_slug: str = "", series_norm: str = "", la
     import re
     from core.database import get_db_connection
 
+    conn = get_db_connection()
+
     def _slugify(text: str) -> str:
         """Create a URL-safe slug from title text for use as entry identifier."""
         # Get issue number if present (e.g., "#1" -> "1", "1-5" -> "1-5")
@@ -2932,8 +3036,17 @@ def _scrape_url_to_index(url: str, url_slug: str = "", series_norm: str = "", la
         return slug[:50]
 
     scraper = cloudscraper.create_scraper()
+    # Load stored Last-Modified for conditional fetch (skip if page unchanged)
+    stored_lastmod = conn.execute(
+        "SELECT url_last_modified FROM getcomics_urls WHERE full_url = ? LIMIT 1",
+        (url,)
+    ).fetchone()
+    headers = {}
+    if stored_lastmod and stored_lastmod[0]:
+        headers["If-Modified-Since"] = stored_lastmod[0]
+
     try:
-        resp = scraper.get(url, timeout=15)
+        resp = scraper.get(url, timeout=15, headers=headers)
         if resp.status_code == 304:
             return None
         if resp.status_code != 200:
@@ -3104,6 +3217,30 @@ def _scrape_url_to_index(url: str, url_slug: str = "", series_norm: str = "", la
                     entry_slug = _slugify(title_text)
                     entry_url = f"{url}#{entry_slug}"
                     _parse_and_store(title_text, download_url, entry_url)
+
+        # Listing page (variant 3): <li> based pages with inline-styled download links.
+        # Structure: each comic entry is a <li> containing title text followed by
+        # download links in <strong><a href="..."><span style="color: #ff0000;">...
+        # Links use inline styles (color: #ff0000 for Main Server) not CSS classes.
+        for li in soup.find_all('li'):
+            # Title is the direct text content before the first <strong> or <br>
+            li_text = li.get_text(separator=' ', strip=True)
+            if not li_text or len(li_text) < 10:
+                continue
+            # Extract title: text before the first " :" pattern or download links
+            title_text = li_text.split(' :')[0].strip() if ' :' in li_text else li_text
+            if not title_text or len(title_text) < 5:
+                continue
+            # Get download URL — first http href in an <a> tag
+            download_url = None
+            for a in li.find_all('a', href=True):
+                href = a.get('href', '')
+                if href.startswith('http') and 'getcomics' not in href:
+                    download_url = href
+                    break
+            entry_slug = _slugify(title_text)
+            entry_url = f"{url}#{entry_slug}"
+            _parse_and_store(title_text, download_url, entry_url)
 
         return results
     except Exception as e:
@@ -3469,6 +3606,9 @@ def update_series_aliases(series_name: str, aliases: str) -> int:
     """
     Update search_aliases for all scrape index entries matching a series.
 
+    Also syncs each alias to getcomics_series_aliases so resolve_series_alias()
+    works correctly — both alias systems stay in sync.
+
     Called when a user edits aliases on the series page. The aliases string
     is comma-separated, stored normalized (lowercase, hyphens→spaces).
 
@@ -3481,6 +3621,7 @@ def update_series_aliases(series_name: str, aliases: str) -> int:
     """
     from core.database import get_db_connection
     _ensure_urls_table()
+    _ensure_alias_table()
 
     # Normalize aliases: lowercase, hyphens to spaces
     alias_list = []
@@ -3501,6 +3642,26 @@ def update_series_aliases(series_name: str, aliases: str) -> int:
         SET search_aliases = ?
         WHERE LOWER(REPLACE(REPLACE(series_norm, '-', ' '), '\u2013', ' ')) = ?
     """, (normalized_aliases, norm_series_lower)).rowcount
+
+    # Sync to getcomics_series_aliases so resolve_series_alias() works
+    # First delete existing alias mappings for this canonical series
+    conn.execute(
+        "DELETE FROM getcomics_series_aliases WHERE canonical_norm = ?",
+        (_normalize_alias(norm_series_lower),)
+    )
+    # Then insert all current aliases
+    for alias_val in alias_list:
+        if alias_val and alias_val != norm_series_lower:
+            conn.execute("""
+                INSERT OR IGNORE INTO getcomics_series_aliases
+                (alias, alias_norm, canonical, canonical_norm)
+                VALUES (?, ?, ?, ?)
+            """, (
+                alias_val,
+                _normalize_alias(alias_val),
+                norm_series_lower,
+                _normalize_alias(norm_series_lower),
+            ))
 
     conn.commit()
     conn.close()
@@ -3746,7 +3907,10 @@ def try_scrape_index(
     resolved = resolve_series_alias(search_name)
     norm_series = resolved.replace('-', ' ').replace('\u2013', ' ').replace('\u2014', ' ').strip().lower()
 
-    target_issue = int(str(issue_num).lstrip('0') or '0') if issue_num else None
+    try:
+        target_issue = float(str(issue_num).lstrip('0') or '0') if issue_num else None
+    except ValueError:
+        target_issue = None
 
     # ── Tier 1: Direct issue-number match via SQL ──────────────────────────────
     # Uses the stored issue_num / issue_range columns — no title scoring needed.
@@ -4039,13 +4203,17 @@ def search_getcomics_for_issue(
     if series_year:
         queries_to_try.append(" ".join([series_name, str(series_year), issue_num]))
     if series_volume and series_year:
+        queries_to_try.append(" ".join([series_name, "vol.", str(series_volume), str(series_year), issue_num]))
         queries_to_try.append(" ".join([series_name, "vol", str(series_volume), str(series_year), issue_num]))
         queries_to_try.append(" ".join([series_name, "volume", str(series_volume), str(series_year), issue_num]))
     if series_volume and not series_year:
+        queries_to_try.append(" ".join([series_name, "vol.", str(series_volume), issue_num]))
         queries_to_try.append(" ".join([series_name, "vol", str(series_volume), issue_num]))
         queries_to_try.append(" ".join([series_name, "volume", str(series_volume), issue_num]))
     if issue_year and issue_year != series_year:
         queries_to_try.append(" ".join([series_name, str(issue_year), issue_num]))
+    if series_volume:
+        queries_to_try.append(" ".join([series_name, "vol.", str(series_volume), issue_num]))
     queries_to_try.append(" ".join([series_name, issue_num]))  # bare query always last
 
     # Execute all queries CONCURRENTLY (3 workers)

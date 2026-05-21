@@ -6,11 +6,54 @@ Oldest items are automatically evicted when the trash exceeds TRASH_MAX_SIZE_MB.
 When TRASH_ENABLED is False, move_to_trash() falls back to permanent deletion.
 """
 
+import json
 import os
 import shutil
 import time
 from core.app_logging import app_logger
 from helpers.library import path_is_within_root
+
+
+MANIFEST_FILENAME = "trash_manifest.json"
+
+
+def _get_manifest_path():
+    """Return the path to the trash manifest file, or None if trash is disabled."""
+    trash_dir = get_trash_dir()
+    if not trash_dir:
+        return None
+    return os.path.join(trash_dir, MANIFEST_FILENAME)
+
+
+def _load_manifest():
+    """Load the trash manifest. Returns {} on missing or corrupt file."""
+    path = _get_manifest_path()
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_manifest(manifest):
+    """Atomically write the manifest dict to disk."""
+    path = _get_manifest_path()
+    if not path:
+        return
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+        os.replace(tmp_path, path)
+    except OSError as e:
+        app_logger.error(f"Failed to save trash manifest: {e}")
+
+
+def get_trash_manifest():
+    """Public accessor for the trash manifest dict."""
+    return _load_manifest()
 
 
 def get_trash_dir():
@@ -62,6 +105,8 @@ def get_trash_size():
 
     total = 0
     for entry in os.scandir(trash_dir):
+        if entry.name == MANIFEST_FILENAME:
+            continue
         if entry.is_file(follow_symlinks=False):
             total += entry.stat().st_size
         elif entry.is_dir(follow_symlinks=False):
@@ -85,6 +130,8 @@ def get_trash_contents():
 
     items = []
     for entry in os.scandir(trash_dir):
+        if entry.name == MANIFEST_FILENAME:
+            continue
         try:
             stat = entry.stat(follow_symlinks=False)
             if entry.is_dir(follow_symlinks=False):
@@ -120,6 +167,9 @@ def _evict_oldest(needed_bytes):
     max_size = get_trash_max_size_bytes()
     current_size = sum(item["size"] for item in contents)
 
+    manifest = _load_manifest()
+    manifest_changed = False
+
     for item in contents:
         if current_size + needed_bytes <= max_size:
             break
@@ -130,8 +180,14 @@ def _evict_oldest(needed_bytes):
                 os.remove(item["path"])
             current_size -= item["size"]
             app_logger.info(f"Trash evicted oldest item: {item['name']} ({item['size']} bytes)")
+            if item["name"] in manifest:
+                del manifest[item["name"]]
+                manifest_changed = True
         except OSError as e:
             app_logger.error(f"Error evicting trash item {item['name']}: {e}")
+
+    if manifest_changed:
+        _save_manifest(manifest)
 
 
 def _get_item_size(source_path):
@@ -234,6 +290,15 @@ def move_to_trash(source_path):
         parent_dir = os.path.dirname(source_path)
         shutil.move(source_path, dest_path)
         app_logger.info(f"Moved to trash: {source_path} -> {dest_path}")
+
+        # Record original path in manifest for restore
+        manifest = _load_manifest()
+        manifest[os.path.basename(dest_path)] = {
+            "original_path": source_path,
+            "deleted_at": time.time(),
+        }
+        _save_manifest(manifest)
+
         _cleanup_empty_parent(parent_dir)
         return {"trashed": True, "path": dest_path}
     except Exception as e:
@@ -259,6 +324,8 @@ def empty_trash():
     size_freed = 0
 
     for entry in os.scandir(trash_dir):
+        if entry.name == MANIFEST_FILENAME:
+            continue
         try:
             stat = entry.stat(follow_symlinks=False)
             if entry.is_dir(follow_symlinks=False):
@@ -277,6 +344,14 @@ def empty_trash():
             count += 1
         except OSError as e:
             app_logger.error(f"Error emptying trash item {entry.name}: {e}")
+
+    # Clear the manifest file
+    manifest_path = _get_manifest_path()
+    if manifest_path and os.path.exists(manifest_path):
+        try:
+            os.remove(manifest_path)
+        except OSError:
+            pass
 
     app_logger.info(f"Emptied trash: {count} items, {size_freed} bytes freed")
     return {"count": count, "size_freed": size_freed}
@@ -307,7 +382,75 @@ def permanently_delete_from_trash(item_name):
         else:
             os.remove(item_path)
         app_logger.info(f"Permanently deleted from trash: {item_name} ({size} bytes)")
+
+        # Remove from manifest
+        manifest = _load_manifest()
+        if item_name in manifest:
+            del manifest[item_name]
+            _save_manifest(manifest)
+
         return {"success": True, "size_freed": size}
     except OSError as e:
         app_logger.error(f"Error deleting trash item {item_name}: {e}")
         return {"success": False, "size_freed": 0, "error": str(e)}
+
+
+def restore_from_trash(item_name):
+    """
+    Restore a trashed item to its original location.
+
+    Returns dict: {success, restored_path, error}.
+    May also include no_manifest or conflict flags.
+    """
+    trash_dir = get_trash_dir()
+    if not trash_dir:
+        return {"success": False, "error": "Trash is disabled"}
+
+    item_path = os.path.join(trash_dir, item_name)
+
+    if not os.path.exists(item_path):
+        return {"success": False, "error": "Item not found in trash"}
+
+    # Prevent path traversal
+    normalized_item = os.path.normpath(item_path)
+    normalized_trash = os.path.normpath(trash_dir)
+    if not normalized_item.startswith(normalized_trash + os.sep):
+        return {"success": False, "error": "Invalid item path"}
+
+    # Look up original path in manifest
+    manifest = _load_manifest()
+    entry = manifest.get(item_name)
+    if not entry:
+        return {
+            "success": False,
+            "error": "No original path recorded for this item. Use drag-and-drop to restore it manually.",
+            "no_manifest": True,
+        }
+
+    original_path = entry["original_path"]
+
+    # Check for conflict at original location
+    if os.path.exists(original_path):
+        return {
+            "success": False,
+            "error": "A file already exists at the original location",
+            "conflict": True,
+            "original_path": original_path,
+        }
+
+    # Recreate parent directory if needed
+    parent_dir = os.path.dirname(original_path)
+    os.makedirs(parent_dir, exist_ok=True)
+
+    try:
+        shutil.move(item_path, original_path)
+        app_logger.info(f"Restored from trash: {item_name} -> {original_path}")
+
+        # Remove from manifest
+        del manifest[item_name]
+        _save_manifest(manifest)
+
+        return {"success": True, "restored_path": original_path}
+    except Exception as e:
+        app_logger.error(f"Failed to restore from trash {item_name}: {e}")
+        return {"success": False, "error": str(e)}

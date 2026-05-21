@@ -10,6 +10,7 @@ Provides routes for:
 - Libraries CRUD
 """
 
+import json
 import os
 import re
 import threading
@@ -24,6 +25,7 @@ from flask import (
     url_for,
     flash,
     current_app,
+    Response,
 )
 from models import metron
 import core.app_state as app_state
@@ -266,6 +268,106 @@ def pull_list():
     )
 
 
+_PULL_LIST_EXPORT_FIELDS = (
+    "id",
+    "name",
+    "sort_name",
+    "volume",
+    "volume_year",
+    "year_end",
+    "status",
+    "publisher_id",
+    "publisher_name",
+    "imprint",
+    "cv_id",
+    "gcd_id",
+    "resource_url",
+    "mapped_path",
+    "series_subscription",
+)
+
+
+def _serialize_series_for_export(row):
+    """Pick only user-set / identity fields from a mapped-series row."""
+    return {k: row.get(k) for k in _PULL_LIST_EXPORT_FIELDS}
+
+
+@series_bp.route("/api/pull-list/export")
+def export_pull_list():
+    """Download the current pull list (all mapped series) as a JSON file."""
+    from core.database import get_all_mapped_series
+    from core.version import __version__
+
+    rows = get_all_mapped_series()
+    payload = {
+        "version": 1,
+        "exported_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "app_version": __version__,
+        "series_count": len(rows),
+        "series": [_serialize_series_for_export(r) for r in rows],
+    }
+    body = json.dumps(payload, indent=2, ensure_ascii=False)
+    filename = f"pull-list-{datetime.utcnow().strftime('%Y-%m-%d')}.json"
+    return Response(
+        body,
+        mimetype="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@series_bp.route("/api/pull-list/import", methods=["POST"])
+def import_pull_list():
+    """Restore series rows + mapped_path from an exported JSON file."""
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"success": False, "error": "No file uploaded"}), 400
+
+    raw = f.read(2 * 1024 * 1024)
+    if f.read(1):
+        return jsonify({"success": False, "error": "File too large (>2MB)"}), 400
+
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        return jsonify({"success": False, "error": f"Invalid JSON: {e}"}), 400
+
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        return jsonify({"success": False, "error": "Unsupported file format"}), 400
+
+    series_list = payload.get("series")
+    if not isinstance(series_list, list):
+        return jsonify({"success": False, "error": "Missing 'series' array"}), 400
+
+    from core.database import import_series_row
+
+    imported_new = 0
+    updated_existing = 0
+    skipped = 0
+    errors = []
+    for entry in series_list:
+        try:
+            result = import_series_row(entry)
+            if result == "inserted":
+                imported_new += 1
+            elif result == "updated":
+                updated_existing += 1
+            else:
+                skipped += 1
+        except Exception as e:
+            errors.append({
+                "id": entry.get("id") if isinstance(entry, dict) else None,
+                "error": str(e),
+            })
+
+    return jsonify({
+        "success": True,
+        "imported_new": imported_new,
+        "updated_existing": updated_existing,
+        "skipped": skipped,
+        "errors": errors,
+    })
+
+
 @series_bp.route("/series-search")
 def series_search():
     """
@@ -467,6 +569,21 @@ def series_view(slug):
             save_issues_bulk(all_issues, series_id)
             update_series_sync_time(series_id, len(all_issues))
 
+            # Mylar-compatible series.json: create or refresh dynamic fields
+            # while preserving any user-edited fields.
+            if existing_mapping and os.path.isdir(existing_mapping):
+                from models.series_json import write_series_json
+                series_for_json = dict(series_dict_for_save)
+                if cover_image and not series_for_json.get("cover_image"):
+                    series_for_json["cover_image"] = cover_image
+                write_series_json(
+                    existing_mapping,
+                    series_for_json,
+                    issues=all_issues,
+                    api=api,
+                    preserve_existing=True,
+                )
+
         # Helper to get attribute from dict or object
         def get_attr(obj, key, default=None):
             if isinstance(obj, dict):
@@ -570,6 +687,13 @@ def series_view(slug):
 
         series_subscription = get_series_subscription(series_id)
 
+        has_series_json = False
+        if mapped_path:
+            from models.series_json import SERIES_JSON_FILENAME
+            has_series_json = os.path.isfile(
+                os.path.join(mapped_path, SERIES_JSON_FILENAME)
+            )
+
         return render_template(
             "series.html",
             series=series_info,
@@ -584,6 +708,7 @@ def series_view(slug):
             libraries=libraries,
             default_library=default_library,
             series_subscription=series_subscription,
+            has_series_json=has_series_json,
         )
     except Exception as e:
         if metron.is_connection_error(e):
@@ -694,6 +819,8 @@ def map_series(series_id):
         success = save_series_mapping(series_data, mapped_path)
 
         if success:
+            from models.series_json import write_series_json
+            write_series_json(mapped_path, series_data, api=metron.get_flask_api())
             return jsonify({"success": True, "mapped_path": mapped_path})
         else:
             return jsonify({"error": "Failed to save mapping"}), 500
@@ -851,6 +978,9 @@ def subscribe_series(series_id):
                 app_logger.info(f"Created cvinfo at {cvinfo_path} with CV ID {cv_id}")
         else:
             app_logger.error(f"Failed to create cvinfo at {cvinfo_path}")
+
+        from models.series_json import write_series_json
+        write_series_json(path, series, api=metron.get_flask_api())
 
         return jsonify({"success": True, "path": path})
     except Exception as e:

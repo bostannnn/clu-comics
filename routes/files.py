@@ -28,7 +28,7 @@ from helpers.library import (
     is_valid_library_path,
     is_path_in_any_root,
 )
-from helpers.trash import move_to_trash, is_trash_path, get_trash_dir, get_trash_size, get_trash_max_size_bytes, get_trash_contents, empty_trash as do_empty_trash, permanently_delete_from_trash
+from helpers.trash import move_to_trash, is_trash_path, get_trash_dir, get_trash_size, get_trash_max_size_bytes, get_trash_contents, empty_trash as do_empty_trash, permanently_delete_from_trash, restore_from_trash, get_trash_manifest
 from helpers import is_hidden
 from core.config import config
 from cbz_ops.edit import cropCenter, cropLeft, cropRight, cropFreeForm, get_image_data_url, modal_body_template
@@ -193,6 +193,32 @@ def move():
 
 
 # =============================================================================
+# Convert Library Preview
+# =============================================================================
+
+@files_bp.route('/api/convert/preview', methods=['GET'])
+def convert_preview():
+    """
+    Count the .rar/.cbr files that would be converted under the given directory,
+    scanned recursively. Used by the 'Convert Library' modal to show the user
+    how many files will be processed before they confirm.
+    """
+    directory = request.args.get('directory', '').strip()
+    if not directory:
+        return jsonify({"success": False, "error": "Missing directory parameter"}), 400
+
+    if not is_valid_library_path(directory):
+        return jsonify({"success": False, "error": "Path is not within a configured library"}), 403
+
+    if not os.path.isdir(directory):
+        return jsonify({"success": False, "error": "Directory does not exist"}), 404
+
+    from cbz_ops.convert import count_convertable_files
+    count = count_convertable_files(directory, force_recursive=True)
+    return jsonify({"success": True, "count": count, "directory": directory})
+
+
+# =============================================================================
 # Folder Size
 # =============================================================================
 
@@ -242,6 +268,7 @@ def upload_to_folder():
     """
     from app import log_file_if_in_data, resize_upload
 
+    op_id = None
     try:
         # Get target directory from form data
         target_dir = request.form.get('target_dir')
@@ -265,16 +292,31 @@ def upload_to_folder():
         if not files or all(f.filename == '' for f in files):
             return jsonify({"success": False, "error": "No files selected"}), 400
 
+        # Filter out empty filenames once, up-front, so the op total reflects real work.
+        files_to_process = [f for f in files if f.filename]
+        if not files_to_process:
+            return jsonify({"success": False, "error": "No files selected"}), 400
+
+        target_label = os.path.basename(os.path.normpath(target_dir)) or target_dir
+        op_id = app_state.register_operation(
+            "upload",
+            f"Upload to {target_label}",
+            total=len(files_to_process),
+        )
+
         # Allowed file extensions
-        allowed_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.cbz', '.cbr'}
+        allowed_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.cbz', '.cbr', '.pdf'}
 
         uploaded_files = []
         skipped_files = []
         errors = []
 
-        for file in files:
-            if file.filename == '':
-                continue
+        for i, file in enumerate(files_to_process):
+            app_state.update_operation(
+                op_id,
+                current=i,
+                detail=f"Uploading {os.path.basename(file.filename)}",
+            )
 
             # Sanitize filename: strip path separators but preserve spaces
             filename = os.path.basename(file.filename)
@@ -335,9 +377,12 @@ def upload_to_folder():
                 })
                 app_logger.error(f"Error uploading file {filename}: {e}")
 
+        app_state.complete_operation(op_id, error=bool(errors))
+
         # Return results
         response = {
             "success": True,
+            "op_id": op_id,
             "uploaded": uploaded_files,
             "skipped": skipped_files,
             "errors": errors,
@@ -349,6 +394,8 @@ def upload_to_folder():
         return jsonify(response)
 
     except Exception as e:
+        if op_id is not None:
+            app_state.complete_operation(op_id, error=True)
         app_logger.error(f"Error in upload_to_folder: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
@@ -426,11 +473,14 @@ def combine_cbz():
     if not directory:
         return jsonify({"error": "Directory not specified"}), 400
 
+    # Security: Validate all paths
+    from core.config import get_watch_dir, get_target_dir
+    watch_dir = get_watch_dir() or "/downloads/temp"
+    target_dir = get_target_dir() or "/downloads/processed"
+
     for f in files:
-        if not (is_valid_library_path(f) or is_path_in_any_root(f, [
-                config.get("SETTINGS", "WATCH", fallback="/temp"),
-                config.get("SETTINGS", "TARGET", fallback="/processed"),
-        ])):
+        normalized = os.path.normpath(f)
+        if not (is_valid_library_path(normalized) or is_path_in_any_root(normalized, [watch_dir, target_dir])):
             return jsonify({"error": "Access denied"}), 403
 
     temp_dir = None
@@ -709,6 +759,103 @@ def rename_directory():
         return jsonify({"error": "Rename module not available"}), 500
     except Exception as e:
         app_logger.error(f"Error renaming files in directory {directory_path}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+def _validate_smart_rename_target(data):
+    """Shared validation for /smart-rename and /smart-rename/preview.
+
+    Returns (directory_path, recursive, library_id, error_response_or_none).
+    """
+    directory_path = (data or {}).get('directory')
+    if not directory_path:
+        return None, None, None, (jsonify({"error": "Missing directory path"}), 400)
+    if not os.path.exists(directory_path):
+        return None, None, None, (jsonify({"error": "Directory does not exist"}), 404)
+    if not os.path.isdir(directory_path):
+        return None, None, None, (jsonify({"error": "Path is not a directory"}), 400)
+    if is_critical_path(directory_path):
+        return None, None, None, (
+            jsonify({"error": get_critical_path_error_message(directory_path, "rename files in")}),
+            403,
+        )
+
+    recursive = (data or {}).get('recursive')
+    if recursive is None:
+        try:
+            from core.database import get_user_preference
+            recursive = bool(get_user_preference('smart_rename_recursive', default=True))
+        except Exception:
+            recursive = True
+    else:
+        recursive = bool(recursive)
+
+    library_id = (data or {}).get('library_id')
+    if isinstance(library_id, str) and library_id.isdigit():
+        library_id = int(library_id)
+    elif not isinstance(library_id, int):
+        library_id = None
+
+    return directory_path, recursive, library_id, None
+
+
+@files_bp.route('/smart-rename/preview', methods=['POST'])
+def smart_rename_preview():
+    """Build a Smart Rename plan for a directory without applying it."""
+    try:
+        data = request.get_json(silent=True) or {}
+        directory_path, recursive, library_id, err = _validate_smart_rename_target(data)
+        if err is not None:
+            return err
+
+        app_logger.info("********************// Smart Rename Preview //********************")
+        app_logger.info(f"Directory: {directory_path} (recursive={recursive}, library_id={library_id})")
+
+        from cbz_ops.smart_rename import plan_smart_rename
+        plan = plan_smart_rename(directory_path, recursive=recursive, library_id=library_id)
+        return jsonify({"success": True, "plan": plan})
+    except Exception as e:
+        app_logger.error(f"Smart rename preview failed: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@files_bp.route('/smart-rename', methods=['POST'])
+def smart_rename_apply():
+    """
+    Apply a Smart Rename. If `plan` is provided in the request body it is
+    applied directly; otherwise a fresh plan is built from `directory` and
+    applied. Pass `plan` for the modal-confirm flow; omit it for the
+    no-preview flow.
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        plan = data.get('plan')
+
+        if plan is None:
+            directory_path, recursive, library_id, err = _validate_smart_rename_target(data)
+            if err is not None:
+                return err
+            from cbz_ops.smart_rename import plan_smart_rename
+            plan = plan_smart_rename(directory_path, recursive=recursive, library_id=library_id)
+        else:
+            # Even when applying a client-supplied plan, guard the root.
+            root_dir = plan.get('root') if isinstance(plan, dict) else None
+            if not root_dir or not os.path.isdir(root_dir):
+                return jsonify({"error": "Invalid plan: missing or non-existent root"}), 400
+            if is_critical_path(root_dir):
+                return jsonify({"error": get_critical_path_error_message(root_dir, "rename files in")}), 403
+
+        if isinstance(plan, dict) and plan.get('error'):
+            return jsonify({"error": plan['error']}), 400
+
+        app_logger.info("********************// Smart Rename Apply //********************")
+        app_logger.info(f"Root: {plan.get('root') if isinstance(plan, dict) else 'unknown'}")
+
+        from cbz_ops.smart_rename import apply_smart_rename
+        summary = apply_smart_rename(plan)
+        return jsonify({"success": True, "summary": summary, "plan": plan})
+    except Exception as e:
+        app_logger.error(f"Smart rename apply failed: {e}")
         return jsonify({"error": str(e)}), 500
 
 
@@ -1097,6 +1244,42 @@ def crop_image():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+@files_bp.route('/crop-cover', methods=['POST'])
+def crop_cover():
+    """
+    Crop the cover image of a CBZ by splitting the first image in half and
+    keeping the right half. Backed by cbz_ops.crop.handle_cbz_file.
+    """
+    try:
+        data = request.json or {}
+        file_path = data.get('target')
+
+        if not file_path:
+            return jsonify({'success': False, 'error': 'Missing file path'}), 400
+
+        if not os.path.exists(file_path):
+            return jsonify({'success': False, 'error': 'File not found'}), 404
+
+        if not file_path.lower().endswith('.cbz'):
+            return jsonify({'success': False, 'error': 'File is not a CBZ'}), 400
+
+        if is_critical_path(file_path):
+            return jsonify({'success': False, 'error': get_critical_path_error_message(file_path)}), 403
+
+        from cbz_ops.crop import handle_cbz_file
+        app_logger.info(f"Crop cover requested for: {file_path}")
+        handle_cbz_file(file_path)
+
+        return jsonify({
+            'success': True,
+            'message': 'Cover cropped successfully.'
+        })
+
+    except Exception as e:
+        app_logger.error(f"Crop cover error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @files_bp.route('/get-image-data', methods=['POST'])
 def get_full_image_data():
     """Get full-size image data as base64 for display in modal"""
@@ -1327,6 +1510,12 @@ def trash_list():
     # Reverse to newest first for display
     contents.reverse()
 
+    # Enrich with original path from manifest
+    manifest = get_trash_manifest()
+    for item in contents:
+        entry = manifest.get(item["name"])
+        item["original_path"] = entry["original_path"] if entry else None
+
     return jsonify({"enabled": True, "items": contents})
 
 
@@ -1352,6 +1541,29 @@ def trash_delete_item():
     result = permanently_delete_from_trash(item_name)
     if not result["success"]:
         return jsonify(result), 404 if result["error"] == "Item not found in trash" else 400
+    return jsonify(result)
+
+
+@files_bp.route('/api/trash/restore', methods=['POST'])
+def trash_restore_item():
+    """Restore a trashed item to its original location."""
+    from app import update_index_on_create
+
+    data = request.get_json()
+    item_name = data.get("name")
+    if not item_name:
+        return jsonify({"success": False, "error": "Missing item name"}), 400
+
+    result = restore_from_trash(item_name)
+    if not result["success"]:
+        if result.get("conflict"):
+            return jsonify(result), 409
+        return jsonify(result), 400
+
+    # Update file index for the restored file
+    restored_path = result["restored_path"]
+    threading.Thread(target=update_index_on_create, args=(restored_path,), daemon=True).start()
+
     return jsonify(result)
 
 

@@ -224,9 +224,24 @@ class ComicVineProvider(BaseProvider):
                 return None
 
             from models import comicvine as cv_module
-            return cv_module.get_metadata_by_volume_id(
-                api_key, int(volume_id), issue_number, start_year=start_year
+            volume_details = cv_module.get_volume_details(api_key, int(volume_id))
+            issue_data = cv_module.get_issue_by_number(api_key, int(volume_id), issue_number, None)
+            if not issue_data:
+                return None
+
+            volume_data = {
+                'id': int(volume_id),
+                'name': issue_data.get('volume_name'),
+                'publisher_name': volume_details.get('publisher_name'),
+                'start_year': start_year or volume_details.get('start_year'),
+            }
+            metadata = cv_module.map_to_comicinfo(
+                issue_data,
+                volume_data,
+                start_year=volume_data.get('start_year'),
             )
+            metadata['_image_url'] = issue_data.get('image_url')
+            return metadata
         except Exception as e:
             app_logger.error(f"ComicVine get_issue_metadata failed: {e}")
             return None

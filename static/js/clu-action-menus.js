@@ -123,6 +123,7 @@
     var processingOps = [];
     _pushAction(processingOps, 'Apply Rename Pattern', 'bi bi-input-cursor-text', context.onApplyRenamePattern);
     _pushAction(processingOps, 'Apply Folder + Rename Pattern', 'bi bi-folder-symlink', context.onApplyFolderRenamePattern);
+    _pushAction(processingOps, 'Smart Rename', 'bi bi-magic', context.onSmartRename);
     _pushAction(processingOps, 'Generate Thumbnail', 'bi bi-image', context.onGenerateThumbnail);
     _pushAction(processingOps, 'Generate All Missing Thumbnails', 'bi bi-images', context.onGenerateAllMissingThumbnails);
     _pushAction(processingOps, 'Convert CBR→CBZ', 'bi bi-arrow-repeat', context.onConvertCbrToCbz);

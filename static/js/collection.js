@@ -60,6 +60,10 @@ let isAllBooksMode = false;
 let allBooksData = null;
 let folderViewPath = '';
 let backgroundLoadingActive = false; // Track if background loading is happening
+let allBooksTotal = 0;          // Total filtered count returned by the server
+let allBooksLetters = [];       // Available letter buckets returned by the server
+let allBooksAbort = null;       // AbortController for the current paged fetch
+let gridSearchDebounce = null;  // Debounce timer for the search input in all-books mode
 
 // Recently Added mode state
 let isRecentlyAddedMode = false;
@@ -222,6 +226,13 @@ function onGridSearch(value) {
     gridSearchRaw = value;  // Keep original for display
     gridSearchTerm = value.trim().toLowerCase();  // Normalize for filtering
     currentPage = 1; // Reset to first page when searching
+
+    if (isAllBooksMode) {
+        // Debounce — search rounds-trip to the server
+        if (gridSearchDebounce) clearTimeout(gridSearchDebounce);
+        gridSearchDebounce = setTimeout(() => fetchAllBooksPage(), 300);
+        return;
+    }
     renderPage();
     loadVisiblePageData();
 }
@@ -299,13 +310,17 @@ async function loadDirectory(path, preservePage = false, forceRefresh = false) {
         });
     }
 
-    // Update URL without reloading - use clean URL format
-    // Convert /data/Publisher/Series to /collection/Publisher/Series
+    // Update URL without reloading. Use the legacy clean format
+    // /collection/<relative> for paths inside the default library (/data).
+    // For the /data root itself or any non-default-library absolute path,
+    // encode the full path as ?path= — concatenating an absolute path onto
+    // /collection/ would produce a double slash, which Werkzeug's
+    // merge_slashes 308-redirects on refresh and mangles the path.
     let cleanUrl = '/collection';
     if (path && path.startsWith('/data/')) {
-        cleanUrl = '/collection' + path.substring(5); // Remove '/data' prefix
+        cleanUrl = '/collection' + path.substring(5);
     } else if (path) {
-        cleanUrl = '/collection/' + path;
+        cleanUrl = '/collection?path=' + encodeURIComponent(path);
     }
     window.history.pushState({ path }, '', cleanUrl);
 
@@ -459,6 +474,14 @@ async function loadDirectory(path, preservePage = false, forceRefresh = false) {
 
         // Use prioritized loading: visible page first, then background
         if (pendingMetadataPaths.length > 0 || pendingThumbnailPaths.length > 0) {
+            if (window._browseMetaDebug) {
+                const gridDataPaths = [...document.querySelectorAll('#file-grid [data-path]')]
+                    .slice(0, 5)
+                    .map(el => el.getAttribute('data-path'));
+                console.log('[browse-metadata] requesting',
+                    pendingMetadataPaths.slice(0, 5),
+                    'gridDataPaths', gridDataPaths);
+            }
             loadBatchDataPrioritized(pendingMetadataPaths, pendingThumbnailPaths);
         }
 
@@ -468,6 +491,26 @@ async function loadDirectory(path, preservePage = false, forceRefresh = false) {
     } finally {
         setLoading(false);
     }
+}
+
+/**
+ * Mark a batch of folder paths as having failed metadata load. Replaces the
+ * persistent "Loading…" placeholder with an em-dash so cards never appear
+ * stuck. The reason is exposed via the `title` attribute for debugging.
+ */
+function markBatchFailed(paths, reason) {
+    paths.forEach(p => {
+        const item = allItems.find(i => i.path === p);
+        if (item) item.metadataPending = false;
+        const gridItem = document.querySelector(`[data-path="${CSS.escape(p)}"]`);
+        if (!gridItem) return;
+        const metaEl = gridItem.querySelector('.item-meta');
+        if (!metaEl) return;
+        metaEl.classList.remove('metadata-loading');
+        metaEl.classList.add('metadata-error');
+        metaEl.textContent = '—';
+        metaEl.title = `Metadata unavailable: ${reason}`;
+    });
 }
 
 /**
@@ -492,11 +535,25 @@ async function loadMetadataInBatches(paths, signal) {
                 signal
             });
 
-            if (!response.ok) return;
+            if (!response.ok) {
+                console.warn('[browse-metadata] non-2xx', response.status, batch.slice(0, 3));
+                markBatchFailed(batch, `http-${response.status}`);
+                return;
+            }
             const data = await response.json();
+
+            if (!data || !data.metadata) {
+                console.warn('[browse-metadata] empty response', data, batch.slice(0, 3));
+                markBatchFailed(batch, 'empty-response');
+                return;
+            }
+
+            const matched = new Set();
 
             // Update allItems and DOM with received metadata
             Object.entries(data.metadata).forEach(([path, meta]) => {
+                matched.add(path);
+
                 const item = allItems.find(i => i.path === path);
                 if (item) {
                     item.folderCount = meta.folder_count;
@@ -506,24 +563,41 @@ async function loadMetadataInBatches(paths, signal) {
                 }
 
                 const gridItem = document.querySelector(`[data-path="${CSS.escape(path)}"]`);
-                if (gridItem) {
-                    const metaEl = gridItem.querySelector('.item-meta');
-                    if (metaEl) {
-                        metaEl.classList.remove('metadata-loading');
-                        const parts = [];
-                        if (meta.folder_count > 0) {
-                            parts.push(`${meta.folder_count} folder${meta.folder_count !== 1 ? 's' : ''}`);
-                        }
-                        if (meta.file_count > 0) {
-                            parts.push(`${meta.file_count} file${meta.file_count !== 1 ? 's' : ''}`);
-                        }
-                        metaEl.textContent = parts.length > 0 ? parts.join(' | ') : 'Empty';
+                if (!gridItem) {
+                    if (window._browseMetaDebug) {
+                        const sample = [...document.querySelectorAll('[data-path]')]
+                            .slice(0, 3)
+                            .map(el => el.getAttribute('data-path'));
+                        console.warn('[browse-metadata] no DOM match', { path, sampleDataPaths: sample });
                     }
+                    return;
                 }
+                const metaEl = gridItem.querySelector('.item-meta');
+                if (!metaEl) return;
+                metaEl.classList.remove('metadata-loading');
+                metaEl.classList.remove('metadata-error');
+                metaEl.removeAttribute('title');
+                const parts = [];
+                if (meta.folder_count > 0) {
+                    parts.push(`${meta.folder_count} folder${meta.folder_count !== 1 ? 's' : ''}`);
+                }
+                if (meta.file_count > 0) {
+                    parts.push(`${meta.file_count} file${meta.file_count !== 1 ? 's' : ''}`);
+                }
+                metaEl.textContent = parts.length > 0 ? parts.join(' | ') : 'Empty';
             });
+
+            // Any requested path not present in the response is a server-side
+            // miss — fall back rather than leave the card stuck on "Loading…".
+            const missing = batch.filter(p => !matched.has(p));
+            if (missing.length > 0) {
+                console.warn('[browse-metadata] missing keys in response', missing.slice(0, 3));
+                markBatchFailed(missing, 'no-key-in-response');
+            }
         } catch (error) {
-            if (error.name === 'AbortError') return;
+            if (error && error.name === 'AbortError') return;
             console.error('Error loading metadata batch:', error);
+            markBatchFailed(batch, `${error && error.name || 'Error'}:${error && error.message || error}`);
         }
     }));
 }
@@ -677,6 +751,7 @@ function updateMainViewButtons() {
 function updateViewButtons(path) {
     const allBooksBtn = document.getElementById('allBooksBtn');
     const missingXmlBtn = document.getElementById('missingXmlBtn');
+    const rescanMissingXmlBtn = document.getElementById('rescanMissingXmlBtn');
     const folderViewBtn = document.getElementById('folderViewBtn');
     const viewToggleButtons = document.getElementById('viewToggleButtons');
 
@@ -687,18 +762,21 @@ function updateViewButtons(path) {
         viewToggleButtons.style.display = 'block';
         allBooksBtn.style.display = 'none';
         if (missingXmlBtn) missingXmlBtn.style.display = 'none';
+        if (rescanMissingXmlBtn) rescanMissingXmlBtn.style.display = 'none';
         folderViewBtn.style.display = 'inline-block';
     } else if (isMissingXmlMode) {
-        // In Missing XML mode: hide All Books and Missing XML, show Folder View
+        // In Missing XML mode: hide All Books and Missing XML, show Rescan + Folder View
         viewToggleButtons.style.display = 'block';
         allBooksBtn.style.display = 'none';
         if (missingXmlBtn) missingXmlBtn.style.display = 'none';
+        if (rescanMissingXmlBtn) rescanMissingXmlBtn.style.display = 'inline-block';
         folderViewBtn.style.display = 'inline-block';
     } else if (isAllBooksMode) {
         // In All Books mode: hide All Books, show Folder View
         viewToggleButtons.style.display = 'block';
         allBooksBtn.style.display = 'none';
         if (missingXmlBtn) missingXmlBtn.style.display = 'none';
+        if (rescanMissingXmlBtn) rescanMissingXmlBtn.style.display = 'none';
         folderViewBtn.style.display = 'inline-block';
     } else {
         // In Folder mode: show All Books and Missing XML (if not root), hide Folder View
@@ -710,96 +788,107 @@ function updateViewButtons(path) {
             allBooksBtn.style.display = 'inline-block';
             if (missingXmlBtn) missingXmlBtn.style.display = 'inline-block';
         }
+        if (rescanMissingXmlBtn) rescanMissingXmlBtn.style.display = 'none';
         folderViewBtn.style.display = 'none';
     }
 }
 
 /**
- * Load all books recursively from current directory
+ * Enter All Books mode at the current directory.
+ * Server-side pagination — every page click, search keystroke, letter
+ * filter, and per-page change re-fetches a small slice from the API.
+ *
+ * @param {boolean} preservePage - If true, keep currentPage/currentFilter/search.
  */
 async function loadAllBooks(preservePage = false) {
     if (isLoading) return;
 
-    setLoading(true);
     folderViewPath = currentPath;  // Save current path to return to
     isAllBooksMode = true;
 
-    try {
-        // Start fetching all data
-        const fetchPromise = fetch(`/api/browse-recursive?path=${encodeURIComponent(currentPath)}`);
+    if (!preservePage) {
+        currentPage = 1;
+        currentFilter = 'all';
+        gridSearchTerm = '';
+        gridSearchRaw = '';
+    }
 
-        // Get the response and start reading
-        const response = await fetchPromise;
+    updateMainViewButtons();
+    updateViewButtons(currentPath);
+
+    await fetchAllBooksPage();
+}
+
+/**
+ * Fetch one page of the All Books listing from the server.
+ * Uses currentPath, currentPage, itemsPerPage, currentFilter, gridSearchTerm
+ * as inputs. Cancels any in-flight previous fetch.
+ */
+async function fetchAllBooksPage() {
+    if (!isAllBooksMode) return;
+
+    const offset = Math.max(0, (currentPage - 1) * itemsPerPage);
+    const params = new URLSearchParams({
+        path: currentPath || '',
+        offset: String(offset),
+        limit: String(itemsPerPage),
+    });
+    if (currentFilter && currentFilter !== 'all') {
+        params.set('letter', currentFilter);
+    }
+    if (gridSearchTerm) {
+        params.set('search', gridSearchTerm);
+    }
+
+    // Cancel any in-flight previous fetch (rapid clicks)
+    if (allBooksAbort) {
+        try { allBooksAbort.abort(); } catch (_) { /* ignore */ }
+    }
+    const ctrl = new AbortController();
+    allBooksAbort = ctrl;
+    const timeoutId = setTimeout(() => ctrl.abort(), 30000);
+
+    setLoading(true);
+    try {
+        const response = await fetch(`/api/browse-recursive?${params.toString()}`, { signal: ctrl.signal });
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
 
         const data = await response.json();
         allBooksData = data;
+        allBooksTotal = data.total || 0;
+        allBooksLetters = Array.isArray(data.letters) ? data.letters : [];
 
-        // Map backend snake_case to frontend camelCase for thumbnails
-        // In All Books mode, paths are relative to DATA_DIR, so prepend /data/
+        // Map backend snake_case to frontend camelCase, prepending /data/ for paths
+        // (server returns paths relative to DATA_DIR for the All Books view).
         const hiddenFiles = new Set(['cvinfo']);
-        const allFiles = data.files
+        allItems = (data.files || [])
             .filter(file => !hiddenFiles.has(file.name.toLowerCase()))
             .map(file => ({
                 ...file,
-                // Ensure path starts with /data/ for consistency with folder view
                 path: file.path.startsWith('/') ? file.path : `/data/${file.path}`,
                 hasThumbnail: file.has_thumbnail,
                 thumbnailUrl: file.thumbnail_url,
-                hasComicinfo: file.has_comicinfo
+                hasComicinfo: file.has_comicinfo,
             }));
 
-        const totalFiles = allFiles.length;
-
-        // If there are many files, show initial batch immediately
-        if (totalFiles > 500) {
-            // Get initial batch size (min 20, max 500, based on itemsPerPage)
-            const initialBatchSize = Math.max(20, Math.min(itemsPerPage, 500));
-
-            // Show initial batch immediately
-            allItems = allFiles.slice(0, initialBatchSize);
-            if (!preservePage) {
-                currentPage = 1;
-                currentFilter = 'all';
-                gridSearchTerm = '';
-                gridSearchRaw = '';
-            }
-
-            updateMainViewButtons();
-            updateViewButtons(currentPath);
-            renderPage();
-            setLoading(false);
-
-            // Show loading indicator for remaining items
-            showLoadingMoreIndicator(initialBatchSize, totalFiles);
-
-            // Load remaining files in batches
-            await loadRemainingBooksInBackground(allFiles, initialBatchSize);
-        } else {
-            // For smaller collections, load everything at once
-            allItems = allFiles;
-            if (!preservePage) {
-                currentPage = 1;
-                currentFilter = 'all';
-                gridSearchTerm = '';
-                gridSearchRaw = '';
-            }
-
-            updateMainViewButtons();
-            updateViewButtons(currentPath);
-            renderPage();
-            setLoading(false);
-        }
-
+        renderPage();
     } catch (error) {
+        if (error && error.name === 'AbortError') {
+            // Superseded by a newer fetch (or timeout) — silent
+            return;
+        }
         console.error('Error loading all books:', error);
         CLU.showError('Failed to load all books: ' + error.message);
-        // Reset state on error
         isAllBooksMode = false;
         allBooksData = null;
+        allBooksTotal = 0;
+        allBooksLetters = [];
         updateViewButtons(currentPath);
+    } finally {
+        clearTimeout(timeoutId);
+        if (allBooksAbort === ctrl) allBooksAbort = null;
         setLoading(false);
     }
 }
@@ -993,6 +1082,44 @@ async function loadMissingXml(preservePage = false) {
         isMissingXmlMode = false;
         updateViewButtons(currentPath);
         setLoading(false);
+    }
+}
+
+/**
+ * Force a rescan of every file currently flagged as missing ComicInfo.xml.
+ * Picks up files where the XML was added externally without bumping mtime
+ * (the normal incremental scan would skip those).
+ */
+async function rescanMissingXml() {
+    const btn = document.getElementById('rescanMissingXmlBtn');
+    if (btn) btn.disabled = true;
+
+    try {
+        const response = await fetch('/api/metadata/rescan-missing-xml', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        });
+        const data = await response.json();
+
+        if (response.ok && data.success) {
+            const queued = data.queued || 0;
+            if (queued === 0) {
+                CLU.showToast('Rescan', 'No files need rescanning.', 'info');
+            } else {
+                CLU.showToast(
+                    'Rescan started',
+                    `Re-checking ${queued} file(s) in the background. Refresh in a moment to see updated results.`,
+                    'info'
+                );
+            }
+        } else {
+            CLU.showError(data.error || 'Failed to start rescan');
+        }
+    } catch (error) {
+        console.error('Error starting missing-XML rescan:', error);
+        CLU.showError('Failed to start rescan: ' + error.message);
+    } finally {
+        if (btn) btn.disabled = false;
     }
 }
 
@@ -1203,6 +1330,14 @@ async function loadContinueReading(preservePage = false) {
  * Render the current page of items.
  */
 function renderPage() {
+    if (isAllBooksMode) {
+        // Server has already filtered, sorted, and sliced — render directly.
+        renderGrid(allItems);
+        renderPagination(allBooksTotal);
+        updateFilterBar();
+        return;
+    }
+
     const filteredItems = getFilteredItems();
 
     const startIndex = (currentPage - 1) * itemsPerPage;
@@ -2234,6 +2369,15 @@ function renderPagination(totalItems) {
  * @param {number} page - The page number to switch to.
  */
 function changePage(page) {
+    if (isAllBooksMode) {
+        const totalPages = Math.max(1, Math.ceil((allBooksTotal || 0) / itemsPerPage));
+        if (page < 1 || page > totalPages) return;
+        currentPage = page;
+        fetchAllBooksPage();
+        document.getElementById('file-grid').scrollIntoView({ behavior: 'smooth' });
+        return;
+    }
+
     const filteredItems = getFilteredItems();
     const totalPages = Math.ceil(filteredItems.length / itemsPerPage);
     if (page < 1 || page > totalPages) return;
@@ -2261,6 +2405,10 @@ function jumpToPage(page) {
 function changeItemsPerPage(value) {
     itemsPerPage = parseInt(value);
     currentPage = 1;
+    if (isAllBooksMode) {
+        fetchAllBooksPage();
+        return;
+    }
     renderPage();
     loadVisiblePageData();
 }
@@ -2275,18 +2423,29 @@ function updateFilterBar() {
     const btnGroup = filterContainer.querySelector('.btn-group');
     if (!btnGroup) return;
 
-    // Only filter based on directories and files
     let availableLetters = new Set();
     let hasNonAlpha = false;
 
-    allItems.forEach(item => {
-        const firstChar = item.name.charAt(0).toUpperCase();
-        if (firstChar >= 'A' && firstChar <= 'Z') {
-            availableLetters.add(firstChar);
-        } else {
-            hasNonAlpha = true;
-        }
-    });
+    if (isAllBooksMode) {
+        // Letters come from the server (covers the full filtered universe,
+        // not just the current page).
+        (allBooksLetters || []).forEach(letter => {
+            if (letter === '#') {
+                hasNonAlpha = true;
+            } else if (letter && letter.length === 1) {
+                availableLetters.add(letter.toUpperCase());
+            }
+        });
+    } else {
+        allItems.forEach(item => {
+            const firstChar = item.name.charAt(0).toUpperCase();
+            if (firstChar >= 'A' && firstChar <= 'Z') {
+                availableLetters.add(firstChar);
+            } else {
+                hasNonAlpha = true;
+            }
+        });
+    }
 
     // Build filter buttons
     let buttonsHtml = '';
@@ -2306,7 +2465,8 @@ function updateFilterBar() {
     btnGroup.innerHTML = buttonsHtml;
 
     // Show the filter bar if we have items
-    if (allItems.length > 0) {
+    const totalItems = isAllBooksMode ? (allBooksTotal || 0) : allItems.length;
+    if (totalItems > 0 || availableLetters.size > 0 || hasNonAlpha) {
         filterContainer.style.display = 'block';
     } else {
         filterContainer.style.display = 'none';
@@ -2318,7 +2478,7 @@ function updateFilterBar() {
         // Check if search input already exists
         let existingInput = document.getElementById('gridSearch');
 
-        if (allItems.length > 25) {
+        if (totalItems > 25) {
             // Only create input if it doesn't exist
             if (!existingInput) {
                 searchRow.innerHTML = `<input type="text" id="gridSearch" class="form-control form-control-sm" placeholder="Type to filter..." oninput="onGridSearch(this.value)">`;
@@ -2368,6 +2528,10 @@ function filterItems(letter) {
 
     // Reset to first page and re-render
     currentPage = 1;
+    if (isAllBooksMode) {
+        fetchAllBooksPage();
+        return;
+    }
     renderPage();
     loadVisiblePageData();
 }
@@ -2745,7 +2909,13 @@ function fetchMetadataCollection(filePath, fileName, forceProvider) {
         getLibraryId: function () { return currentCollectionLibraryId; },
         onMetadataFound: function () {
             refreshThumbnail(filePath);
-            loadDirectory(currentPath, true);
+            if (isMissingXmlMode) {
+                const index = allItems.findIndex(i => i.path === filePath);
+                if (index !== -1) allItems.splice(index, 1);
+                renderPage();
+            } else {
+                loadDirectory(currentPath, true);
+            }
         },
         onBatchComplete: function () {
             loadDirectory(currentPath, true);
@@ -3092,11 +3262,11 @@ void 0;
 document.addEventListener('DOMContentLoaded', () => {
     // Add event listener for Update XML confirm button
     const updateXmlBtn = document.getElementById('updateXmlConfirmBtn');
-    if (updateXmlBtn) updateXmlBtn.addEventListener('click', submitUpdateXml);
+    if (updateXmlBtn) updateXmlBtn.addEventListener('click', CLU.submitUpdateXml);
 
     // Add event listener for Update XML field dropdown change
     const updateXmlFieldSelect = document.getElementById('updateXmlField');
-    if (updateXmlFieldSelect) updateXmlFieldSelect.addEventListener('change', updateXmlFieldChanged);
+    if (updateXmlFieldSelect) updateXmlFieldSelect.addEventListener('change', CLU.updateXmlFieldChanged);
 });
 
 
@@ -3844,25 +4014,27 @@ async function markAsUnread(path) {
  * Open the comic reader for a specific file path
  * @param {string} path - Full path to the comic file
  */
-function openReaderForFile(path) {
-    // Navigate to the parent folder first, then open the reader
+async function openReaderForFile(path) {
     const parentPath = path.substring(0, path.lastIndexOf('/'));
     const fileName = path.substring(path.lastIndexOf('/') + 1);
 
-    // Set up so clicking opens the reader directly
-    loadDirectory(parentPath).then(() => {
-        // Find and click the file's grid item to open reader
-        setTimeout(() => {
-            const gridItems = document.querySelectorAll('.grid-item');
-            for (const item of gridItems) {
-                const itemName = item.querySelector('.item-name')?.textContent;
-                if (itemName === fileName) {
-                    item.click();
-                    break;
-                }
-            }
-        }, 500);
-    });
+    await loadDirectory(parentPath);
+
+    const target = allItems.find(i => i.type === 'file' && i.name === fileName);
+    if (!target) {
+        CLU.showToast('Open Reader', 'File no longer in this folder.', 'warning');
+        return;
+    }
+
+    // Jump to the page containing the target so closing the reader leaves the user in context.
+    const filtered = getFilteredItems();
+    const idx = filtered.indexOf(target);
+    const page = idx >= 0 ? Math.floor(idx / itemsPerPage) + 1 : 1;
+    if (page !== currentPage) {
+        changePage(page);
+    }
+
+    openFileDefault(target);
 }
 
 /**

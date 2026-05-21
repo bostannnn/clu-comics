@@ -816,6 +816,7 @@ function createListItem(itemName, fullPath, type, panel, isDraggable) {
             filesUiConfig.hasCustomMovePattern &&
             isPathInConfiguredLibrary(fullPath)
           ) ? function () { applyFolderRenamePatternToDirectory(fullPath, panel); } : null,
+          onSmartRename: function () { runSmartRename(fullPath, panel); },
           onConvertCbrToCbz: function () { executeScriptOnDirectory('convert', fullPath, panel); },
           onRebuildAllFiles: function () { executeScriptOnDirectory('rebuild', fullPath, panel); },
           onConvertPdfToCbz: function () { executeScriptOnDirectory('pdf', fullPath, panel); },
@@ -1967,6 +1968,7 @@ function loadTrash(panel) {
             <div class="small text-muted mt-1">
               <span>${CLU.formatFileSize(item.size)}</span>
               <span class="ms-2"><i class="bi bi-clock me-1"></i>${CLU.escapeHtml(timeAgo)}</span>
+              ${item.original_path ? `<span class="ms-2" title="${CLU.escapeHtml(item.original_path)}"><i class="bi bi-arrow-return-left me-1"></i>${CLU.escapeHtml(truncatePath(item.original_path))}</span>` : ''}
             </div>
           </div>
         `;
@@ -1976,27 +1978,47 @@ function loadTrash(panel) {
         iconContainer.className = 'btn-group';
         iconContainer.setAttribute('role', 'group');
 
-        const dropdownBtn = createFilesActionMenuButton('btn btn-sm btn-outline-secondary', 'More options', function (menu) {
-          if (item.is_dir) {
-            CLU.populateFolderActionMenu(menu, {
-              onDelete: function () { permanentlyDeleteTrashItem(item.name, dropdownBtn); }
-            });
-          } else {
-            CLU.populateIssueActionMenu(menu, {
-              extraPostReadingActions: [{
-                label: 'Info',
-                icon: 'bi bi-info-circle',
-                onClick: function () {
-                  const dirPath = item.path.substring(0, item.path.lastIndexOf('/'));
-                  showCBZInfo(item.path, item.name, dirPath, []);
-                },
-                className: 'dropdown-item'
-              }],
-              onDelete: function () { permanentlyDeleteTrashItem(item.name, dropdownBtn); }
-            });
-          }
-        });
-        iconContainer.appendChild(dropdownBtn);
+        // Restore button
+        const restoreBtn = document.createElement('button');
+        restoreBtn.className = 'btn btn-sm btn-outline-success';
+        restoreBtn.innerHTML = '<i class="bi bi-arrow-counterclockwise"></i>';
+        restoreBtn.title = item.original_path
+          ? `Restore to ${item.original_path}`
+          : 'No original path recorded — use drag and drop';
+        restoreBtn.disabled = !item.original_path;
+        restoreBtn.setAttribute('type', 'button');
+        restoreBtn.onclick = function (e) {
+          e.stopPropagation();
+          restoreTrashItem(item.name, item.original_path, restoreBtn);
+        };
+        iconContainer.appendChild(restoreBtn);
+
+        // CBZ info button (files only)
+        if (!item.is_dir) {
+          const infoBtn = document.createElement('button');
+          infoBtn.className = 'btn btn-sm btn-outline-info';
+          infoBtn.innerHTML = '<i class="bi bi-eye"></i>';
+          infoBtn.title = 'CBZ Information';
+          infoBtn.setAttribute('type', 'button');
+          infoBtn.onclick = function (e) {
+            e.stopPropagation();
+            const dirPath = item.path.substring(0, item.path.lastIndexOf('/'));
+            showCBZInfo(item.path, item.name, dirPath, []);
+          };
+          iconContainer.appendChild(infoBtn);
+        }
+
+        // Permanently delete button
+        const permDeleteBtn = document.createElement('button');
+        permDeleteBtn.className = 'btn btn-sm btn-outline-danger';
+        permDeleteBtn.innerHTML = '<i class="bi bi-x-lg"></i>';
+        permDeleteBtn.title = 'Permanently delete';
+        permDeleteBtn.setAttribute('type', 'button');
+        permDeleteBtn.onclick = function (e) {
+          e.stopPropagation();
+          permanentlyDeleteTrashItem(item.name, permDeleteBtn);
+        };
+        iconContainer.appendChild(permDeleteBtn);
 
         fileItem.appendChild(leftContainer);
         fileItem.appendChild(iconContainer);
@@ -2104,6 +2126,34 @@ function permanentlyDeleteTrashItem(name, btnEl) {
       }
     })
     .catch(err => CLU.showError('Error: ' + err.message));
+}
+
+function restoreTrashItem(name, originalPath, btnEl) {
+  fetch('/api/trash/restore', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name })
+  })
+    .then(r => r.json())
+    .then(data => {
+      if (data.success) {
+        const li = btnEl.closest('li');
+        if (li) li.remove();
+        updateTrashBadge();
+        CLU.showSuccess(`Restored to ${data.restored_path}`);
+      } else if (data.conflict) {
+        CLU.showError(`Cannot restore: a file already exists at ${data.original_path}`);
+      } else {
+        CLU.showError(data.error || 'Failed to restore item');
+      }
+    })
+    .catch(err => CLU.showError('Error: ' + err.message));
+}
+
+function truncatePath(fullPath) {
+  const parts = fullPath.replace(/\\/g, '/').split('/').filter(Boolean);
+  if (parts.length <= 3) return fullPath;
+  return '.../' + parts.slice(-3).join('/');
 }
 
 // Helper function to format date/time
@@ -6357,11 +6407,150 @@ function bulkRemoveXmlFromDirectory(directoryPath, panel) {
   modal.show();
 }
 
+// ============================================================================
+// SMART RENAME
+// ============================================================================
+
+async function runSmartRename(directoryPath, panel) {
+  const libraryId = getLibraryIdForPanel(panel);
+  const folderName = directoryPath.split('/').pop() || directoryPath;
+  let previewEnabled = true;
+  try {
+    const resp = await fetch('/api/preferences/smart_rename_preview_enabled');
+    if (resp.ok) {
+      const j = await resp.json();
+      if (j && typeof j.value !== 'undefined' && j.value !== null) {
+        previewEnabled = j.value !== false && j.value !== 0 && j.value !== '0';
+      }
+    }
+  } catch (_) { /* default true */ }
+
+  CLU.showToast('Smart Rename', `Building plan for ${folderName}...`, 'info');
+  let planResp;
+  try {
+    planResp = await fetch('/smart-rename/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ directory: directoryPath, library_id: libraryId })
+    });
+  } catch (e) {
+    CLU.showToast('Smart Rename Error', e.message, 'error');
+    return;
+  }
+  const planJson = await planResp.json();
+  if (!planResp.ok || planJson.error) {
+    CLU.showToast('Smart Rename Error', planJson.error || `HTTP ${planResp.status}`, 'error');
+    return;
+  }
+  const plan = planJson.plan;
+  if (plan && plan.error) {
+    CLU.showToast('Smart Rename Error', plan.error, 'error');
+    return;
+  }
+
+  if (!previewEnabled) {
+    await applySmartRenamePlan(plan, panel);
+    return;
+  }
+
+  showSmartRenameModal(plan, panel);
+}
+
+function showSmartRenameModal(plan, panel) {
+  const summaryEl = document.getElementById('smartRenameSummary');
+  const tbody = document.getElementById('smartRenameTbody');
+  const issuesEl = document.getElementById('smartRenameIssues');
+  const applyBtn = document.getElementById('smartRenameApplyBtn');
+
+  tbody.innerHTML = '';
+  issuesEl.innerHTML = '';
+
+  let okCount = 0;
+  let skipCount = 0;
+  const issues = [];
+
+  for (const dir of (plan.directories || [])) {
+    if (dir.status !== 'ok') {
+      const reason = dir.reason ? ` — ${dir.reason}` : '';
+      issues.push(`<li><code>${escapeHtml(dir.dir)}</code>: ${escapeHtml(dir.status)}${escapeHtml(reason)}</li>`);
+      continue;
+    }
+    for (const f of (dir.files || [])) {
+      if (f.status === 'ok') {
+        okCount++;
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td class="text-muted small text-truncate" style="max-width:300px" title="${escapeHtml(f.old_path)}">${escapeHtml(f.old_name)}</td>
+          <td class="small text-truncate" style="max-width:300px" title="${escapeHtml(f.new_path)}">${escapeHtml(f.new_name)}</td>`;
+        tbody.appendChild(tr);
+      } else {
+        skipCount++;
+        const label = f.status === 'excluded_term'
+          ? `skipped (matched "${escapeHtml(f.matched_term || '')}")`
+          : escapeHtml(f.status);
+        issues.push(`<li><code>${escapeHtml(f.old_name)}</code>: ${label}</li>`);
+      }
+    }
+  }
+
+  summaryEl.textContent = `${okCount} file(s) will be renamed. ${skipCount} skipped.`;
+  issuesEl.innerHTML = issues.length ? `<details class="mt-2"><summary class="text-muted small">Issues (${issues.length})</summary><ul class="small mt-2">${issues.join('')}</ul></details>` : '';
+
+  applyBtn.disabled = okCount === 0;
+  applyBtn.onclick = async () => {
+    applyBtn.disabled = true;
+    applyBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Renaming...';
+    const ok = await applySmartRenamePlan(plan, panel);
+    const modal = bootstrap.Modal.getInstance(document.getElementById('smartRenamePreviewModal'));
+    if (modal) modal.hide();
+    applyBtn.innerHTML = '<i class="bi bi-check2 me-1"></i>Apply';
+    applyBtn.disabled = !ok;
+  };
+
+  const modalEl = document.getElementById('smartRenamePreviewModal');
+  const modal = new bootstrap.Modal(modalEl);
+  modal.show();
+}
+
+async function applySmartRenamePlan(plan, panel) {
+  try {
+    const resp = await fetch('/smart-rename', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ plan })
+    });
+    const j = await resp.json();
+    if (!resp.ok || j.error) {
+      CLU.showToast('Smart Rename Error', j.error || `HTTP ${resp.status}`, 'error');
+      return false;
+    }
+    const s = j.summary || {};
+    const msg = `Renamed ${s.renamed || 0}, skipped ${s.skipped || 0}, failed ${s.failed || 0}`;
+    CLU.showToast('Smart Rename', msg, (s.failed || 0) > 0 ? 'warning' : 'success');
+    const currentPath = panel === 'source' ? currentSourcePath : currentDestinationPath;
+    if (currentPath) loadDirectories(currentPath, panel);
+    return true;
+  } catch (e) {
+    CLU.showToast('Smart Rename Error', e.message, 'error');
+    return false;
+  }
+}
+
+function escapeHtml(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 /**
  * Execute a script operation on a directory
  * Contract setup wrapper for CLU.executeDirectoryOp
  */
-function executeScriptOnDirectory(scriptType, directoryPath, panel) {
+function executeScriptOnDirectory(scriptType, directoryPath, panel, options) {
   // Set up streaming contract for files.js page-specific behavior
   window._cluStreaming = {
     onComplete: function (type, path) {
@@ -6370,7 +6559,7 @@ function executeScriptOnDirectory(scriptType, directoryPath, panel) {
     },
     onError: function () {}
   };
-  CLU.executeDirectoryOp(scriptType, directoryPath);
+  CLU.executeDirectoryOp(scriptType, directoryPath, options || {});
 }
 
 /**
