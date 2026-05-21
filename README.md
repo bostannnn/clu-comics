@@ -39,7 +39,6 @@ Here's a quick list of features
 Copy the following and edit the environment variables
 
 ```yaml
-version: '3.9'
 services:
     comic-utils:
         image: allaboutduncan/comic-utils-web:latest
@@ -54,8 +53,8 @@ services:
         ports:
             - '5577:5577'
         volumes:
-            - "/path/to/local/config:/config" # Maps local folder to persist settings
-            - "/path/to/local/cache:/cache" # Maps to local folder for thumbnail cache (the SQLite DB lives in /config)
+            - 'config-volume:/config' # Maps to a Docker Volume for Database Storage and Backups
+            - "/path/to/local/cache:/cache" # Maps to local folder for thumbnail cache
             ## update the line below to map to your library.
             ## Map your first/main library to /data
             - "/e/Comics:/data"
@@ -80,6 +79,8 @@ services:
             ### You can enable basic authentication by setting the two values below
             ## CLU_USERNAME=[username] - Set the username for the app.
             ## CLU_PASSWORD=[password] - Set the password for the app.
+volumes:
+  config-volume: # Now required for Database Storage and Backups
 ```
 
 __Update your Docker Compose:__ Mapping the `/config` directory is required now to ensure that config settings are persisted on updates.
