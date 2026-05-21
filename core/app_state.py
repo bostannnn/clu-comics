@@ -85,7 +85,7 @@ def cancel_operation(op_id):
         op = _operations.get(op_id)
         if op is None:
             return False
-        if op["status"] == "running":
+        if op["status"] not in ("completed", "cancelled"):
             op["cancel_requested"] = True
             op["detail"] = "Cancel requested..."
             op["updated_at"] = time.time()

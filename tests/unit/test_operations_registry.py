@@ -90,6 +90,20 @@ class TestRegisterOperation:
         assert op["cancel_requested"] is True
         assert op["detail"] == "Cancel requested..."
 
+    def test_cancel_stale_error_operation_sets_cancel_flag(self):
+        op_id = app_state.register_operation("metadata", "X-Men", total=10)
+        with app_state._operations_lock:
+            app_state._operations[op_id]["status"] = "error"
+            app_state._operations[op_id]["detail"] = "Operation stalled"
+
+        assert app_state.cancel_operation(op_id) is True
+        assert app_state.is_operation_cancelled(op_id) is True
+        ops = app_state.get_active_operations()
+        op = ops[0]
+        assert op["status"] == "error"
+        assert op["cancel_requested"] is True
+        assert op["detail"] == "Cancel requested..."
+
     def test_complete_with_cancelled(self):
         op_id = app_state.register_operation("metadata", "X-Men", total=10)
         app_state.update_operation(op_id, current=4)

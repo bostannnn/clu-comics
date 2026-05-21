@@ -133,6 +133,41 @@ class TestAsText:
         assert _as_text(42) == "42"
 
 
+class TestComicVineVolumeResolution:
+
+    @patch("routes.metadata.comicvine.write_cvinfo_fields")
+    @patch("routes.metadata.comicvine.get_volume_details", return_value={
+        "start_year": 2016,
+        "publisher_name": "DC Comics",
+    })
+    def test_resolve_volume_data_can_skip_cvinfo_write(
+        self,
+        mock_get_volume_details,
+        mock_write_cvinfo_fields,
+        tmp_path,
+    ):
+        from routes.metadata import _resolve_comicvine_volume_data
+
+        cvinfo = tmp_path / "cvinfo"
+        cvinfo.write_text(
+            "https://comicvine.gamespot.com/volume/4050-4050/\n",
+            encoding="utf-8",
+        )
+
+        volume = _resolve_comicvine_volume_data(
+            "test-key",
+            4050,
+            {"volume_name": "Batman"},
+            cvinfo_path=str(cvinfo),
+            update_cvinfo=False,
+        )
+
+        assert volume["publisher_name"] == "DC Comics"
+        assert volume["start_year"] == 2016
+        mock_get_volume_details.assert_called_once_with("test-key", 4050)
+        mock_write_cvinfo_fields.assert_not_called()
+
+
 class TestCvinfoRoutes:
 
     def test_get_cvinfo_returns_structured_fields(self, client, tmp_path):
@@ -1130,6 +1165,39 @@ class TestSearchMetadataParsedFilename:
 
     @patch("routes.metadata.app_state.complete_operation")
     @patch("routes.metadata.app_state.update_operation")
+    @patch("routes.metadata.app_state.register_operation", return_value="op-timeout")
+    @patch("routes.metadata._try_comicvine_single")
+    @patch("models.comicvine.find_cvinfo_in_folder", return_value=None)
+    def test_search_metadata_force_provider_timeout_returns_504(
+        self,
+        mock_cvinfo,
+        mock_try_comicvine,
+        mock_register_op,
+        mock_update_op,
+        mock_complete_op,
+        client,
+    ):
+        from routes.metadata import MetadataProviderTimeoutError
+
+        mock_try_comicvine.side_effect = MetadataProviderTimeoutError(
+            "ComicVine timed out while fetching issue 1 after 0.01s"
+        )
+        client.application.config["COMICVINE_API_KEY"] = "test-key"
+
+        resp = client.post('/api/search-metadata', json={
+            'file_path': '/data/Batman 001 (2020).cbz',
+            'file_name': 'Batman 001 (2020).cbz',
+            'force_provider': 'comicvine',
+        })
+
+        assert resp.status_code == 504
+        data = resp.get_json()
+        assert data["success"] is False
+        assert "ComicVine timed out" in data["error"]
+        mock_complete_op.assert_called_once_with("op-timeout", error=True)
+
+    @patch("routes.metadata.app_state.complete_operation")
+    @patch("routes.metadata.app_state.update_operation")
     @patch("routes.metadata.app_state.register_operation", return_value="op-456")
     @patch("routes.metadata._try_comicvine_single", side_effect=RuntimeError("boom"))
     @patch("models.comicvine.find_cvinfo_in_folder", return_value=None)
@@ -1742,9 +1810,7 @@ class TestComicVineVolumeYearHandling:
         assert metadata["Volume"] == 2016
         assert volume_data["start_year"] == 2016
         mock_get_volume_details.assert_called_once_with("test-key", 4050)
-        mock_write_cvinfo.assert_called_once_with(
-            "/data/Batman/cvinfo", "DC Comics", 2016
-        )
+        mock_write_cvinfo.assert_not_called()
 
 
 class TestBatchForceMetadata:
@@ -1901,6 +1967,60 @@ class TestBatchForceMetadata:
         assert data["possible_matches"][0]["id"] == 501
         mock_search_candidates.assert_called_once()
         mock_parse_cvinfo.assert_not_called()
+
+    @patch("routes.metadata.metron.create_cvinfo_file")
+    @patch("routes.metadata.metron.get_series_details")
+    @patch("routes.metadata.comicvine.parse_cvinfo_volume_id")
+    @patch("routes.metadata.is_valid_library_path", return_value=True)
+    @patch("routes.metadata.gcd.is_mysql_available", return_value=False)
+    @patch("routes.metadata.metron.get_flask_api", return_value=MagicMock())
+    @patch("routes.metadata.metron.is_metron_configured", return_value=True)
+    def test_force_batch_metron_selected_series_timeout_does_not_write_cvinfo(
+        self,
+        mock_metron_configured,
+        mock_get_flask_api,
+        mock_gcd_available,
+        mock_valid_library_path,
+        mock_parse_cvinfo,
+        mock_get_series_details,
+        mock_create_cvinfo,
+        client,
+        tmp_path,
+    ):
+        import threading
+
+        batch_dir = tmp_path / "data" / "Batman (2020)"
+        batch_dir.mkdir(parents=True)
+        (batch_dir / "cvinfo").write_text(
+            "https://comicvine.gamespot.com/volume/4050-9999/\n",
+            encoding="utf-8",
+        )
+        _make_cbz(str(batch_dir / "Batman 001 (2020).cbz"), with_comicinfo=False)
+
+        def slow_series_details(*args, **kwargs):
+            threading.Event().wait(0.05)
+            return {
+                "id": 501,
+                "cv_id": 4050,
+                "publisher_name": "DC Comics",
+                "year_began": 2016,
+            }
+
+        mock_get_series_details.side_effect = slow_series_details
+        client.application.config["METADATA_PROVIDER_TIMEOUT"] = 0.01
+
+        resp = client.post("/api/batch-metadata", json={
+            "directory": str(batch_dir),
+            "series_id": 501,
+            "force_manual_selection": True,
+            "force_provider": "metron",
+            "overwrite_existing_metadata": True,
+        })
+
+        assert resp.status_code == 504
+        assert "Metron timed out" in resp.get_json()["error"]
+        mock_create_cvinfo.assert_not_called()
+        assert "4050-9999" in (batch_dir / "cvinfo").read_text(encoding="utf-8")
 
     @patch("routes.metadata._search_manga_provider_candidates")
     @patch("routes.metadata.is_valid_library_path", return_value=True)
@@ -2414,7 +2534,72 @@ class TestBatchForceMetadata:
         data = resp.get_json()
         assert data["cancelled"] is True
         assert data["op_id"] == "client-op"
-        mock_search_volumes.assert_called_once_with("test-key", "Batman", 2020)
+        mock_search_volumes.assert_not_called()
+
+    @patch("routes.metadata._cancelable_sleep", return_value=False)
+    @patch("core.database.update_file_index_from_comicinfo")
+    @patch("cbz_ops.rename.rename_comic_from_metadata", side_effect=lambda file_path, metadata: (file_path, False))
+    @patch("routes.metadata.add_comicinfo_to_cbz")
+    @patch("routes.metadata.comicvine.get_issue_by_number")
+    @patch("routes.metadata.is_valid_library_path", return_value=True)
+    @patch("routes.metadata.gcd.is_mysql_available", return_value=False)
+    @patch("routes.metadata.metron.is_metron_configured", return_value=False)
+    def test_batch_metadata_provider_timeout_marks_file_error(
+        self,
+        mock_metron_configured,
+        mock_gcd_available,
+        mock_valid_library_path,
+        mock_get_issue_by_number,
+        mock_add_xml,
+        mock_rename,
+        mock_update_index,
+        mock_cancelable_sleep,
+        client,
+        tmp_path,
+    ):
+        import threading
+
+        batch_dir = tmp_path / "data" / "Batman (2020)"
+        batch_dir.mkdir(parents=True)
+        (batch_dir / "cvinfo").write_text(
+            "https://comicvine.gamespot.com/volume/4050-4050/\n"
+            "publisher_name: DC Comics\n"
+            "start_year: 2016\n",
+            encoding="utf-8",
+        )
+        _make_cbz(str(batch_dir / "Batman 001 (2020).cbz"), with_comicinfo=False)
+
+        def slow_issue_lookup(*args, **kwargs):
+            threading.Event().wait(0.05)
+            return {
+                "id": 1001,
+                "name": "Late Result",
+                "issue_number": "1",
+                "volume_name": "Batman",
+                "volume_id": 4050,
+                "publisher": None,
+                "year": 2020,
+                "month": 7,
+                "day": 5,
+                "description": "Too slow",
+                "image_url": None,
+            }
+
+        mock_get_issue_by_number.side_effect = slow_issue_lookup
+        client.application.config["COMICVINE_API_KEY"] = "test-key"
+        client.application.config["METADATA_PROVIDER_TIMEOUT"] = 0.01
+
+        resp = client.post("/api/batch-metadata", json={
+            "directory": str(batch_dir),
+            "overwrite_existing_metadata": True,
+        })
+
+        assert resp.status_code == 200
+        body = resp.get_data(as_text=True)
+        assert '"type": "complete"' in body
+        assert "ComicVine timed out" in body
+        assert '"errors": 1' in body
+        mock_add_xml.assert_not_called()
 
 
 class TestBatchMetadataRenameUpdatesIndex:

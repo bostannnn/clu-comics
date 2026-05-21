@@ -29,6 +29,18 @@ _METADATA_HTTP_TIMEOUT = 30
 if not hasattr(requests_lib.sessions.Session, "_clu_timeout_lock"):
     requests_lib.sessions.Session._clu_timeout_lock = threading.RLock()
 _REQUEST_TIMEOUT_LOCK = requests_lib.sessions.Session._clu_timeout_lock
+_RATE_LIMIT_CONTEXT = threading.local()
+
+
+@contextmanager
+def no_rate_limit_sleep():
+    """Disable long Metron rate-limit sleeps for latency-sensitive callers."""
+    previous = getattr(_RATE_LIMIT_CONTEXT, "no_sleep", False)
+    _RATE_LIMIT_CONTEXT.no_sleep = True
+    try:
+        yield
+    finally:
+        _RATE_LIMIT_CONTEXT.no_sleep = previous
 
 
 @contextmanager
@@ -56,6 +68,11 @@ def _handle_rate_limit(e: "RateLimitError", attempt: int, context: str) -> bool:
     or the daily API rate limit has been exceeded.
     """
     wait = e.retry_after if e.retry_after else _RATE_LIMIT_DEFAULT_WAIT
+    if getattr(_RATE_LIMIT_CONTEXT, "no_sleep", False):
+        app_logger.info(
+            f"Metron rate limit hit {context}: retry_after={wait}s, not sleeping for this metadata request"
+        )
+        return False
     if e.retry_after and e.retry_after > _DAILY_RATE_LIMIT_THRESHOLD:
         app_logger.info(
             f"Metron daily rate limit exceeded {context}: retry_after={e.retry_after}s, giving up"

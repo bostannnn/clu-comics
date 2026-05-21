@@ -130,6 +130,22 @@ class TestSearchSeriesByName:
         from models.metron import search_series_by_name
         assert search_series_by_name(None, "Batman") is None
 
+    @patch("models.metron.time.sleep")
+    def test_no_rate_limit_sleep_returns_without_retry_delay(self, mock_sleep):
+        from models.metron import no_rate_limit_sleep, search_series_by_name
+        from mokkari.exceptions import RateLimitError
+
+        rate_limit_error = RateLimitError("rate limited")
+        rate_limit_error.retry_after = 60
+        mock_api = MagicMock()
+        mock_api.series_list.side_effect = rate_limit_error
+
+        with no_rate_limit_sleep():
+            assert search_series_by_name(mock_api, "Batman") is None
+
+        mock_sleep.assert_not_called()
+        assert mock_api.series_list.call_count == 1
+
 
 class TestGetSeriesDetails:
 

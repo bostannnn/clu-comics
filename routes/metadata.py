@@ -22,6 +22,7 @@ import threading
 import traceback
 import xml.etree.ElementTree as ET
 import mysql.connector
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime
 from contextlib import contextmanager
 from flask import (Blueprint, request, jsonify, Response,
@@ -38,6 +39,66 @@ metadata_bp = Blueprint('metadata', __name__)
 
 _comicinfo_write_locks = {}
 _comicinfo_write_locks_guard = threading.Lock()
+_metadata_provider_executor = ThreadPoolExecutor(
+    max_workers=8,
+    thread_name_prefix="metadata-provider",
+)
+_METADATA_PROVIDER_TIMEOUT_SECONDS = 45.0
+
+
+class MetadataProviderTimeoutError(RuntimeError):
+    """Raised when a metadata provider call exceeds the batch timeout."""
+
+
+def _metadata_provider_timeout_seconds():
+    try:
+        configured = current_app.config.get(
+            "METADATA_PROVIDER_TIMEOUT",
+            _METADATA_PROVIDER_TIMEOUT_SECONDS,
+        )
+    except RuntimeError:
+        configured = _METADATA_PROVIDER_TIMEOUT_SECONDS
+
+    try:
+        timeout = float(configured)
+    except (TypeError, ValueError):
+        timeout = _METADATA_PROVIDER_TIMEOUT_SECONDS
+    return max(timeout, 0.0)
+
+
+def _run_metadata_provider_call(provider_name, action, func, timeout=None):
+    """Run a blocking provider call behind a bounded wait."""
+    timeout = _metadata_provider_timeout_seconds() if timeout is None else float(timeout)
+    if timeout <= 0:
+        if provider_name == "Metron":
+            with metron.no_rate_limit_sleep():
+                return func()
+        return func()
+
+    def call_provider():
+        if provider_name == "Metron":
+            with metron.no_rate_limit_sleep():
+                return func()
+        return func()
+
+    future = _metadata_provider_executor.submit(call_provider)
+    try:
+        return future.result(timeout=timeout)
+    except FutureTimeoutError as exc:
+        future.cancel()
+        raise MetadataProviderTimeoutError(
+            f"{provider_name} timed out while {action} after {timeout:g}s"
+        ) from exc
+
+
+def _cancelable_sleep(seconds, cancel_requested, interval=0.1):
+    """Sleep in small chunks so cancel requests can stop rate-limit waits."""
+    deadline = time.time() + max(float(seconds or 0), 0.0)
+    while time.time() < deadline:
+        if cancel_requested():
+            return True
+        time.sleep(min(interval, deadline - time.time()))
+    return cancel_requested()
 
 
 # =============================================================================
@@ -303,6 +364,7 @@ def _resolve_comicvine_volume_data(
     publisher_name=None,
     start_year=None,
     cvinfo_path=None,
+    update_cvinfo=True,
 ):
     """Build canonical ComicVine volume context from cache plus authoritative API data."""
     volume_data = {
@@ -327,7 +389,7 @@ def _resolve_comicvine_volume_data(
     if volume_details.get('publisher_name'):
         volume_data['publisher_name'] = volume_details.get('publisher_name')
 
-    if cvinfo_path and os.path.exists(cvinfo_path):
+    if update_cvinfo and cvinfo_path and os.path.exists(cvinfo_path):
         if volume_details.get('start_year') or volume_details.get('publisher_name'):
             comicvine.write_cvinfo_fields(
                 cvinfo_path,
@@ -336,6 +398,17 @@ def _resolve_comicvine_volume_data(
             )
 
     return volume_data
+
+
+def _write_comicvine_volume_fields_after_fetch(cvinfo_path, volume_data):
+    """Persist fetched ComicVine volume fields after timeout/cancel checks pass."""
+    if not cvinfo_path or not volume_data or not os.path.exists(cvinfo_path):
+        return
+    comicvine.write_cvinfo_fields(
+        cvinfo_path,
+        volume_data.get('publisher_name'),
+        volume_data.get('start_year'),
+    )
 
 
 _MONTH_TOKEN_RE = re.compile(
@@ -546,6 +619,24 @@ def _write_selected_comicvine_cvinfo(cvinfo_path, api_key, volume_id):
     return volume_details
 
 
+def _fetch_selected_comicvine_volume_details(api_key, volume_id):
+    """Fetch selected ComicVine volume details without writing cvinfo."""
+    return comicvine.get_volume_details(api_key, volume_id)
+
+
+def _write_selected_comicvine_cvinfo_fields(cvinfo_path, volume_id, volume_details=None):
+    """Write selected ComicVine cvinfo after provider fetch completes."""
+    url = f"https://comicvine.gamespot.com/volume/4050-{volume_id}/"
+    with open(cvinfo_path, 'w', encoding='utf-8') as f:
+        f.write(url)
+    if volume_details:
+        comicvine.write_cvinfo_fields(
+            cvinfo_path,
+            volume_details.get('publisher_name'),
+            volume_details.get('start_year'),
+        )
+
+
 def _write_selected_metron_cvinfo(cvinfo_path, metron_api, series_id):
     """Overwrite folder cvinfo with the selected Metron series and any linked ComicVine context."""
     series_details = metron.get_series_details(metron_api, series_id)
@@ -560,6 +651,24 @@ def _write_selected_metron_cvinfo(cvinfo_path, metron_api, series_id):
         start_year=series_details.get('year_began'),
     )
     return series_details
+
+
+def _fetch_selected_metron_series_details(metron_api, series_id):
+    """Fetch selected Metron series details without writing cvinfo."""
+    return metron.get_series_details(metron_api, series_id)
+
+
+def _write_selected_metron_cvinfo_fields(cvinfo_path, series_id, series_details):
+    """Write selected Metron cvinfo after provider fetch completes."""
+    if not series_details:
+        return False
+    return metron.create_cvinfo_file(
+        cvinfo_path,
+        cv_id=series_details.get('cv_id'),
+        series_id=series_id,
+        publisher_name=series_details.get('publisher_name'),
+        start_year=series_details.get('year_began'),
+    )
 
 
 def generate_comicinfo_xml(issue_data, series_data=None):
@@ -1638,6 +1747,17 @@ def batch_metadata():
         if not os.path.exists(directory) or not os.path.isdir(directory):
             return jsonify({"error": "Directory not found"}), 404
 
+        op_id = app_state.register_operation(
+            "metadata",
+            os.path.basename(directory),
+            total=0,
+            op_id=requested_op_id or None,
+        )
+        app_state.update_operation(op_id, detail="Preparing metadata lookup...")
+
+        def cancel_requested():
+            return app_state.is_operation_cancelled(op_id)
+
         # Always load API credentials (needed for provider initialization)
         comicvine_api_key = current_app.config.get('COMICVINE_API_KEY', '')
 
@@ -1702,16 +1822,10 @@ def batch_metadata():
         app_logger.info(f"Extracted year from filename/folder: {extracted_year}")
 
         series_name = _extract_batch_series_name(directory, comic_files)
+        app_state.update_operation(op_id, total=len(comic_files), detail="Preparing metadata lookup...")
 
         def ensure_batch_operation(detail="Starting..."):
             nonlocal op_id
-            if not op_id:
-                op_id = app_state.register_operation(
-                    "metadata",
-                    os.path.basename(directory),
-                    total=len(comic_files),
-                    op_id=requested_op_id or None,
-                )
             app_state.update_operation(op_id, detail=detail)
             return op_id
 
@@ -1722,6 +1836,10 @@ def batch_metadata():
         def cancelled_response():
             complete_batch_operation(cancelled=True)
             return jsonify({"cancelled": True, "op_id": op_id})
+
+        def timeout_response(exc):
+            complete_batch_operation(error=True)
+            return jsonify({"error": str(exc), "op_id": op_id}), 504
 
         # Step 2: Check for cvinfo / resolve folder series context
         cvinfo_path = os.path.join(directory, 'cvinfo')
@@ -1749,6 +1867,7 @@ def batch_metadata():
 
         if force_manual_selection:
             if force_provider not in {'comicvine', 'metron', 'mangaupdates'}:
+                complete_batch_operation(error=True)
                 return jsonify({"error": "Force Fetch Metadata requires a valid provider"}), 400
 
             ensure_batch_operation(f"Preparing forced {force_provider} lookup...")
@@ -1764,8 +1883,18 @@ def batch_metadata():
 
                 if not selected_volume_id:
                     app_state.update_operation(op_id, detail="Searching ComicVine series...")
-                    volumes = comicvine.search_volumes(comicvine_api_key, series_name, extracted_year)
-                    if app_state.is_operation_cancelled(op_id):
+                    if cancel_requested():
+                        return cancelled_response()
+                    try:
+                        volumes = _run_metadata_provider_call(
+                            "ComicVine",
+                            f"searching series '{series_name}'",
+                            lambda: comicvine.search_volumes(comicvine_api_key, series_name, extracted_year),
+                        )
+                    except MetadataProviderTimeoutError as exc:
+                        app_logger.warning(str(exc))
+                        return timeout_response(exc)
+                    if cancel_requested():
                         return cancelled_response()
                     if not volumes:
                         complete_batch_operation(error=True)
@@ -1787,13 +1916,20 @@ def batch_metadata():
 
                 cv_volume_id = selected_volume_id
                 app_state.update_operation(op_id, detail="Writing selected ComicVine series...")
-                volume_details = _write_selected_comicvine_cvinfo(
-                    cvinfo_path,
-                    comicvine_api_key,
-                    cv_volume_id,
-                )
-                if app_state.is_operation_cancelled(op_id):
+                if cancel_requested():
                     return cancelled_response()
+                try:
+                    volume_details = _run_metadata_provider_call(
+                        "ComicVine",
+                        f"fetching selected volume {cv_volume_id}",
+                        lambda: _fetch_selected_comicvine_volume_details(comicvine_api_key, cv_volume_id),
+                    )
+                except MetadataProviderTimeoutError as exc:
+                    app_logger.warning(str(exc))
+                    return timeout_response(exc)
+                if cancel_requested():
+                    return cancelled_response()
+                _write_selected_comicvine_cvinfo_fields(cvinfo_path, cv_volume_id, volume_details)
                 cvinfo_created = True
                 if volume_details:
                     cvinfo_start_year = volume_details.get('start_year')
@@ -1805,12 +1941,22 @@ def batch_metadata():
 
                 if not selected_series_id:
                     app_state.update_operation(op_id, detail="Searching Metron series...")
-                    metron_matches = metron.search_series_candidates_by_name(
-                        metron_api,
-                        series_name,
-                        extracted_year,
-                    )
-                    if app_state.is_operation_cancelled(op_id):
+                    if cancel_requested():
+                        return cancelled_response()
+                    try:
+                        metron_matches = _run_metadata_provider_call(
+                            "Metron",
+                            f"searching series '{series_name}'",
+                            lambda: metron.search_series_candidates_by_name(
+                                metron_api,
+                                series_name,
+                                extracted_year,
+                            ),
+                        )
+                    except MetadataProviderTimeoutError as exc:
+                        app_logger.warning(str(exc))
+                        return timeout_response(exc)
+                    if cancel_requested():
                         return cancelled_response()
                     if not metron_matches:
                         complete_batch_operation(error=True)
@@ -1838,13 +1984,20 @@ def batch_metadata():
 
                 series_id = selected_series_id
                 app_state.update_operation(op_id, detail="Writing selected Metron series...")
-                series_details = _write_selected_metron_cvinfo(
-                    cvinfo_path,
-                    metron_api,
-                    series_id,
-                )
-                if app_state.is_operation_cancelled(op_id):
+                if cancel_requested():
                     return cancelled_response()
+                try:
+                    series_details = _run_metadata_provider_call(
+                        "Metron",
+                        f"fetching selected series {series_id}",
+                        lambda: _fetch_selected_metron_series_details(metron_api, series_id),
+                    )
+                except MetadataProviderTimeoutError as exc:
+                    app_logger.warning(str(exc))
+                    return timeout_response(exc)
+                if cancel_requested():
+                    return cancelled_response()
+                _write_selected_metron_cvinfo_fields(cvinfo_path, series_id, series_details)
                 cvinfo_created = True
                 metron_id_added = True
                 if series_details:
@@ -1861,12 +2014,22 @@ def batch_metadata():
 
                 if not selected_series_id:
                     app_state.update_operation(op_id, detail="Searching MangaUpdates series...")
-                    normalized_series, results = _search_manga_provider_candidates(
-                        'mangaupdates',
-                        series_name,
-                        extracted_year,
-                    )
-                    if app_state.is_operation_cancelled(op_id):
+                    if cancel_requested():
+                        return cancelled_response()
+                    try:
+                        normalized_series, results = _run_metadata_provider_call(
+                            "MangaUpdates",
+                            f"searching series '{series_name}'",
+                            lambda: _search_manga_provider_candidates(
+                                'mangaupdates',
+                                series_name,
+                                extracted_year,
+                            ),
+                        )
+                    except MetadataProviderTimeoutError as exc:
+                        app_logger.warning(str(exc))
+                        return timeout_response(exc)
+                    if cancel_requested():
                         return cancelled_response()
                     if not results:
                         complete_batch_operation(error=True)
@@ -1885,7 +2048,15 @@ def batch_metadata():
                     return jsonify(selection_data)
 
                 if not selected_title:
-                    selected_series = mu.get_series(str(selected_series_id))
+                    try:
+                        selected_series = _run_metadata_provider_call(
+                            "MangaUpdates",
+                            f"fetching selected series {selected_series_id}",
+                            lambda: mu.get_series(str(selected_series_id)),
+                        )
+                    except MetadataProviderTimeoutError as exc:
+                        app_logger.warning(str(exc))
+                        return timeout_response(exc)
                     if selected_series:
                         selected_title = selected_series.title or selected_title
 
@@ -1897,7 +2068,7 @@ def batch_metadata():
                     selected_title,
                     selected_alternate_title,
                 )
-                if app_state.is_operation_cancelled(op_id):
+                if cancel_requested():
                     return cancelled_response()
                 cvinfo_created = True
         elif not os.path.exists(cvinfo_path):
@@ -1907,7 +2078,16 @@ def batch_metadata():
             if metron_api and not skip_comic_cvinfo:
                 app_logger.info("Trying Metron first for cvinfo creation...")
                 try:
-                    metron_series = metron.search_series_by_name(metron_api, series_name, extracted_year)
+                    if cancel_requested():
+                        return cancelled_response()
+                    app_state.update_operation(op_id, detail="Searching Metron series...")
+                    metron_series = _run_metadata_provider_call(
+                        "Metron",
+                        f"searching series '{series_name}'",
+                        lambda: metron.search_series_by_name(metron_api, series_name, extracted_year),
+                    )
+                    if cancel_requested():
+                        return cancelled_response()
                     if metron_series:
                         # Create cvinfo with all Metron data
                         metron.create_cvinfo_file(
@@ -1924,6 +2104,8 @@ def batch_metadata():
                         cvinfo_created = True
                         metron_id_added = True
                         app_logger.info(f"Created cvinfo via Metron: series_id={series_id}, cv_id={cv_volume_id}")
+                except MetadataProviderTimeoutError as e:
+                    app_logger.warning(str(e))
                 except Exception as e:
                     if metron.is_connection_error(e):
                         app_logger.warning(f"Metron unavailable during series search: {e}")
@@ -1934,42 +2116,63 @@ def batch_metadata():
             if not cvinfo_created and comicvine_available and not skip_comic_cvinfo:
                 app_logger.info("Trying ComicVine for cvinfo creation...")
                 try:
+                    if cancel_requested():
+                        return cancelled_response()
                     # If user already selected a volume, use it directly
                     if selected_volume_id:
                         cv_volume_id = selected_volume_id
                         app_logger.info(f"Using pre-selected volume ID: {cv_volume_id}")
                     else:
                         # Search for volumes
-                        volumes = comicvine.search_volumes(comicvine_api_key, series_name, extracted_year)
+                        app_state.update_operation(op_id, detail="Searching ComicVine series...")
+                        volumes = _run_metadata_provider_call(
+                            "ComicVine",
+                            f"searching series '{series_name}'",
+                            lambda: comicvine.search_volumes(comicvine_api_key, series_name, extracted_year),
+                        )
+                        if cancel_requested():
+                            return cancelled_response()
                         if volumes:
                             # If multiple volumes found, return them for user selection
                             if len(volumes) > 1:
                                 app_logger.info(f"Found {len(volumes)} volumes - returning for user selection")
+                                complete_batch_operation()
                                 return jsonify({
                                     "requires_selection": True,
+                                    "op_id": op_id,
                                     "directory": directory,
                                     "parsed_filename": {
                                         "series_name": series_name,
                                         "issue_number": str(len(comic_files)),
                                         "year": extracted_year
                                     },
-                                    "possible_matches": volumes
+                                    "possible_matches": volumes,
+                                    "provider": "comicvine",
                                 })
                             cv_volume_id = volumes[0]['id']
 
                     # Create cvinfo with the selected/found volume
                     if cv_volume_id:
-                        volume_details = _write_selected_comicvine_cvinfo(
-                            cvinfo_path,
-                            comicvine_api_key,
-                            cv_volume_id,
+                        app_state.update_operation(op_id, detail="Writing ComicVine cvinfo...")
+                        volume_details = _run_metadata_provider_call(
+                            "ComicVine",
+                            f"writing selected volume {cv_volume_id}",
+                            lambda: _write_selected_comicvine_cvinfo(
+                                cvinfo_path,
+                                comicvine_api_key,
+                                cv_volume_id,
+                            ),
                         )
+                        if cancel_requested():
+                            return cancelled_response()
                         cvinfo_created = True
                         app_logger.info(f"Created cvinfo with ComicVine volume ID: {cv_volume_id}")
 
                         if volume_details:
                             cvinfo_start_year = volume_details.get('start_year')
                             cvinfo_publisher_name = volume_details.get('publisher_name')
+                except MetadataProviderTimeoutError as e:
+                    app_logger.warning(str(e))
                 except Exception as e:
                     app_logger.error(f"Error searching ComicVine: {e}")
         else:
@@ -1982,7 +2185,20 @@ def batch_metadata():
 
             # If cvinfo has series_id but no CV URL, look up cv_id from Metron and add it
             if not cv_volume_id and series_id and metron_api:
-                cv_id_from_metron = metron.get_series_cv_id(metron_api, series_id)
+                if cancel_requested():
+                    return cancelled_response()
+                app_state.update_operation(op_id, detail="Resolving Metron ComicVine ID...")
+                try:
+                    cv_id_from_metron = _run_metadata_provider_call(
+                        "Metron",
+                        f"resolving ComicVine ID for series {series_id}",
+                        lambda: metron.get_series_cv_id(metron_api, series_id),
+                    )
+                except MetadataProviderTimeoutError as e:
+                    app_logger.warning(str(e))
+                    cv_id_from_metron = None
+                if cancel_requested():
+                    return cancelled_response()
                 if cv_id_from_metron:
                     metron.add_cvinfo_url(cvinfo_path, cv_id_from_metron)
                     cv_volume_id = cv_id_from_metron
@@ -1997,10 +2213,34 @@ def batch_metadata():
         if metron_api and os.path.exists(cvinfo_path) and not series_id:
             cv_id = metron.parse_cvinfo_for_comicvine_id(cvinfo_path)
             if cv_id:
-                series_id = metron.get_series_id_by_comicvine_id(metron_api, cv_id)
+                if cancel_requested():
+                    return cancelled_response()
+                app_state.update_operation(op_id, detail="Resolving Metron series ID...")
+                try:
+                    series_id = _run_metadata_provider_call(
+                        "Metron",
+                        f"resolving series for ComicVine ID {cv_id}",
+                        lambda: metron.get_series_id_by_comicvine_id(metron_api, cv_id),
+                    )
+                except MetadataProviderTimeoutError as e:
+                    app_logger.warning(str(e))
+                    series_id = None
+                if cancel_requested():
+                    return cancelled_response()
                 if series_id:
                     # Get full series details from Metron
-                    series_details = metron.get_series_details(metron_api, series_id)
+                    app_state.update_operation(op_id, detail="Fetching Metron series details...")
+                    try:
+                        series_details = _run_metadata_provider_call(
+                            "Metron",
+                            f"fetching series details {series_id}",
+                            lambda: metron.get_series_details(metron_api, series_id),
+                        )
+                    except MetadataProviderTimeoutError as e:
+                        app_logger.warning(str(e))
+                        series_details = None
+                    if cancel_requested():
+                        return cancelled_response()
                     if series_details:
                         # Update cvinfo with series_id
                         metron.update_cvinfo_with_metron_id(cvinfo_path, series_id)
@@ -2025,7 +2265,20 @@ def batch_metadata():
             # If cvinfo is missing publisher/start year but we have a volume id,
             # hydrate both from ComicVine so manga detection can still work.
             if (not cvinfo_start_year or not cvinfo_publisher_name) and cv_volume_id and comicvine_available:
-                volume_details = comicvine.get_volume_details(comicvine_api_key, cv_volume_id)
+                if cancel_requested():
+                    return cancelled_response()
+                app_state.update_operation(op_id, detail="Fetching ComicVine volume details...")
+                try:
+                    volume_details = _run_metadata_provider_call(
+                        "ComicVine",
+                        f"fetching volume details {cv_volume_id}",
+                        lambda: comicvine.get_volume_details(comicvine_api_key, cv_volume_id),
+                    )
+                except MetadataProviderTimeoutError as e:
+                    app_logger.warning(str(e))
+                    volume_details = {}
+                if cancel_requested():
+                    return cancelled_response()
                 if volume_details.get('start_year') or volume_details.get('publisher_name'):
                     if not cvinfo_start_year:
                         cvinfo_start_year = volume_details.get('start_year')
@@ -2157,38 +2410,61 @@ def batch_metadata():
                             gcd_series_name = re.sub(r'\s*v\d+.*$', '', gcd_series_name)
 
                             # Use gcd_year (from filename/folder or cvinfo)
-                            gcd_series = gcd.search_series(gcd_series_name, gcd_year)
+                            gcd_series = _run_metadata_provider_call(
+                                "GCD",
+                                f"searching series '{gcd_series_name}'",
+                                lambda: gcd.search_series(gcd_series_name, gcd_year),
+                            )
                             if gcd_series:
-                                metadata = gcd.get_issue_metadata(gcd_series['id'], issue_number)
+                                metadata = _run_metadata_provider_call(
+                                    "GCD",
+                                    f"fetching issue {issue_number} for {filename}",
+                                    lambda: gcd.get_issue_metadata(gcd_series['id'], issue_number),
+                                )
                                 if metadata:
                                     source = 'GCD'
                                     app_logger.info(f"Found metadata from GCD for {filename}")
                                     return True
+                        except MetadataProviderTimeoutError:
+                            raise
                         except Exception as e:
                             app_logger.warning(f"GCD lookup failed for {filename}: {e}")
                         return False
 
                     # Helper function for ComicVine lookup
                     def try_comicvine():
-                        nonlocal metadata, source
+                        nonlocal metadata, source, op_cancelled
                         if not (comicvine_available and cv_volume_id):
                             return False
                         try:
-                            issue_data = comicvine.get_issue_by_number(
-                                comicvine_api_key,
-                                cv_volume_id,
-                                issue_number,
-                                issue_year,
-                            )
-                            if issue_data:
-                                volume_data = _resolve_comicvine_volume_data(
+                            issue_data = _run_metadata_provider_call(
+                                "ComicVine",
+                                f"fetching issue {issue_number} for {filename}",
+                                lambda: comicvine.get_issue_by_number(
                                     comicvine_api_key,
                                     cv_volume_id,
-                                    issue_data,
-                                    publisher_name=cvinfo_publisher_name,
-                                    start_year=cvinfo_start_year,
-                                    cvinfo_path=cvinfo_path,
+                                    issue_number,
+                                    issue_year,
+                                ),
+                            )
+                            if issue_data:
+                                volume_data = _run_metadata_provider_call(
+                                    "ComicVine",
+                                    f"fetching volume details for {filename}",
+                                    lambda: _resolve_comicvine_volume_data(
+                                        comicvine_api_key,
+                                        cv_volume_id,
+                                        issue_data,
+                                        publisher_name=cvinfo_publisher_name,
+                                        start_year=cvinfo_start_year,
+                                        cvinfo_path=cvinfo_path,
+                                        update_cvinfo=False,
+                                    ),
                                 )
+                                if cancel_requested():
+                                    op_cancelled = True
+                                    return False
+                                _write_comicvine_volume_fields_after_fetch(cvinfo_path, volume_data)
                                 metadata = comicvine.map_to_comicinfo(
                                     issue_data,
                                     volume_data,
@@ -2198,6 +2474,8 @@ def batch_metadata():
                                 source = 'ComicVine'
                                 app_logger.info(f"Found metadata from ComicVine for {filename}")
                                 return True
+                        except MetadataProviderTimeoutError:
+                            raise
                         except Exception as e:
                             app_logger.warning(f"ComicVine lookup failed for {filename}: {e}")
                         return False
@@ -2208,12 +2486,18 @@ def batch_metadata():
                         if not (metron_available and metron_api and series_id):
                             return False
                         try:
-                            issue_data = metron.get_issue_metadata(metron_api, series_id, issue_number)
+                            issue_data = _run_metadata_provider_call(
+                                "Metron",
+                                f"fetching issue {issue_number} for {filename}",
+                                lambda: metron.get_issue_metadata(metron_api, series_id, issue_number),
+                            )
                             if issue_data:
                                 metadata = metron.map_to_comicinfo(issue_data)
                                 source = 'Metron'
                                 app_logger.info(f"Found metadata from Metron for {filename}")
                                 return True
+                        except MetadataProviderTimeoutError:
+                            raise
                         except Exception as e:
                             app_logger.warning(f"Metron lookup failed for {filename}: {e}")
                         return False
@@ -2233,14 +2517,24 @@ def batch_metadata():
                             series_name = re.sub(r'\s*v\d+.*$', '', series_name)
 
                             # Search for the manga
-                            results = anilist.search_series(series_name, gcd_year)
+                            results = _run_metadata_provider_call(
+                                "AniList",
+                                f"searching series '{series_name}'",
+                                lambda: anilist.search_series(series_name, gcd_year),
+                            )
                             if results:
                                 series = results[0]  # Take first/best match
-                                metadata = anilist.get_issue_metadata(series.id, issue_number)
+                                metadata = _run_metadata_provider_call(
+                                    "AniList",
+                                    f"fetching issue {issue_number} for {filename}",
+                                    lambda: anilist.get_issue_metadata(series.id, issue_number),
+                                )
                                 if metadata:
                                     source = 'AniList'
                                     app_logger.info(f"Found metadata from AniList for {filename}")
                                     return True
+                        except MetadataProviderTimeoutError:
+                            raise
                         except Exception as e:
                             app_logger.warning(f"AniList lookup failed for {filename}: {e}")
                         return False
@@ -2262,8 +2556,16 @@ def batch_metadata():
 
                             if cached_id:
                                 app_logger.info(f"Using cached MangaDex ID: {cached_id}")
-                                metadata = mangadex.get_issue_metadata(cached_id, issue_number,
-                                    preferred_title=cached_title, alternate_title=cached_alt_title)
+                                metadata = _run_metadata_provider_call(
+                                    "MangaDex",
+                                    f"fetching cached issue {issue_number} for {filename}",
+                                    lambda: mangadex.get_issue_metadata(
+                                        cached_id,
+                                        issue_number,
+                                        preferred_title=cached_title,
+                                        alternate_title=cached_alt_title,
+                                    ),
+                                )
                                 if metadata:
                                     source = 'MangaDex'
                                     app_logger.info(f"Found metadata from MangaDex (cached) for {filename}")
@@ -2276,7 +2578,11 @@ def batch_metadata():
                             series_name = re.sub(r'\s*v\d+.*$', '', series_name)
 
                             # Search for the manga
-                            results = mangadex.search_series(series_name, gcd_year)
+                            results = _run_metadata_provider_call(
+                                "MangaDex",
+                                f"searching series '{series_name}'",
+                                lambda: mangadex.search_series(series_name, gcd_year),
+                            )
                             if results:
                                 # Prefer exact title match
                                 search_lower = series_name.lower().strip()
@@ -2297,12 +2603,22 @@ def batch_metadata():
                                         'mangadex_title': match.title,
                                         'mangadex_alt_title': getattr(match, 'alternate_title', None) or '',
                                     })
-                                    metadata = mangadex.get_issue_metadata(match.id, issue_number,
-                                        preferred_title=match.title, alternate_title=match.alternate_title)
+                                    metadata = _run_metadata_provider_call(
+                                        "MangaDex",
+                                        f"fetching issue {issue_number} for {filename}",
+                                        lambda: mangadex.get_issue_metadata(
+                                            match.id,
+                                            issue_number,
+                                            preferred_title=match.title,
+                                            alternate_title=match.alternate_title,
+                                        ),
+                                    )
                                     if metadata:
                                         source = 'MangaDex'
                                         app_logger.info(f"Found metadata from MangaDex for {filename}")
                                         return True
+                        except MetadataProviderTimeoutError:
+                            raise
                         except Exception as e:
                             app_logger.warning(f"MangaDex lookup failed for {filename}: {e}")
                         return False
@@ -2324,8 +2640,16 @@ def batch_metadata():
 
                             if cached_id:
                                 app_logger.info(f"Using cached MangaUpdates ID: {cached_id}")
-                                metadata = mu.get_issue_metadata(cached_id, issue_number,
-                                    preferred_title=cached_title, alternate_title=cached_alt_title)
+                                metadata = _run_metadata_provider_call(
+                                    "MangaUpdates",
+                                    f"fetching cached issue {issue_number} for {filename}",
+                                    lambda: mu.get_issue_metadata(
+                                        cached_id,
+                                        issue_number,
+                                        preferred_title=cached_title,
+                                        alternate_title=cached_alt_title,
+                                    ),
+                                )
                                 if metadata:
                                     source = 'MangaUpdates'
                                     app_logger.info(f"Found metadata from MangaUpdates (cached) for {filename}")
@@ -2335,7 +2659,11 @@ def batch_metadata():
                             series_name = os.path.basename(directory)
                             series_name = re.sub(r'\s*\(\d{4}\).*$', '', series_name)
                             series_name = re.sub(r'\s*v\d+.*$', '', series_name)
-                            results = mu.search_series(series_name, gcd_year)
+                            results = _run_metadata_provider_call(
+                                "MangaUpdates",
+                                f"searching series '{series_name}'",
+                                lambda: mu.search_series(series_name, gcd_year),
+                            )
                             if results:
                                 # Prefer exact title match
                                 search_lower = series_name.lower().strip()
@@ -2356,12 +2684,22 @@ def batch_metadata():
                                         'mangaupdates_title': match.title,
                                         'mangaupdates_alt_title': getattr(match, 'alternate_title', None) or '',
                                     })
-                                    metadata = mu.get_issue_metadata(match.id, issue_number,
-                                        preferred_title=match.title, alternate_title=match.alternate_title)
+                                    metadata = _run_metadata_provider_call(
+                                        "MangaUpdates",
+                                        f"fetching issue {issue_number} for {filename}",
+                                        lambda: mu.get_issue_metadata(
+                                            match.id,
+                                            issue_number,
+                                            preferred_title=match.title,
+                                            alternate_title=match.alternate_title,
+                                        ),
+                                    )
                                     if metadata:
                                         source = 'MangaUpdates'
                                         app_logger.info(f"Found metadata from MangaUpdates for {filename}")
                                         return True
+                        except MetadataProviderTimeoutError:
+                            raise
                         except Exception as e:
                             app_logger.warning(f"MangaUpdates lookup failed for {filename}: {e}")
                         return False
@@ -2396,9 +2734,17 @@ def batch_metadata():
                             # Search with start year if available, else without
                             results = None
                             if start_yr:
-                                results = gcd_api_prov.search_series(gcd_api_series_name, start_yr)
+                                results = _run_metadata_provider_call(
+                                    "GCD API",
+                                    f"searching series '{gcd_api_series_name}' ({start_yr})",
+                                    lambda: gcd_api_prov.search_series(gcd_api_series_name, start_yr),
+                                )
                             if not results:
-                                results = gcd_api_prov.search_series(gcd_api_series_name)
+                                results = _run_metadata_provider_call(
+                                    "GCD API",
+                                    f"searching series '{gcd_api_series_name}'",
+                                    lambda: gcd_api_prov.search_series(gcd_api_series_name),
+                                )
                             if not results:
                                 return False
 
@@ -2413,12 +2759,18 @@ def batch_metadata():
                                 app_logger.info(f"GCD API: {len(results)} results for '{gcd_api_series_name}', skipping batch auto-select")
                                 return False
 
-                            metadata = gcd_api_prov.get_issue_metadata(match.id, issue_number)
+                            metadata = _run_metadata_provider_call(
+                                "GCD API",
+                                f"fetching issue {issue_number} for {filename}",
+                                lambda: gcd_api_prov.get_issue_metadata(match.id, issue_number),
+                            )
                             if metadata:
                                 metadata.pop('_cover_url', None)
                                 source = 'GCD API'
                                 app_logger.info(f"Found metadata from GCD API for {filename}")
                                 return True
+                        except MetadataProviderTimeoutError:
+                            raise
                         except Exception as e:
                             app_logger.warning(f"GCD API lookup failed for {filename}: {e}")
                         return False
@@ -2448,14 +2800,34 @@ def batch_metadata():
                             p for p in provider_order if p != force_provider
                         ]
 
+                    provider_errors = []
                     for provider_name in provider_order:
                         if cancel_requested():
                             op_cancelled = True
                             app_logger.info("Batch metadata cancelled during provider lookup")
                             break
                         try_fn = provider_try_fns.get(provider_name)
-                        if try_fn and try_fn():
-                            break
+                        if not try_fn:
+                            continue
+
+                        provider_label = {
+                            'metron': 'Metron',
+                            'comicvine': 'ComicVine',
+                            'gcd': 'GCD',
+                            'gcd_api': 'GCD API',
+                            'anilist': 'AniList',
+                            'mangadex': 'MangaDex',
+                            'mangaupdates': 'MangaUpdates',
+                        }.get(provider_name, provider_name)
+                        app_state.update_operation(op_id, detail=f"{provider_label}: {filename}")
+
+                        try:
+                            if try_fn():
+                                break
+                        except MetadataProviderTimeoutError as e:
+                            message = str(e)
+                            provider_errors.append(message)
+                            app_logger.warning(message)
 
                     if op_cancelled or cancel_requested():
                         op_cancelled = True
@@ -2504,15 +2876,17 @@ def batch_metadata():
                         })
                         app_logger.info(f"Added metadata to {filename} from {source}")
                     else:
+                        reason = "; ".join(provider_errors) if provider_errors else "not found"
                         result['errors'] += 1
-                        result['details'].append({'file': filename, 'status': 'error', 'reason': 'not found'})
-                        app_logger.warning(f"No metadata found for {filename}")
+                        result['details'].append({'file': filename, 'status': 'error', 'reason': reason})
+                        app_logger.warning(f"No metadata found for {filename}: {reason}")
 
                     # Rate limiting - Metron makes 2 API calls per file, needs longer delay
-                    if source == 'Metron':
-                        time.sleep(2)
-                    else:
-                        time.sleep(0.5)
+                    delay = 2 if source == 'Metron' else 0.5
+                    if _cancelable_sleep(delay, cancel_requested):
+                        op_cancelled = True
+                        app_logger.info("Batch metadata cancelled during rate-limit wait")
+                        break
 
                 except Exception as e:
                     app_logger.error(f"Error processing {filename}: {e}")
@@ -3771,14 +4145,22 @@ def _try_metron_single(cvinfo_path, series_name, issue_number, year):
 
         # Fall back to searching by series name
         if not series_id and series_name:
-            series_result = metron.search_series_by_name(metron_api, series_name, year)
+            series_result = _run_metadata_provider_call(
+                "Metron",
+                f"searching series '{series_name}'",
+                lambda: metron.search_series_by_name(metron_api, series_name, year),
+            )
             if series_result:
                 series_id = series_result.get("id")
 
         if not series_id:
             return None, None
 
-        issue_data = metron.get_issue_metadata(metron_api, series_id, issue_number)
+        issue_data = _run_metadata_provider_call(
+            "Metron",
+            f"fetching issue {issue_number}",
+            lambda: metron.get_issue_metadata(metron_api, series_id, issue_number),
+        )
         if not issue_data:
             return None, None
 
@@ -3792,6 +4174,8 @@ def _try_metron_single(cvinfo_path, series_name, issue_number, year):
                 img_url = str(image) if not isinstance(image, str) else image
 
         return metadata, img_url
+    except MetadataProviderTimeoutError:
+        raise
     except Exception as e:
         app_logger.warning(f"[search-metadata] Metron lookup failed: {e}")
         return None, None
@@ -3804,7 +4188,11 @@ def _try_metron_single_selection(series_name, year):
         if not metron_api or not series_name:
             return None
 
-        matches = metron.search_series_candidates_by_name(metron_api, series_name, year)
+        matches = _run_metadata_provider_call(
+            "Metron",
+            f"searching series '{series_name}'",
+            lambda: metron.search_series_candidates_by_name(metron_api, series_name, year),
+        )
         if not matches:
             return None
 
@@ -3819,6 +4207,8 @@ def _try_metron_single_selection(series_name, year):
                 "cv_id": match.get("cv_id"),
             } for match in matches],
         }
+    except MetadataProviderTimeoutError:
+        raise
     except Exception as e:
         app_logger.warning(f"[search-metadata] Metron candidate lookup failed: {e}")
         return None
@@ -3839,14 +4229,23 @@ def _try_comicvine_single(cvinfo_path, series_name, issue_number, year):
         if cvinfo_path:
             cv_volume_id = comicvine.parse_cvinfo_volume_id(cvinfo_path)
             if cv_volume_id:
-                issue_data = comicvine.get_issue_by_number(api_key, cv_volume_id, issue_number, year)
+                issue_data = _run_metadata_provider_call(
+                    "ComicVine",
+                    f"fetching issue {issue_number}",
+                    lambda: comicvine.get_issue_by_number(api_key, cv_volume_id, issue_number, year),
+                )
                 if issue_data:
-                    volume_data = _resolve_comicvine_volume_data(
-                        api_key,
-                        cv_volume_id,
-                        issue_data,
-                        publisher_name=issue_data.get('publisher_name', ''),
-                        cvinfo_path=cvinfo_path,
+                    volume_data = _run_metadata_provider_call(
+                        "ComicVine",
+                        "fetching volume details",
+                        lambda: _resolve_comicvine_volume_data(
+                            api_key,
+                            cv_volume_id,
+                            issue_data,
+                            publisher_name=issue_data.get('publisher_name', ''),
+                            cvinfo_path=cvinfo_path,
+                            update_cvinfo=False,
+                        ),
                     )
 
                     metadata = comicvine.map_to_comicinfo(
@@ -3867,7 +4266,11 @@ def _try_comicvine_single(cvinfo_path, series_name, issue_number, year):
         normalized_series = re.sub(r'[:\-\u2013\u2014\'\"\.\,\!\?]', ' ', series_name)
         normalized_series = re.sub(r'\s+', ' ', normalized_series).strip()
 
-        volumes = comicvine.search_volumes(api_key, normalized_series, year)
+        volumes = _run_metadata_provider_call(
+            "ComicVine",
+            f"searching series '{normalized_series}'",
+            lambda: comicvine.search_volumes(api_key, normalized_series, year),
+        )
         if not volumes:
             return None, None, None, None
 
@@ -3894,7 +4297,11 @@ def _try_comicvine_single(cvinfo_path, series_name, issue_number, year):
             selected_volume = volumes[0]
 
         # Get the issue from selected volume
-        issue_data = comicvine.get_issue_by_number(api_key, selected_volume['id'], issue_number, year)
+        issue_data = _run_metadata_provider_call(
+            "ComicVine",
+            f"fetching issue {issue_number}",
+            lambda: comicvine.get_issue_by_number(api_key, selected_volume['id'], issue_number, year),
+        )
         if not issue_data:
             return None, None, None, None
 
@@ -3904,6 +4311,8 @@ def _try_comicvine_single(cvinfo_path, series_name, issue_number, year):
             img_url = str(img_url)
         return metadata, img_url, selected_volume, None
 
+    except MetadataProviderTimeoutError:
+        raise
     except Exception as e:
         app_logger.warning(f"[search-metadata] ComicVine lookup failed: {e}")
         return None, None, None, None
@@ -3919,7 +4328,11 @@ def _try_comicvine_single_selection(series_name, year):
         normalized_series = re.sub(r'[:\-\u2013\u2014\'\"\.\,\!\?]', ' ', series_name)
         normalized_series = re.sub(r'\s+', ' ', normalized_series).strip()
 
-        volumes = comicvine.search_volumes(api_key, normalized_series, year)
+        volumes = _run_metadata_provider_call(
+            "ComicVine",
+            f"searching series '{normalized_series}'",
+            lambda: comicvine.search_volumes(api_key, normalized_series, year),
+        )
         if not volumes:
             return None
 
@@ -3928,6 +4341,8 @@ def _try_comicvine_single_selection(series_name, year):
             "provider": "comicvine",
             "possible_matches": volumes,
         }
+    except MetadataProviderTimeoutError:
+        raise
     except Exception as e:
         app_logger.warning(f"[search-metadata] ComicVine candidate lookup failed: {e}")
         return None
@@ -4196,6 +4611,16 @@ def search_metadata():
                 update_single_metadata_progress(current, detail)
             return jsonify(payload), status_code
 
+        def fail_single_timeout(exc, current=3):
+            message = str(exc)
+            app_logger.warning(f"[search-metadata] {message}")
+            return fail_single_metadata(
+                504,
+                {"success": False, "error": message},
+                current=current,
+                detail=message,
+            )
+
         app_logger.info(f"[search-metadata] Starting search for {file_name}")
         update_single_metadata_progress(1, "Parsing filename...")
 
@@ -4263,50 +4688,77 @@ def search_metadata():
                 api_key = current_app.config.get("COMICVINE_API_KEY", "").strip()
                 if api_key and (volume_id or selected_issue_id):
                     resolved_volume_id = volume_id
-                    if selected_issue_id:
-                        issue_data = comicvine.get_issue_by_id(api_key, selected_issue_id)
-                        if issue_data and issue_data.get('volume_id'):
-                            resolved_volume_id = issue_data.get('volume_id')
-                    elif volume_id:
-                        issue_data = comicvine.get_issue_by_number(api_key, volume_id, issue_number, year)
-                        if not issue_data:
-                            issue_candidates = comicvine.list_issue_candidates_for_volume(api_key, volume_id, year)
-                            if issue_candidates:
-                                selected_volume_name = (
-                                    selected_match.get('volume_name')
-                                    or issue_candidates[0].get('volume_name')
+                    issue_data = None
+                    issue_candidates = None
+                    try:
+                        if selected_issue_id:
+                            issue_data = _run_metadata_provider_call(
+                                "ComicVine",
+                                f"fetching issue id {selected_issue_id}",
+                                lambda: comicvine.get_issue_by_id(api_key, selected_issue_id),
+                            )
+                            if issue_data and issue_data.get('volume_id'):
+                                resolved_volume_id = issue_data.get('volume_id')
+                        elif volume_id:
+                            issue_data = _run_metadata_provider_call(
+                                "ComicVine",
+                                f"fetching issue {issue_number}",
+                                lambda: comicvine.get_issue_by_number(api_key, volume_id, issue_number, year),
+                            )
+                            if not issue_data:
+                                issue_candidates = _run_metadata_provider_call(
+                                    "ComicVine",
+                                    f"listing issues for volume {volume_id}",
+                                    lambda: comicvine.list_issue_candidates_for_volume(api_key, volume_id, year),
                                 )
-                                update_single_metadata_progress(4, "ComicVine requires issue selection")
-                                app_logger.info(
-                                    f"[search-metadata] comicvine issue selection required for {file_name} "
-                                    f"after volume {volume_id}"
-                                )
-                                return jsonify({
-                                    "requires_selection": True,
-                                    "selection_type": "issue",
-                                    "provider": "comicvine",
-                                    "possible_matches": issue_candidates,
-                                    "parsed_filename": {
-                                        "series_name": series_name,
-                                        "issue_number": issue_number,
-                                        "year": year,
-                                    },
-                                    "selected_match_context": {
-                                        "volume_id": volume_id,
-                                        "volume_name": selected_volume_name,
-                                        "publisher_name": selected_match.get('publisher_name'),
-                                        "start_year": selected_start_year,
-                                    },
-                                })
-                    if issue_data:
-                        volume_data = _resolve_comicvine_volume_data(
-                            api_key,
-                            resolved_volume_id,
-                            issue_data,
-                            publisher_name=selected_match.get('publisher_name', ''),
-                            start_year=selected_start_year,
-                            cvinfo_path=cvinfo_path,
+                            else:
+                                issue_candidates = None
+                    except MetadataProviderTimeoutError as exc:
+                        return fail_single_timeout(exc, current=3)
+                    if volume_id and not issue_data and issue_candidates:
+                        selected_volume_name = (
+                            selected_match.get('volume_name')
+                            or issue_candidates[0].get('volume_name')
                         )
+                        update_single_metadata_progress(4, "ComicVine requires issue selection")
+                        app_logger.info(
+                            f"[search-metadata] comicvine issue selection required for {file_name} "
+                            f"after volume {volume_id}"
+                        )
+                        return jsonify({
+                            "requires_selection": True,
+                            "selection_type": "issue",
+                            "provider": "comicvine",
+                            "possible_matches": issue_candidates,
+                            "parsed_filename": {
+                                "series_name": series_name,
+                                "issue_number": issue_number,
+                                "year": year,
+                            },
+                            "selected_match_context": {
+                                "volume_id": volume_id,
+                                "volume_name": selected_volume_name,
+                                "publisher_name": selected_match.get('publisher_name'),
+                                "start_year": selected_start_year,
+                            },
+                        })
+                    if issue_data:
+                        try:
+                            volume_data = _run_metadata_provider_call(
+                                "ComicVine",
+                                "fetching volume details",
+                                lambda: _resolve_comicvine_volume_data(
+                                    api_key,
+                                    resolved_volume_id,
+                                    issue_data,
+                                    publisher_name=selected_match.get('publisher_name', ''),
+                                    start_year=selected_start_year,
+                                    cvinfo_path=cvinfo_path,
+                                    update_cvinfo=False,
+                                ),
+                            )
+                        except MetadataProviderTimeoutError as exc:
+                            return fail_single_timeout(exc, current=3)
                         metadata = comicvine.map_to_comicinfo(issue_data, volume_data)
                         img_url = issue_data.get('image_url')
                         if img_url and not isinstance(img_url, str):
@@ -4316,7 +4768,14 @@ def search_metadata():
                 series_id = selected_match.get('series_id')
                 metron_api = metron.get_flask_api()
                 if series_id and metron_api:
-                    issue_data = metron.get_issue_metadata(metron_api, series_id, issue_number)
+                    try:
+                        issue_data = _run_metadata_provider_call(
+                            "Metron",
+                            f"fetching issue {issue_number}",
+                            lambda: metron.get_issue_metadata(metron_api, series_id, issue_number),
+                        )
+                    except MetadataProviderTimeoutError as exc:
+                        return fail_single_timeout(exc, current=3)
                     if issue_data:
                         metadata = metron.map_to_comicinfo(issue_data)
                         if isinstance(issue_data, dict):
@@ -4371,6 +4830,8 @@ def search_metadata():
 
             # Apply metadata
             update_single_metadata_progress(4, "Writing ComicInfo.xml...")
+            if provider == 'comicvine' and cvinfo_path and volume_data:
+                _write_comicvine_volume_fields_after_fetch(cvinfo_path, volume_data)
             comicinfo_xml = generate_comicinfo_xml(metadata)
             add_comicinfo_to_cbz(file_path, comicinfo_xml)
             set_has_comicinfo(file_path)
@@ -4447,15 +4908,18 @@ def search_metadata():
         if force_manual_selection and force_provider in {'comicvine', 'metron', 'mangaupdates'}:
             update_single_metadata_progress(2, f"Preparing forced {force_provider} selection...")
 
-            if force_provider == 'comicvine':
-                selection_data = _try_comicvine_single_selection(series_name, year)
-                provider_error = f"No ComicVine volumes found for '{series_name}'"
-            elif force_provider == 'metron':
-                selection_data = _try_metron_single_selection(series_name, year)
-                provider_error = f"No Metron series found for '{series_name}'"
-            else:
-                selection_data = _try_mangaupdates_single_selection(series_name, issue_number, year)
-                provider_error = f"No MangaUpdates series found for '{series_name}'"
+            try:
+                if force_provider == 'comicvine':
+                    selection_data = _try_comicvine_single_selection(series_name, year)
+                    provider_error = f"No ComicVine volumes found for '{series_name}'"
+                elif force_provider == 'metron':
+                    selection_data = _try_metron_single_selection(series_name, year)
+                    provider_error = f"No Metron series found for '{series_name}'"
+                else:
+                    selection_data = _try_mangaupdates_single_selection(series_name, issue_number, year)
+                    provider_error = f"No MangaUpdates series found for '{series_name}'"
+            except MetadataProviderTimeoutError as exc:
+                return fail_single_timeout(exc, current=3)
 
             if selection_data:
                 update_single_metadata_progress(4, f"{force_provider} requires selection")
@@ -4495,12 +4959,24 @@ def search_metadata():
             selection_data = None
 
             if provider_type == 'metron':
-                metadata, img_url = _try_metron_single(cvinfo_path, series_name, issue_number, year)
+                try:
+                    metadata, img_url = _try_metron_single(cvinfo_path, series_name, issue_number, year)
+                except MetadataProviderTimeoutError as exc:
+                    app_logger.warning(f"[search-metadata] {exc}")
+                    if force_provider == provider_type:
+                        return fail_single_timeout(exc, current=3)
+                    continue
 
             elif provider_type == 'comicvine':
-                metadata, img_url, volume_data, selection_data = _try_comicvine_single(
-                    cvinfo_path, series_name, issue_number, year
-                )
+                try:
+                    metadata, img_url, volume_data, selection_data = _try_comicvine_single(
+                        cvinfo_path, series_name, issue_number, year
+                    )
+                except MetadataProviderTimeoutError as exc:
+                    app_logger.warning(f"[search-metadata] {exc}")
+                    if force_provider == provider_type:
+                        return fail_single_timeout(exc, current=3)
+                    continue
                 if selection_data:
                     # Pause cascade - need user selection
                     selection_data["parsed_filename"] = {
@@ -4596,6 +5072,8 @@ def search_metadata():
 
                 # Apply metadata to file
                 update_single_metadata_progress(4, f"Applying metadata from {provider_type}...")
+                if provider_type == 'comicvine' and cvinfo_path and volume_data:
+                    _write_comicvine_volume_fields_after_fetch(cvinfo_path, volume_data)
                 comicinfo_xml = generate_comicinfo_xml(metadata)
                 add_comicinfo_to_cbz(file_path, comicinfo_xml)
 
@@ -4739,7 +5217,11 @@ def search_comicvine_metadata():
             allow_volume_as_issue = _is_manga_publisher(cvinfo_fields.get("publisher_name"))
             cv_volume_id = comicvine.parse_cvinfo_volume_id(cvinfo_path)
             if not allow_volume_as_issue and cv_volume_id:
-                volume_details = comicvine.get_volume_details(api_key, cv_volume_id)
+                volume_details = _run_metadata_provider_call(
+                    "ComicVine",
+                    f"fetching volume {cv_volume_id}",
+                    lambda: comicvine.get_volume_details(api_key, cv_volume_id),
+                )
                 allow_volume_as_issue = _is_manga_publisher(volume_details.get("publisher_name"))
 
             # Extract issue number from filename (handles extension removal internally)
@@ -4755,17 +5237,27 @@ def search_comicvine_metadata():
             # Try ComicVine with volume ID from cvinfo
             if cv_volume_id:
                 app_logger.info(f"Using ComicVine volume ID {cv_volume_id} from cvinfo")
-                issue_data = comicvine.get_issue_by_number(api_key, cv_volume_id, issue_number, year)
+                issue_data = _run_metadata_provider_call(
+                    "ComicVine",
+                    f"fetching issue {issue_number}",
+                    lambda: comicvine.get_issue_by_number(api_key, cv_volume_id, issue_number, year),
+                )
 
                 if issue_data:
                     app_logger.info(f"Found issue #{issue_number} using cvinfo volume ID")
-                    volume_data = _resolve_comicvine_volume_data(
-                        api_key,
-                        cv_volume_id,
-                        issue_data,
-                        publisher_name=issue_data.get('publisher_name', ''),
-                        cvinfo_path=cvinfo_path,
+                    volume_data = _run_metadata_provider_call(
+                        "ComicVine",
+                        "fetching volume details",
+                        lambda: _resolve_comicvine_volume_data(
+                            api_key,
+                            cv_volume_id,
+                            issue_data,
+                            publisher_name=issue_data.get('publisher_name', ''),
+                            cvinfo_path=cvinfo_path,
+                            update_cvinfo=False,
+                        ),
                     )
+                    _write_comicvine_volume_fields_after_fetch(cvinfo_path, volume_data)
 
                     # Map to ComicInfo format
                     comicinfo_data = comicvine.map_to_comicinfo(issue_data, volume_data)
@@ -4874,7 +5366,11 @@ def search_comicvine_metadata():
 
         # Search ComicVine for volumes using normalized name
         app_logger.info(f"Searching ComicVine for '{normalized_series}' (original: '{series_name}') issue #{issue_number}")
-        volumes = comicvine.search_volumes(api_key, normalized_series, year)
+        volumes = _run_metadata_provider_call(
+            "ComicVine",
+            f"searching series '{normalized_series}'",
+            lambda: comicvine.search_volumes(api_key, normalized_series, year),
+        )
 
         if not volumes:
             return jsonify({
@@ -4918,7 +5414,11 @@ def search_comicvine_metadata():
             app_logger.info(f"Auto-selected single volume: {selected_volume['name']} ({selected_volume['start_year']})")
 
         # Get the issue
-        issue_data = comicvine.get_issue_by_number(api_key, selected_volume['id'], issue_number, year)
+        issue_data = _run_metadata_provider_call(
+            "ComicVine",
+            f"fetching issue {issue_number}",
+            lambda: comicvine.get_issue_by_number(api_key, selected_volume['id'], issue_number, year),
+        )
 
         if not issue_data:
             return jsonify({
@@ -4981,6 +5481,12 @@ def search_comicvine_metadata():
 
         return jsonify(response_data)
 
+    except MetadataProviderTimeoutError as e:
+        app_logger.warning(f"ComicVine search timed out: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+        }), 504
     except Exception as e:
         app_logger.error(f"Error in ComicVine search: {str(e)}")
         app_logger.error(f"Traceback: {traceback.format_exc()}")
@@ -5028,7 +5534,11 @@ def search_comicvine_metadata_with_selection():
             }), 400
 
         # Get the issue
-        issue_data = comicvine.get_issue_by_number(api_key, volume_id, str(issue_number), year)
+        issue_data = _run_metadata_provider_call(
+            "ComicVine",
+            f"fetching issue {issue_number}",
+            lambda: comicvine.get_issue_by_number(api_key, volume_id, str(issue_number), year),
+        )
 
         if not issue_data:
             return jsonify({
@@ -5040,14 +5550,20 @@ def search_comicvine_metadata_with_selection():
         # Also include name and start_year for auto-move functionality
         folder_path = os.path.dirname(file_path)
         cvinfo_path = comicvine.find_cvinfo_in_folder(folder_path)
-        volume_data = _resolve_comicvine_volume_data(
-            api_key,
-            volume_id,
-            issue_data,
-            publisher_name=publisher_name,
-            start_year=start_year,
-            cvinfo_path=cvinfo_path,
+        volume_data = _run_metadata_provider_call(
+            "ComicVine",
+            "fetching volume details",
+            lambda: _resolve_comicvine_volume_data(
+                api_key,
+                volume_id,
+                issue_data,
+                publisher_name=publisher_name,
+                start_year=start_year,
+                cvinfo_path=cvinfo_path,
+                update_cvinfo=False,
+            ),
         )
+        _write_comicvine_volume_fields_after_fetch(cvinfo_path, volume_data)
 
         # Map to ComicInfo format
         comicinfo_data = comicvine.map_to_comicinfo(issue_data, volume_data)
@@ -5099,6 +5615,12 @@ def search_comicvine_metadata_with_selection():
 
         return jsonify(response_data)
 
+    except MetadataProviderTimeoutError as e:
+        app_logger.warning(f"ComicVine search with selection timed out: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 504
     except Exception as e:
         app_logger.error(f"Error in ComicVine search with selection: {str(e)}")
         app_logger.error(f"Traceback: {traceback.format_exc()}")
