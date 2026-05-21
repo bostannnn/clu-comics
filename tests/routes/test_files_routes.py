@@ -694,6 +694,16 @@ class TestCreateFolder:
 
 class TestCombineCbz:
 
+    def test_invalid_body(self, client):
+        resp = client.post("/api/combine-cbz", json=[])
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == "Invalid request body"
+
+    def test_missing_body(self, client):
+        resp = client.post("/api/combine-cbz")
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == "Invalid request body"
+
     def test_too_few_files(self, client):
         resp = client.post("/api/combine-cbz",
                            json={"files": ["/a.cbz"], "directory": "/tmp"})
@@ -703,6 +713,97 @@ class TestCombineCbz:
         resp = client.post("/api/combine-cbz",
                            json={"files": ["/a.cbz", "/b.cbz"]})
         assert resp.status_code == 400
+
+    def test_files_must_be_list(self, client):
+        resp = client.post("/api/combine-cbz",
+                           json={"files": 123, "directory": "/tmp"})
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == "Files must be a list of paths"
+
+    def test_files_must_be_strings(self, client):
+        resp = client.post("/api/combine-cbz",
+                           json={"files": [["/a.cbz"], "/b.cbz"], "directory": "/tmp"})
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == "Files must be a list of paths"
+
+    def test_directory_must_be_string(self, client):
+        resp = client.post("/api/combine-cbz",
+                           json={"files": ["/a.cbz", "/b.cbz"], "directory": []})
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == "Directory not specified"
+
+    def test_output_name_traversal_rejected(self, client):
+        resp = client.post("/api/combine-cbz", json={
+            "files": ["/a.cbz", "/b.cbz"],
+            "output_name": "../outside",
+            "directory": "/tmp",
+        })
+
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == "Invalid output name"
+
+    def test_output_name_non_string_rejected(self, client):
+        resp = client.post("/api/combine-cbz", json={
+            "files": ["/a.cbz", "/b.cbz"],
+            "output_name": [],
+            "directory": "/tmp",
+        })
+
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == "Invalid output name"
+
+    def test_output_name_nul_rejected(self, client):
+        resp = client.post("/api/combine-cbz", json={
+            "files": ["/a.cbz", "/b.cbz"],
+            "output_name": "bad\u0000name",
+            "directory": "/tmp",
+        })
+
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == "Invalid output name"
+
+    def test_file_path_nul_rejected(self, client):
+        resp = client.post("/api/combine-cbz", json={
+            "files": ["/tmp/a\u0000.cbz", "/tmp/b.cbz"],
+            "output_name": "Combined",
+            "directory": "/tmp",
+        })
+
+        assert resp.status_code == 403
+        assert resp.get_json()["error"] == "Access denied"
+
+    @patch("routes.files.is_valid_library_path", side_effect=[True, True])
+    def test_directory_nul_rejected(self, mock_valid, client):
+        resp = client.post("/api/combine-cbz", json={
+            "files": ["/tmp/a.cbz", "/tmp/b.cbz"],
+            "output_name": "Combined",
+            "directory": "/tmp/bad\u0000dir",
+        })
+
+        assert resp.status_code == 403
+        assert resp.get_json()["error"] == "Access denied"
+
+    @patch("routes.files.is_path_in_any_root", return_value=False)
+    @patch("routes.files.is_valid_library_path", side_effect=[True, True, False])
+    def test_output_directory_outside_allowed_roots_blocked(
+        self,
+        mock_valid,
+        mock_any_root,
+        client,
+        tmp_path,
+    ):
+        cbz1 = str(tmp_path / "part1.cbz")
+        cbz2 = str(tmp_path / "part2.cbz")
+        outside = str(tmp_path / "outside")
+
+        resp = client.post("/api/combine-cbz", json={
+            "files": [cbz1, cbz2],
+            "output_name": "Combined",
+            "directory": outside,
+        })
+
+        assert resp.status_code == 403
+        assert resp.get_json()["error"] == "Access denied"
 
     @patch("routes.files.is_valid_library_path", return_value=True)
     @patch("routes.files.config")
@@ -989,8 +1090,26 @@ class TestCropCover:
         assert resp.status_code == 403
 
     @patch("routes.files.is_critical_path", return_value=False)
+    @patch("routes.files.is_path_in_any_root", return_value=False)
+    @patch("routes.files.is_valid_library_path", return_value=False)
+    def test_outside_allowed_roots_blocked(
+        self,
+        mock_valid,
+        mock_any_root,
+        mock_crit,
+        client,
+        tmp_path,
+    ):
+        f = tmp_path / "comic.cbz"
+        f.write_bytes(b"fake")
+        resp = client.post("/crop-cover", json={"target": str(f)})
+        assert resp.status_code == 403
+        assert resp.get_json()["error"] == "Access denied"
+
+    @patch("routes.files.is_critical_path", return_value=False)
+    @patch("routes.files.is_valid_library_path", return_value=True)
     @patch("cbz_ops.crop.handle_cbz_file")
-    def test_crop_success(self, mock_handle, mock_crit, client, tmp_path):
+    def test_crop_success(self, mock_handle, mock_valid, mock_crit, client, tmp_path):
         f = tmp_path / "comic.cbz"
         f.write_bytes(b"fake")
         resp = client.post("/crop-cover", json={"target": str(f)})

@@ -257,7 +257,8 @@ class ComicVineProvider(BaseProvider):
                     api_key,
                     int(issue.series_id),
                     issue.issue_number,
-                    start_year=series.year if series else None
+                    start_year=series.year if series else None,
+                    publisher_name=series.publisher if series else None,
                 )
                 if metadata:
                     return metadata

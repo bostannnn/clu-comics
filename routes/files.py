@@ -40,6 +40,34 @@ files_bp = Blueprint('files', __name__)
 SUPPORTED_IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'}
 
 
+def _is_allowed_library_or_transfer_path(path):
+    """Return True for paths under a library, watch, or target directory."""
+    if not isinstance(path, str):
+        return False
+    if '\x00' in path:
+        return False
+
+    from core.config import get_watch_dir, get_target_dir
+
+    watch_dir = get_watch_dir() or "/downloads/temp"
+    target_dir = get_target_dir() or "/downloads/processed"
+    normalized = os.path.normpath(path)
+    return is_valid_library_path(normalized) or is_path_in_any_root(normalized, [watch_dir, target_dir])
+
+
+def _is_safe_output_name(name):
+    """Return True when a user-supplied filename stem cannot alter directories."""
+    if not isinstance(name, str):
+        return False
+    if '\x00' in name:
+        return False
+    if not name or name in ('.', '..'):
+        return False
+    if os.path.isabs(name):
+        return False
+    return os.path.basename(name) == name
+
+
 def _flatten_to_rgb(image):
     """Convert an image with transparency or a palette to an RGB image."""
     if image.mode == 'P':
@@ -462,26 +490,33 @@ def replace_image():
 @files_bp.route('/api/combine-cbz', methods=['POST'])
 def combine_cbz():
     """Combine multiple CBZ files into a single CBZ file."""
-    data = request.get_json()
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Invalid request body"}), 400
+
     files = data.get('files', [])
     output_name = data.get('output_name', 'Combined')
     directory = data.get('directory')
 
+    if not isinstance(files, list) or not all(isinstance(f, str) for f in files):
+        return jsonify({"error": "Files must be a list of paths"}), 400
+
     if len(files) < 2:
         return jsonify({"error": "At least 2 files required"}), 400
 
-    if not directory:
+    if not isinstance(directory, str) or not directory:
         return jsonify({"error": "Directory not specified"}), 400
 
-    # Security: Validate all paths
-    from core.config import get_watch_dir, get_target_dir
-    watch_dir = get_watch_dir() or "/downloads/temp"
-    target_dir = get_target_dir() or "/downloads/processed"
+    if not _is_safe_output_name(output_name):
+        return jsonify({"error": "Invalid output name"}), 400
 
+    # Security: Validate all input and output paths
     for f in files:
-        normalized = os.path.normpath(f)
-        if not (is_valid_library_path(normalized) or is_path_in_any_root(normalized, [watch_dir, target_dir])):
+        if not _is_allowed_library_or_transfer_path(f):
             return jsonify({"error": "Access denied"}), 403
+
+    if not _is_allowed_library_or_transfer_path(directory):
+        return jsonify({"error": "Access denied"}), 403
 
     temp_dir = None
     try:
@@ -1265,6 +1300,9 @@ def crop_cover():
 
         if is_critical_path(file_path):
             return jsonify({'success': False, 'error': get_critical_path_error_message(file_path)}), 403
+
+        if not _is_allowed_library_or_transfer_path(file_path):
+            return jsonify({'success': False, 'error': 'Access denied'}), 403
 
         from cbz_ops.crop import handle_cbz_file
         app_logger.info(f"Crop cover requested for: {file_path}")

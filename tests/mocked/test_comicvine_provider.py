@@ -223,7 +223,13 @@ class TestComicVineProviderToComicinfo:
         assert result["Publisher"] == "DC Comics"
         assert result["Year"] == 2020
         assert result["Volume"] == 2016
-        mock_get_metadata.assert_called_once()
+        mock_get_metadata.assert_called_once_with(
+            "fake-cv-api-key",
+            4050,
+            "5",
+            start_year=2016,
+            publisher_name="DC Comics",
+        )
 
 
 class TestComicVineProviderIssueMetadata:
