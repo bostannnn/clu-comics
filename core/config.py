@@ -20,6 +20,26 @@ def write_config():
     with open(CONFIG_FILE, "w") as configfile:
         config.write(configfile)
 
+
+def is_oneshot_folder(folder_path) -> bool:
+    """True when the folder's base name is in the ONESHOT_FOLDERS setting.
+
+    One-shot folders (default: oneshots, one-shots, specials) hold unrelated
+    single issues, so metadata writes must not drop folder-level sidecars
+    (cvinfo / series.json) that would wrongly bind every file to one series.
+    Matching is case-insensitive on the base name, ignoring stray slashes.
+    """
+    if not folder_path:
+        return False
+    try:
+        names = config.get("SETTINGS", "ONESHOT_FOLDERS",
+                            fallback="oneshots,one-shots,specials")
+    except Exception:
+        names = "oneshots,one-shots,specials"
+    wanted = {n.strip().strip('/\\').lower() for n in names.split(',') if n.strip()}
+    base = os.path.basename(str(folder_path).rstrip('/\\')).lower()
+    return bool(base) and base in wanted
+
 def load_config():
     """
     Loads or (if missing) creates the config file, ensuring
@@ -66,7 +86,8 @@ def load_config():
         "TRASH_MAX_SIZE_MB": "1024",
         "PUBLICATION_TYPES": "annual,quarterly",
         "VARIANT_TYPES": "annual,quarterly,tpB,oneshot,one-shot,o.s.,os,trade paperback,trade-paperback,omni,omnibus,omb,hardcover,deluxe,prestige,gallery",
-        "SEQUEL_KEYWORDS": "season,volume,book,part,chapter"
+        "SEQUEL_KEYWORDS": "season,volume,book,part,chapter",
+        "ONESHOT_FOLDERS": "oneshots,one-shots,specials"
     }
 
     if not os.path.exists(CONFIG_FILE):
@@ -111,22 +132,22 @@ def _mirror_watch_target_into_memory_config():
     """Copy WATCH/TARGET from user_preferences into the in-memory ``config`` object.
 
     The values are NOT written to ``config.ini`` (write_config is not called).
+    Always populates sensible absolute-path defaults so legacy readers using
+    ``config.get("SETTINGS", "WATCH", fallback=...)`` never receive a relative
+    path (which would resolve against CWD and fail to create).
     """
+    if "SETTINGS" not in config:
+        config["SETTINGS"] = {}
+    watch_val = ""
+    target_val = ""
     try:
         from core.database import get_user_preference
-    except Exception:
-        return
-    try:
-        if "SETTINGS" not in config:
-            config["SETTINGS"] = {}
         watch_val = (get_user_preference("watch", default="") or "").strip()
         target_val = (get_user_preference("target", default="") or "").strip()
-        if watch_val:
-            config["SETTINGS"]["WATCH"] = watch_val
-        if target_val:
-            config["SETTINGS"]["TARGET"] = target_val
     except Exception as e:
-        app_logger.debug(f"In-memory WATCH/TARGET mirror skipped: {e}")
+        app_logger.debug(f"WATCH/TARGET lookup from user_preferences skipped: {e}")
+    config["SETTINGS"]["WATCH"] = watch_val or "/downloads/temp"
+    config["SETTINGS"]["TARGET"] = target_val or "/downloads/processed"
 
 
 def migrate_watch_target_to_user_preferences():

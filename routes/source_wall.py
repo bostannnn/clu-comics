@@ -13,10 +13,10 @@ from helpers.library import is_valid_library_path
 from core.database import (
     get_source_wall_files,
     update_file_index_ci_field,
-    bulk_update_file_index_ci_field,
     get_user_preference,
     set_user_preference,
     get_distinct_ci_values,
+    get_file_index_ci_for_paths,
 )
 
 source_wall_bp = Blueprint('source_wall', __name__)
@@ -75,71 +75,131 @@ def get_files():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
-@source_wall_bp.route('/api/source-wall/update-field', methods=['POST'])
-def update_field():
-    """Update a single ci_ field for one file, then sync to CBZ in background."""
+@source_wall_bp.route('/api/source-wall/save-pending', methods=['POST'])
+def save_pending():
+    """Commit a stash of staged edits.
+
+    Body: {"updates": {"<path>": {"<ci_field>": "<value>", ...}, ...}}
+
+    Each path appears exactly once with all its accumulated field changes,
+    so the parallel CBZ-write contract (distinct paths) holds, and each
+    file receives a single rebuild rather than one per field.
+    """
     data = request.get_json(silent=True) or {}
-    path = data.get('path', '')
-    field = data.get('field', '')
-    value = data.get('value', '')
+    updates = data.get('updates') or {}
 
-    if not path or not is_valid_library_path(path):
-        return jsonify({"success": False, "error": "Invalid path"}), 403
+    if not isinstance(updates, dict) or not updates:
+        return jsonify({"success": False, "error": "No updates provided"}), 400
 
-    if field not in CI_FIELD_TO_XML:
-        return jsonify({"success": False, "error": f"Invalid field: {field}"}), 400
+    for path, fields in updates.items():
+        if not is_valid_library_path(path):
+            return jsonify({"success": False, "error": f"Invalid path: {path}"}), 403
+        if not isinstance(fields, dict) or not fields:
+            return jsonify({"success": False, "error": f"No fields for path: {path}"}), 400
+        for field in fields.keys():
+            if field not in CI_FIELD_TO_XML:
+                return jsonify({"success": False, "error": f"Invalid field: {field}"}), 400
 
-    ok = update_file_index_ci_field(path, field, value)
-    if not ok:
-        return jsonify({"success": False, "error": "Database update failed"}), 500
+    edit_count = 0
+    for path, fields in updates.items():
+        for field, value in fields.items():
+            ok = update_file_index_ci_field(path, field, value)
+            if not ok:
+                return jsonify({"success": False, "error": "Database update failed"}), 500
+            edit_count += 1
 
-    # Sync to CBZ in background
-    xml_tag = CI_FIELD_TO_XML[field]
-    t = threading.Thread(
-        target=_sync_field_to_cbz,
-        args=(path, {xml_tag: value}),
-        daemon=True,
-    )
-    t.start()
-
-    return jsonify({"success": True})
-
-
-@source_wall_bp.route('/api/source-wall/bulk-update', methods=['POST'])
-def bulk_update():
-    """Bulk update a ci_ field across multiple files with background CBZ sync."""
-    data = request.get_json(silent=True) or {}
-    paths = data.get('paths', [])
-    field = data.get('field', '')
-    value = data.get('value', '')
-
-    if not paths:
-        return jsonify({"success": False, "error": "No files specified"}), 400
-
-    if field not in CI_FIELD_TO_XML:
-        return jsonify({"success": False, "error": f"Invalid field: {field}"}), 400
-
-    for p in paths:
-        if not is_valid_library_path(p):
-            return jsonify({"success": False, "error": f"Invalid path: {p}"}), 403
-
-    affected = bulk_update_file_index_ci_field(paths, field, value)
-    if affected < 0:
-        return jsonify({"success": False, "error": "Database update failed"}), 500
+    items = [
+        (path, {CI_FIELD_TO_XML[field]: value for field, value in fields.items()})
+        for path, fields in updates.items()
+    ]
 
     import core.app_state as app_state
-    xml_tag = CI_FIELD_TO_XML[field]
-    label = f"Updating {xml_tag} for {len(paths)} files"
-    op_id = app_state.register_operation("source_wall", label, total=len(paths))
+    label = f"Saving updates to {len(items)} files"
+    op_id = app_state.register_operation("source_wall", label, total=len(items))
 
     t = threading.Thread(
-        target=_bulk_sync_to_cbz,
-        args=(paths, xml_tag, value, op_id),
+        target=_bulk_sync_pending_to_cbz,
+        args=(items, op_id),
         daemon=True,
     )
     t.start()
 
-    return jsonify({"success": True, "op_id": op_id, "affected": affected})
+    return jsonify({
+        "success": True,
+        "op_id": op_id,
+        "affected": len(items),
+        "edits": edit_count,
+    })
+
+
+@source_wall_bp.route('/api/source-wall/reconcile-from-db', methods=['POST'])
+def reconcile_from_db():
+    """Rewrite ComicInfo.xml on disk from current file_index ci_ values.
+
+    Body: {"paths": ["<path>", ...]}
+
+    For each path, reads the committed ci_ fields from file_index and rebuilds
+    the CBZ's ComicInfo.xml to match. Used to fix drift where the DB has
+    metadata but the on-disk XML is missing/stale (e.g., a previous save's
+    background write failed, or the archive was edited externally).
+
+    Treats the DB as the source of truth — any non-empty ci_ field is written;
+    files with all-empty ci_ values are skipped (nothing to write).
+    """
+    data = request.get_json(silent=True) or {}
+    paths = data.get('paths') or []
+
+    if not isinstance(paths, list) or not paths:
+        return jsonify({"success": False, "error": "No paths provided"}), 400
+
+    for path in paths:
+        if not isinstance(path, str) or not is_valid_library_path(path):
+            return jsonify({"success": False, "error": f"Invalid path: {path}"}), 403
+
+    # Deduplicate to preserve the distinct-path contract for bulk writes.
+    unique_paths = list(dict.fromkeys(paths))
+
+    rows = get_file_index_ci_for_paths(unique_paths)
+
+    items = []
+    for path in unique_paths:
+        ci_fields = rows.get(path)
+        if not ci_fields:
+            continue
+        xml_fields = {
+            CI_FIELD_TO_XML[field]: value
+            for field, value in ci_fields.items()
+            if field in CI_FIELD_TO_XML and value
+        }
+        if xml_fields:
+            items.append((path, xml_fields))
+
+    skipped = len(unique_paths) - len(items)
+
+    if not items:
+        return jsonify({
+            "success": False,
+            "error": "No files have ci_ data to write",
+            "skipped": skipped,
+        }), 400
+
+    import core.app_state as app_state
+    label = f"Writing XML for {len(items)} files"
+    op_id = app_state.register_operation("source_wall", label, total=len(items))
+
+    t = threading.Thread(
+        target=_bulk_sync_pending_to_cbz,
+        args=(items, op_id),
+        daemon=True,
+    )
+    t.start()
+
+    return jsonify({
+        "success": True,
+        "op_id": op_id,
+        "affected": len(items),
+        "skipped": skipped,
+    })
 
 
 @source_wall_bp.route('/api/source-wall/columns')
@@ -180,23 +240,30 @@ def suggest_values():
     return jsonify({"success": True, "values": values})
 
 
-def _sync_field_to_cbz(path, updates):
-    """Sync field changes to the actual CBZ file."""
-    try:
-        import core.comicinfo as comicinfo
-        comicinfo.update_comicinfo_in_zip(path, updates)
-    except Exception as e:
-        app_logger.error(f"Failed to sync field to CBZ {path}: {e}")
+def _bulk_sync_pending_to_cbz(items, op_id):
+    """Background worker: rebuild each CBZ once with all its staged field changes.
 
-
-def _bulk_sync_to_cbz(paths, xml_tag, value, op_id):
-    """Background worker: sync field change to multiple CBZ files in parallel."""
+    `items` is a list of (path, {xml_tag: value, ...}) tuples where each path
+    appears exactly once, satisfying the distinct-path contract of
+    bulk_update_comicinfo_in_zips.
+    """
+    import zipfile
     import core.app_state as app_state
     import core.comicinfo as comicinfo
+    from core.database import set_has_comicinfo
 
-    items = [(path, {xml_tag: value}) for path in paths]
+    def _resync_has_comicinfo(path):
+        """Re-read the archive and flip file_index.has_comicinfo to match on-disk state."""
+        try:
+            with zipfile.ZipFile(path, 'r') as z:
+                present = 1 if comicinfo.find_comicinfo_in_zip(z) else 0
+            set_has_comicinfo(path, present)
+        except Exception as e:
+            app_logger.warning(f"has_comicinfo resync failed for {path}: {e}")
 
     def on_progress(completed, total, path, error):
+        if error is None:
+            _resync_has_comicinfo(path)
         app_state.update_operation(
             op_id,
             current=completed,

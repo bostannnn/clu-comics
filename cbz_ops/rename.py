@@ -1,6 +1,7 @@
 import sys
 import os
 import re
+import calendar
 import configparser
 from core.app_logging import app_logger
 from helpers import is_hidden
@@ -365,6 +366,41 @@ def _pad_issue_number(num_str, width=3):
     return num_str.zfill(width)
 
 
+def _format_issue_month(month_raw):
+    """Convert a month value (1-12, int or str) into display variants.
+
+    Returns a tuple (month_name, month_padded), e.g. (6) -> ("June", "06").
+    Returns ("", "") when the value is missing or not a valid 1-12 month.
+    """
+    try:
+        m = int(month_raw)
+    except (TypeError, ValueError):
+        return "", ""
+    if 1 <= m <= 12:
+        return calendar.month_name[m], f"{m:02d}"
+    return "", ""
+
+
+def _format_date_parts(date_str):
+    """Parse a 'YYYY-MM-DD' (or 'YYYY') date string into display variants.
+
+    Returns a tuple (year, month_name, month_padded), e.g.
+    "2010-06-01" -> ("2010", "June", "06"). Returns ("", "", "") when blank or
+    unparseable. Month name/padded are empty when only a year is present.
+    """
+    if not date_str:
+        return "", "", ""
+    m = re.match(r"(\d{4})(?:-(\d{1,2}))?", str(date_str).strip())
+    if not m:
+        return "", "", ""
+    year = m.group(1)
+    if m.group(2):
+        month_name, month_padded = _format_issue_month(m.group(2))
+    else:
+        month_name, month_padded = "", ""
+    return year, month_name, month_padded
+
+
 _FILENAME_CLEANUP_DEFAULTS = {
     "spaces_enabled": False,
     "spaces_mode": "replace",
@@ -488,10 +524,14 @@ def load_custom_rename_config():
 
         enabled = get_user_preference("enable_custom_rename", default=False)
         pattern = get_user_preference("custom_rename_pattern", default="")
+        # Legacy normalization: {year} was renamed to {volume_year}. Rewrite on read
+        # so any not-yet-migrated stored pattern still resolves. Literal replace is
+        # exact and never touches {cover_year}/{store_year}/{issue_year}/{volume_year}.
+        pattern = (pattern or "").replace("{year}", "{volume_year}")
         app_logger.debug(
             f"Loaded custom rename config: enabled={enabled}, pattern={pattern}"
         )
-        return bool(enabled), pattern or ""
+        return bool(enabled), pattern
     except Exception as e:
         app_logger.warning(f"Failed to load custom rename config from DB: {e}")
         return False, ""
@@ -504,7 +544,14 @@ _TOKEN_REGEX = {
     "series_name": r"(?P<series_name>.+?)",
     "issue_number": r"(?P<issue_number>\d{1,4}(?:\.\w+)?)",
     "volume_number": r"(?P<volume_number>\d{1,4})",
-    "year": r"(?P<year>\d{4})",
+    "volume_year": r"(?P<year>\d{4})",
+    "issue_year": r"(?P<issue_year>\d{4})",
+    "cover_year": r"(?P<cover_year>\d{4})",
+    "cover_month_m": r"(?P<cover_month_m>\d{2})",
+    "cover_month_M": r"(?P<cover_month_M>[A-Za-z]+)",
+    "store_year": r"(?P<store_year>\d{4})",
+    "store_month_m": r"(?P<store_month_m>\d{2})",
+    "store_month_M": r"(?P<store_month_M>[A-Za-z]+)",
     "issue_title": r"(?P<issue_title>.+?)",
 }
 
@@ -1037,7 +1084,21 @@ def apply_custom_pattern(values, pattern):
     # Replace variables with extracted values
     result = result.replace("{series_name}", series_name)
     result = result.replace("{volume_number}", values.get("volume_number", ""))
+    # {volume_year} resolves to the series/volume start year; fall back to the parsed
+    # year (reverse-parse from filename only fills "year").
+    result = result.replace(
+        "{volume_year}", values.get("volume_year") or values.get("year", "")
+    )
+    # Keep legacy patterns functional when they are supplied directly instead of
+    # passing through load_custom_rename_config's migration.
     result = result.replace("{year}", values.get("year", ""))
+    result = result.replace("{issue_year}", values.get("issue_year", ""))
+    result = result.replace("{cover_year}", values.get("cover_year", ""))
+    result = result.replace("{cover_month_M}", values.get("cover_month_M", ""))
+    result = result.replace("{cover_month_m}", values.get("cover_month_m", ""))
+    result = result.replace("{store_year}", values.get("store_year", ""))
+    result = result.replace("{store_month_M}", values.get("store_month_M", ""))
+    result = result.replace("{store_month_m}", values.get("store_month_m", ""))
     result = result.replace("{issue_number}", issue_number)
 
     # Replace issue_title with sanitization
@@ -1049,6 +1110,11 @@ def apply_custom_pattern(values, pattern):
 
     # Clean up extra spaces and trim
     result = re.sub(r"\s+", " ", result).strip()
+
+    # Remove a separator left dangling against a parenthesis boundary when a
+    # token resolved empty (e.g. "(2020-)" -> "(2020)", "(-06)" -> "(06)")
+    result = re.sub(r"\(\s*-\s*", "(", result)
+    result = re.sub(r"\s*-\s*\)", ")", result)
 
     # Remove empty parentheses and space before them
     result = re.sub(r"\s*\(\s*\)", "", result).strip()
@@ -1283,10 +1349,29 @@ def rename_comic_from_metadata(file_path, metadata):
         series = re.sub(r'[<>"/\\|?*]', "", series)
         series = smart_title_case(series)
 
+        # Cover/store dates (live-fetch only; absent in ComicInfo-only re-renames)
+        cover_year, cover_month_M, cover_month_m = _format_date_parts(metadata.get("CoverDate"))
+        store_year, store_month_M, store_month_m = _format_date_parts(metadata.get("StoreDate"))
+
+        # {volume_year} = series/volume start year (ComicInfo Volume field:
+        # ComicVine start_year / Metron year_began). GCD stores a volume *number*
+        # there, so guard to a 4-digit year and let apply_custom_pattern fall back
+        # to the issue year when it isn't one.
+        vol_raw = str(metadata.get("Volume", "") or "").strip()
+        volume_year = vol_raw if re.fullmatch(r"\d{4}", vol_raw) else ""
+
         values = {
             "series_name": series,
             "volume_number": "",
+            "volume_year": volume_year,
             "year": str(metadata.get("Year", "")),
+            "issue_year": str(metadata.get("Year", "")),
+            "cover_year": cover_year,
+            "cover_month_M": cover_month_M,
+            "cover_month_m": cover_month_m,
+            "store_year": store_year,
+            "store_month_M": store_month_M,
+            "store_month_m": store_month_m,
             "issue_number": _pad_issue_number(str(metadata.get("Number", ""))),
             "issue_title": metadata.get("Title", "") or "",
         }
@@ -1331,7 +1416,14 @@ def validate_custom_pattern(pattern):
     valid_variables = [
         "{series_name}",
         "{volume_number}",
-        "{year}",
+        "{volume_year}",
+        "{issue_year}",
+        "{cover_year}",
+        "{cover_month_M}",
+        "{cover_month_m}",
+        "{store_year}",
+        "{store_month_M}",
+        "{store_month_m}",
         "{issue_number}",
         "{issue_title}",
     ]
@@ -1522,11 +1614,20 @@ def get_renamed_filename(filename, file_path=None):
             # Extract comic values from the filename
             comic_values = extract_comic_values(filename)
 
-            # Read issue title from ComicInfo.xml if needed
+            # Default issue_year to the year parsed from the filename;
+            # ComicInfo.xml (read below) takes precedence when available.
+            comic_values.setdefault("issue_year", comic_values.get("year", ""))
+
+            # Tokens that require reading ComicInfo.xml for accurate values
+            needs_comicinfo = (
+                "{issue_title}" in custom_pattern or "{issue_year}" in custom_pattern
+            )
+
+            # Read issue title / publication year from ComicInfo.xml if needed
             if (
                 file_path
                 and file_path.lower().endswith(".cbz")
-                and "{issue_title}" in custom_pattern
+                and needs_comicinfo
             ):
                 try:
                     from core.comicinfo import read_comicinfo_from_zip
@@ -1534,6 +1635,8 @@ def get_renamed_filename(filename, file_path=None):
                     comicinfo = read_comicinfo_from_zip(file_path)
                     if comicinfo.get("Title"):
                         comic_values["issue_title"] = comicinfo["Title"]
+                    if comicinfo.get("Year"):
+                        comic_values["issue_year"] = str(comicinfo["Year"])
                 except Exception:
                     pass
 
@@ -2121,14 +2224,14 @@ def test_custom_rename():
     }
 
     test_patterns = [
-        ("{series_name} {issue_number} ({year})", "Spider-Man 2099 044 (1992)"),
-        ("{series_name} [{year}] {issue_number}", "Spider-Man 2099 [1992] 044"),
+        ("{series_name} {issue_number} ({volume_year})", "Spider-Man 2099 044 (1992)"),
+        ("{series_name} [{volume_year}] {issue_number}", "Spider-Man 2099 [1992] 044"),
         ("issue{issue_number}", "issue044"),
         ("{volume_number}_{issue_number}", "v2_044"),
-        ("{series_name} - {year}", "Spider-Man 2099 - 1992"),
+        ("{series_name} - {volume_year}", "Spider-Man 2099 - 1992"),
         ("{series_name} {volume_number} {issue_number}", "Spider-Man 2099 v2 044"),
         (
-            "{series_name} {issue_number} - {issue_title} ({year})",
+            "{series_name} {issue_number} - {issue_title} ({volume_year})",
             "Spider-Man 2099 044 - The Last Dance (1992)",
         ),
     ]

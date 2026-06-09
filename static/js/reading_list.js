@@ -959,6 +959,7 @@ function formatSearchTerm(series, number, volume, year) {
         .replace('{issue_number}', paddedNumber)
         .replace('{issue}', paddedNumber)
         .replace('{volume}', volume || '')
+        .replace('{volume_year}', year || '')
         .replace('{year}', year || '')
         .replace('{start_year}', volume || year || '');
 
@@ -1034,11 +1035,13 @@ function searchFiles(retryWithoutFirstWord = false) {
                 const item = document.createElement('div');
                 item.className = 'list-group-item list-group-item-action search-result-item';
                 item.innerHTML = `
-                <div class="d-flex w-100 justify-content-between">
-                    <h6 class="mb-1 text-truncate">${file.name}</h6>
-                    <small class="text-muted">${file.path.split('/').slice(-2, -1)[0]}</small>
+                <div class="d-flex flex-column w-100">
+                    <div class="d-flex w-100 justify-content-between">
+                        <h6 class="mb-1 text-truncate">${file.name}</h6>
+                        <small class="text-muted">${file.path.split('/').slice(-2, -1)[0]}</small>
+                    </div>
+                    <small class="text-info-emphasis text-break font-monospace">${file.path}</small>
                 </div>
-                <small class="text-muted text-break">${file.path}</small>
             `;
                 item.onclick = () => selectFile(file.path, item);
                 resultsDiv.appendChild(item);
@@ -1220,11 +1223,13 @@ function searchFilesForAdd() {
                 const item = document.createElement('div');
                 item.className = 'list-group-item list-group-item-action search-result-item';
                 item.innerHTML = `
-                    <div class="d-flex w-100 justify-content-between">
-                        <h6 class="mb-1 text-truncate">${file.name}</h6>
-                        <small class="text-muted">${file.path.split('/').slice(-2, -1)[0]}</small>
+                    <div class="d-flex flex-column w-100">
+                        <div class="d-flex w-100 justify-content-between">
+                            <h6 class="mb-1 text-truncate">${file.name}</h6>
+                            <small class="text-muted">${file.path.split('/').slice(-2, -1)[0]}</small>
+                        </div>
+                        <small class="text-info-emphasis text-break font-monospace">${file.path}</small>
                     </div>
-                    <small class="text-muted text-break">${file.path}</small>
                 `;
                 item.onclick = () => {
                     selectedAddFilePath = file.path;

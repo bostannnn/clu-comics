@@ -200,21 +200,45 @@ class TestApplyCustomPattern:
         return {
             "series_name": "Spider-Man 2099",
             "volume_number": "v2",
+            "volume_year": "1992",
             "year": "1992",
+            "issue_year": "1992",
+            "cover_year": "1992",
+            "cover_month_M": "June",
+            "cover_month_m": "06",
+            "store_year": "1992",
+            "store_month_M": "July",
+            "store_month_m": "07",
             "issue_number": "044",
             "issue_title": "The Last Dance",
         }
 
     @pytest.mark.parametrize("pattern,expected", [
-        ("{series_name} {issue_number} ({year})", "Spider-Man 2099 044 (1992)"),
-        ("{series_name} [{year}] {issue_number}", "Spider-Man 2099 [1992] 044"),
+        ("{series_name} {issue_number} ({volume_year})", "Spider-Man 2099 044 (1992)"),
+        ("{series_name} [{volume_year}] {issue_number}", "Spider-Man 2099 [1992] 044"),
         ("issue{issue_number}", "issue044"),
         ("{volume_number}_{issue_number}", "v2_044"),
-        ("{series_name} - {year}", "Spider-Man 2099 - 1992"),
+        ("{series_name} - {volume_year}", "Spider-Man 2099 - 1992"),
         ("{series_name} {volume_number} {issue_number}", "Spider-Man 2099 v2 044"),
         (
-            "{series_name} {issue_number} - {issue_title} ({year})",
+            "{series_name} {issue_number} - {issue_title} ({volume_year})",
             "Spider-Man 2099 044 - The Last Dance (1992)",
+        ),
+        (
+            "{series_name} {issue_number} ({issue_year})",
+            "Spider-Man 2099 044 (1992)",
+        ),
+        (
+            "{series_name} ({cover_year}-{cover_month_m})",
+            "Spider-Man 2099 (1992-06)",
+        ),
+        (
+            "{series_name} {issue_number} {cover_month_M} {cover_year}",
+            "Spider-Man 2099 044 June 1992",
+        ),
+        (
+            "{series_name} {issue_number} [{store_month_M} {store_year}]",
+            "Spider-Man 2099 044 [July 1992]",
         ),
     ])
     def test_custom_patterns(self, sample_values, pattern, expected):
@@ -245,6 +269,54 @@ class TestApplyCustomPattern:
         assert "/" not in result
         assert "\\" not in result
         assert '"' not in result
+
+    def test_volume_year_prefers_volume_year_value(self):
+        from cbz_ops.rename import apply_custom_pattern
+        values = {
+            "series_name": "X", "issue_number": "001",
+            "volume_year": "2016", "year": "2099",
+        }
+        assert apply_custom_pattern(values, "{series_name} {issue_number} ({volume_year})") \
+            == "X 001 (2016)"
+
+    def test_volume_year_falls_back_to_parsed_year(self):
+        # Reverse-parse path only fills "year"; {volume_year} should pick it up.
+        from cbz_ops.rename import apply_custom_pattern
+        values = {"series_name": "X", "issue_number": "001", "year": "2020"}
+        assert apply_custom_pattern(values, "{series_name} {issue_number} ({volume_year})") \
+            == "X 001 (2020)"
+
+
+# ===== load_custom_rename_config (legacy {year} migration) =====
+
+class TestLoadCustomRenameConfig:
+
+    def test_legacy_year_token_normalized_on_read(self):
+        from cbz_ops import rename as rename_mod
+
+        def fake_pref(key, default=None):
+            return {
+                "enable_custom_rename": True,
+                "custom_rename_pattern": "{series_name} {issue_number} ({year})",
+            }.get(key, default)
+
+        with patch("core.database.get_user_preference", side_effect=fake_pref):
+            enabled, pattern = rename_mod.load_custom_rename_config()
+        assert enabled is True
+        assert pattern == "{series_name} {issue_number} ({volume_year})"
+
+    def test_other_year_tokens_untouched(self):
+        from cbz_ops import rename as rename_mod
+
+        def fake_pref(key, default=None):
+            return {
+                "enable_custom_rename": True,
+                "custom_rename_pattern": "{series_name} ({cover_year}) {issue_year} {store_year}",
+            }.get(key, default)
+
+        with patch("core.database.get_user_preference", side_effect=fake_pref):
+            _, pattern = rename_mod.load_custom_rename_config()
+        assert pattern == "{series_name} ({cover_year}) {issue_year} {store_year}"
 
 
 # ===== _apply_filters =====
@@ -523,7 +595,7 @@ class TestRenameComicFromMetadata:
         assert result_path == str(f)
         assert was_renamed is False
 
-    @patch('cbz_ops.rename.load_custom_rename_config', return_value=(True, '{series_name} {issue_number} ({year})'))
+    @patch('cbz_ops.rename.load_custom_rename_config', return_value=(True, '{series_name} {issue_number} ({volume_year})'))
     def test_renames_with_pattern(self, mock_config, tmp_path):
         f = tmp_path / "old.cbz"
         f.write_bytes(b"fake")
@@ -556,7 +628,7 @@ class TestRenameComicFromMetadata:
         assert result_path == str(f)
         assert os.path.exists(str(f))
 
-    @patch('cbz_ops.rename.load_custom_rename_config', return_value=(True, '{series_name} {issue_number} ({year})'))
+    @patch('cbz_ops.rename.load_custom_rename_config', return_value=(True, '{series_name} {issue_number} ({volume_year})'))
     def test_renames_decimal_issue_number(self, mock_config, tmp_path):
         f = tmp_path / "old.cbz"
         f.write_bytes(b"fake")
@@ -575,7 +647,7 @@ class TestRenameComicFromMetadata:
         assert was_renamed is False
         assert result_path == str(f)
 
-    @patch('cbz_ops.rename.load_custom_rename_config', return_value=(True, '{series_name} {issue_number} ({year})'))
+    @patch('cbz_ops.rename.load_custom_rename_config', return_value=(True, '{series_name} {issue_number} ({volume_year})'))
     def test_renames_manga_volume_number(self, mock_config, tmp_path):
         f = tmp_path / "old.cbz"
         f.write_bytes(b"fake")
@@ -584,6 +656,83 @@ class TestRenameComicFromMetadata:
         assert was_renamed is True
         assert os.path.basename(result_path) == "Dinosaur Sanctuary v01 (2021).cbz"
         assert os.path.exists(result_path)
+
+    @patch('cbz_ops.rename.load_custom_rename_config',
+           return_value=(True, '{series_name} {issue_number} ({issue_year})'))
+    def test_renames_with_issue_year(self, mock_config, tmp_path):
+        f = tmp_path / "old.cbz"
+        f.write_bytes(b"fake")
+        from cbz_ops.rename import rename_comic_from_metadata
+        result_path, was_renamed = rename_comic_from_metadata(
+            str(f), {'Series': 'Batman', 'Number': '1', 'Year': 2020})
+        assert was_renamed is True
+        assert os.path.basename(result_path) == "Batman 001 (2020).cbz"
+        assert os.path.exists(result_path)
+
+    @patch('cbz_ops.rename.load_custom_rename_config',
+           return_value=(True, '{series_name} {issue_number} ({cover_year}-{cover_month_m})'))
+    def test_renames_with_cover_date(self, mock_config, tmp_path):
+        f = tmp_path / "old.cbz"
+        f.write_bytes(b"fake")
+        from cbz_ops.rename import rename_comic_from_metadata
+        result_path, was_renamed = rename_comic_from_metadata(
+            str(f), {'Series': 'Batman', 'Number': '1', 'Year': 2020, 'Month': 5,
+                     'CoverDate': '2010-03-01', 'StoreDate': '2010-05-01'})
+        assert was_renamed is True
+        # Cover month (March -> 03), distinct from store month
+        assert os.path.basename(result_path) == "Batman 001 (2010-03).cbz"
+
+    @patch('cbz_ops.rename.load_custom_rename_config',
+           return_value=(True, '{series_name} {issue_number} cover-{cover_month_M} store-{store_month_M}'))
+    def test_cover_and_store_months_differ(self, mock_config, tmp_path):
+        f = tmp_path / "old.cbz"
+        f.write_bytes(b"fake")
+        from cbz_ops.rename import rename_comic_from_metadata
+        result_path, was_renamed = rename_comic_from_metadata(
+            str(f), {'Series': 'Batman', 'Number': '1',
+                     'CoverDate': '2010-03-01', 'StoreDate': '2010-05-15'})
+        assert was_renamed is True
+        assert os.path.basename(result_path) == "Batman 001 cover-March store-May.cbz"
+
+    @patch('cbz_ops.rename.load_custom_rename_config',
+           return_value=(True, '{series_name} {issue_number} ({cover_year}-{cover_month_m})'))
+    def test_missing_cover_date_drops_cleanly(self, mock_config, tmp_path):
+        # No CoverDate -> cover tokens resolve empty, no stray separators
+        f = tmp_path / "old.cbz"
+        f.write_bytes(b"fake")
+        from cbz_ops.rename import rename_comic_from_metadata
+        result_path, was_renamed = rename_comic_from_metadata(
+            str(f), {'Series': 'Batman', 'Number': '1', 'Year': 2020})
+        assert was_renamed is True
+        name = os.path.basename(result_path)
+        assert name == "Batman 001.cbz"
+        assert "-)" not in name and "(-" not in name and "()" not in name
+
+    @patch('cbz_ops.rename.load_custom_rename_config',
+           return_value=(True, '{series_name} {issue_number} ({volume_year})'))
+    def test_volume_year_uses_volume_field(self, mock_config, tmp_path):
+        # {volume_year} = series/volume start year (ComicInfo Volume), distinct from
+        # the issue Year. Volume 2016 should win over Year 2099.
+        f = tmp_path / "old.cbz"
+        f.write_bytes(b"fake")
+        from cbz_ops.rename import rename_comic_from_metadata
+        result_path, was_renamed = rename_comic_from_metadata(
+            str(f), {'Series': 'Spider-Man', 'Number': '1', 'Year': 2099, 'Volume': 2016})
+        assert was_renamed is True
+        assert os.path.basename(result_path) == "Spider-Man 001 (2016).cbz"
+
+    @patch('cbz_ops.rename.load_custom_rename_config',
+           return_value=(True, '{series_name} {issue_number} ({volume_year})'))
+    def test_volume_year_falls_back_to_issue_year_when_volume_not_a_year(self, mock_config, tmp_path):
+        # GCD stores a volume *number* in Volume; the 4-digit guard makes {volume_year}
+        # fall back to the issue Year.
+        f = tmp_path / "old.cbz"
+        f.write_bytes(b"fake")
+        from cbz_ops.rename import rename_comic_from_metadata
+        result_path, was_renamed = rename_comic_from_metadata(
+            str(f), {'Series': 'Batman', 'Number': '1', 'Year': 2020, 'Volume': '1'})
+        assert was_renamed is True
+        assert os.path.basename(result_path) == "Batman 001 (2020).cbz"
 
 
 class TestRenameFileUsingCustomPattern:
@@ -817,7 +966,7 @@ class TestReverseParsePattern:
         from cbz_ops.rename import reverse_parse_pattern
         result = reverse_parse_pattern(
             "Batman #001 V2021 (2021)",
-            "{series_name} #{issue_number} V{volume_number} ({year})"
+            "{series_name} #{issue_number} V{volume_number} ({volume_year})"
         )
         assert result is not None
         assert result["series_name"] == "Batman"
@@ -829,7 +978,7 @@ class TestReverseParsePattern:
         from cbz_ops.rename import reverse_parse_pattern
         result = reverse_parse_pattern(
             "Miskatonic - Even Death May Die #001 V2021 (2021)",
-            "{series_name} #{issue_number} V{volume_number} ({year})"
+            "{series_name} #{issue_number} V{volume_number} ({volume_year})"
         )
         assert result is not None
         assert result["series_name"] == "Miskatonic - Even Death May Die"
@@ -841,7 +990,7 @@ class TestReverseParsePattern:
         from cbz_ops.rename import reverse_parse_pattern
         result = reverse_parse_pattern(
             "Batman 042 (2020)",
-            "{series_name} {issue_number} ({year})"
+            "{series_name} {issue_number} ({volume_year})"
         )
         assert result is not None
         assert result["series_name"] == "Batman"
@@ -852,7 +1001,7 @@ class TestReverseParsePattern:
         from cbz_ops.rename import reverse_parse_pattern
         result = reverse_parse_pattern(
             "Batman 042 - Court of Owls (2020)",
-            "{series_name} {issue_number} - {issue_title} ({year})"
+            "{series_name} {issue_number} - {issue_title} ({volume_year})"
         )
         assert result is not None
         assert result["series_name"] == "Batman"
@@ -864,7 +1013,7 @@ class TestReverseParsePattern:
         from cbz_ops.rename import reverse_parse_pattern
         result = reverse_parse_pattern(
             "totally different format",
-            "{series_name} #{issue_number} ({year})"
+            "{series_name} #{issue_number} ({volume_year})"
         )
         assert result is None
 
@@ -884,7 +1033,7 @@ class TestReverseParsePattern:
         from cbz_ops.rename import reverse_parse_pattern
         result = reverse_parse_pattern(
             "Batman  042  (2020)",
-            "{series_name} {issue_number} ({year})"
+            "{series_name} {issue_number} ({volume_year})"
         )
         assert result is not None
         assert result["series_name"] == "Batman"
@@ -894,7 +1043,7 @@ class TestReverseParsePattern:
         from cbz_ops.rename import reverse_parse_pattern
         result = reverse_parse_pattern(
             "Batman #001 v2021 (2021)",
-            "{series_name} #{issue_number} V{volume_number} ({year})"
+            "{series_name} #{issue_number} V{volume_number} ({volume_year})"
         )
         assert result is not None
         assert result["issue_number"] == "001"
@@ -903,7 +1052,7 @@ class TestReverseParsePattern:
         from cbz_ops.rename import reverse_parse_pattern
         result = reverse_parse_pattern(
             "Avengers 012.1 (2011)",
-            "{series_name} {issue_number} ({year})"
+            "{series_name} {issue_number} ({volume_year})"
         )
         assert result is not None
         assert result["issue_number"] == "012.1"
@@ -917,7 +1066,7 @@ class TestParseComicFilename:
         from cbz_ops.rename import parse_comic_filename
         result = parse_comic_filename(
             "Miskatonic - Even Death May Die #001 V2021 (2021).cbz",
-            custom_pattern="{series_name} #{issue_number} V{volume_number} ({year})"
+            custom_pattern="{series_name} #{issue_number} V{volume_number} ({volume_year})"
         )
         assert result["series_name"] == "Miskatonic - Even Death May Die"
         assert result["issue_number"] == "1"  # Stripped leading zeros
@@ -944,7 +1093,7 @@ class TestParseComicFilename:
         from cbz_ops.rename import parse_comic_filename
         result = parse_comic_filename(
             "Batman 001 (2020).cbz",
-            custom_pattern="{series_name} #{issue_number} V{volume_number} ({year})"
+            custom_pattern="{series_name} #{issue_number} V{volume_number} ({volume_year})"
         )
         # Custom pattern won't match "Batman 001 (2020)" (missing #, V), falls back
         assert result["series_name"]
@@ -962,7 +1111,7 @@ class TestParseComicFilename:
         from cbz_ops.rename import parse_comic_filename
         result = parse_comic_filename(
             "Batman #042 (2020).cbz",
-            custom_pattern="{series_name} #{issue_number} ({year})"
+            custom_pattern="{series_name} #{issue_number} ({volume_year})"
         )
         assert result["issue_number"] == "42"
 
@@ -970,7 +1119,7 @@ class TestParseComicFilename:
         from cbz_ops.rename import parse_comic_filename
         result = parse_comic_filename(
             "Avengers 012.1 (2011).cbz",
-            custom_pattern="{series_name} {issue_number} ({year})"
+            custom_pattern="{series_name} {issue_number} ({volume_year})"
         )
         assert result["issue_number"] == "12.1"
 

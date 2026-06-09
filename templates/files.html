@@ -679,6 +679,7 @@
 
 {% include 'partials/modal_update_xml.html' %}
 {% include 'partials/modal_add_to_reading_list.html' %}
+{% include 'partials/modal_bulk_metadata_review.html' %}
 
 {% endblock %}
 
@@ -706,6 +707,7 @@
   };
 </script>
 <script src="{{ url_for('static', filename='js/files.js') }}?v={{ range(1000, 9999) | random }}&t=202502"></script>
+<script src="{{ url_for('static', filename='js/bulk-metadata-review.js') }}?v={{ range(1000, 9999) | random }}"></script>
 <script
   src="{{ url_for('static', filename='js/files_context_menu.js') }}?v={{ range(1000, 9999) | random }}&t=202502"></script>
 <script>

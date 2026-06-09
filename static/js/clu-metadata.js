@@ -34,6 +34,58 @@
     return typeof c.getLibraryId === 'function' ? c.getLibraryId() : null;
   }
 
+  // ── Skip-to-next-provider helpers ─────────────────────────────────────
+
+  /**
+   * Providers that remain to be tried after the current one.
+   * providerOrder is the (already skip-filtered) order returned by the backend.
+   */
+  function _remainingProviders(providerOrder, currentProvider, skipProviders) {
+    if (!Array.isArray(providerOrder)) return [];
+    var skip = (skipProviders || []).slice();
+    if (currentProvider) skip.push(currentProvider);
+    var idx = providerOrder.indexOf(currentProvider);
+    var rest = idx >= 0 ? providerOrder.slice(idx + 1) : providerOrder.slice();
+    return rest.filter(function (p) { return skip.indexOf(p) === -1; });
+  }
+
+  /**
+   * Show/hide and wire a modal's "Skip to next provider" button.
+   * Hides it when no further providers remain. Clicking it closes the
+   * containing modal and asks the backend for the next provider.
+   */
+  function _wireSkipButton(btnId, data, filePath, fileName, skipProviders, onSkip) {
+    var btn = document.getElementById(btnId);
+    if (!btn) return;
+
+    var remaining = _remainingProviders(data.provider_order, data.provider, skipProviders);
+    if (!remaining.length) {
+      btn.style.display = 'none';
+      return;
+    }
+    btn.style.display = '';
+
+    // Replace-clone to clear any listener from a previous open.
+    var newBtn = btn.cloneNode(true);
+    btn.parentNode.replaceChild(newBtn, btn);
+    newBtn.addEventListener('click', function () {
+      var modalEl = newBtn.closest('.modal');
+      if (modalEl) {
+        var m = bootstrap.Modal.getInstance(modalEl);
+        if (m) m.hide();
+      }
+      if (typeof onSkip === 'function') {
+        onSkip();
+      } else {
+        CLU.skipToNextProvider(filePath, fileName, data.provider, skipProviders);
+      }
+    });
+  }
+
+  // Exposed so page-level modals (files.js: GCD MySQL, Manga) can wire their
+  // own "Skip to next provider" buttons with the same logic.
+  CLU.wireSkipButton = _wireSkipButton;
+
   // ── Progress toast builder ────────────────────────────────────────────
 
   function _buildProgressToast(title, countText, detailText, onCancel) {
@@ -333,9 +385,17 @@
       var descriptionPreview = volume.description ?
         '<small class="text-muted d-block mt-1">' + CLU.escapeHtml(volume.description) + '</small>' : '';
 
-      var thumbnailHtml = volume.image_url ?
-        '<img src="' + volume.image_url + '" class="img-thumbnail me-3" style="width: 80px; height: 120px; object-fit: cover;" alt="' + CLU.escapeHtml(volume.name || volume.issue_number || 'Issue') + ' cover">' :
-        '<div class="me-3 d-flex align-items-center justify-content-center bg-secondary text-white" style="width: 80px; height: 120px; font-size: 10px;">No Cover</div>';
+      // GCD (comics.org API) series results carry no cover — show a loading
+      // placeholder and fetch it lazily (see below). Other providers already
+      // include image_url, and non-GCD misses fall back to "No Cover".
+      var thumbnailHtml;
+      if (volume.image_url) {
+        thumbnailHtml = '<img src="' + volume.image_url + '" class="img-thumbnail me-3" style="width: 80px; height: 120px; object-fit: cover;" alt="' + CLU.escapeHtml(volume.name || volume.issue_number || 'Issue') + ' cover">';
+      } else if (volume._gcdApi && volume.id) {
+        thumbnailHtml = '<div class="img-thumbnail me-3 d-flex align-items-center justify-content-center text-muted" data-gcd-cover="' + CLU.escapeHtml(String(volume.id)) + '" style="width: 80px; height: 120px;"><span class="spinner-border spinner-border-sm"></span></div>';
+      } else {
+        thumbnailHtml = '<div class="me-3 d-flex align-items-center justify-content-center bg-secondary text-white" style="width: 80px; height: 120px; font-size: 10px;">No Cover</div>';
+      }
 
       var langBadge = volume.language ?
         '<span class="badge bg-info rounded-pill ms-1">' + CLU.escapeHtml((volume.language || '').toUpperCase()) + '</span>' : '';
@@ -368,6 +428,26 @@
       });
 
       volumeList.appendChild(volumeItem);
+
+      // Lazily fill GCD covers once the card scrolls into view; cache the URL
+      // back onto the volume so re-renders (sort/filter) skip the refetch.
+      if (!volume.image_url && volume._gcdApi && volume.id && window.CLU && CLU.lazyLoadGcdCover) {
+        var ph = volumeItem.querySelector('[data-gcd-cover]');
+        if (ph) {
+          CLU.lazyLoadGcdCover(ph, volume.id, volume._gcdIssue, function (url) {
+            volume.image_url = url;
+            var nodes = volumeList.querySelectorAll('[data-gcd-cover="' + CSS.escape(String(volume.id)) + '"]');
+            nodes.forEach(function (node) {
+              var img = document.createElement('img');
+              img.src = url;
+              img.className = 'img-thumbnail me-3';
+              img.style.cssText = 'width: 80px; height: 120px; object-fit: cover;';
+              img.alt = (volume.name || '') + ' cover';
+              if (node.parentNode) node.parentNode.replaceChild(img, node);
+            });
+          });
+        }
+      }
     });
   }
 
@@ -480,11 +560,71 @@
     _gcdApiLangFilter = '';
   }
 
-  function _showCVVolumeModal(data, filePath, fileName) {
-    var providerType = data.provider || 'comicvine';
-    var providerLabel = providerType === 'metron' ? 'Metron' : 'ComicVine';
+  /**
+   * Wire the inline "Refine" row (cvRefineSearchInput/cvRefineSearchBtn) to
+   * re-search a single provider with a revised series name. Shared by the
+   * ComicVine/Metron modals and the GCD API results modal so the user can fix
+   * a mis-parsed series name (e.g. "Demis" → "Demi's") rather than only the year.
+   */
+  function _wireInlineRefine(provider, filePath, fileName, skipProviders, parsedSeries, extraBody) {
+    var refineRow = document.getElementById('cvRefineSearchRow');
+    if (refineRow) refineRow.style.display = '';
+    var input = document.getElementById('cvRefineSearchInput');
+    var btn = document.getElementById('cvRefineSearchBtn');
+    if (input) input.value = parsedSeries || '';
+    if (!btn) return;
+
+    // Replace-clone to clear any listener from a previous open.
+    var newBtn = btn.cloneNode(true);
+    btn.parentNode.replaceChild(newBtn, btn);
+    newBtn.addEventListener('click', function () {
+      var term = (document.getElementById('cvRefineSearchInput').value || '').trim();
+      if (!term) return;
+      newBtn.disabled = true;
+      newBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status"></span>Searching...';
+
+      var requestBody = {
+        file_path: filePath,
+        file_name: fileName,
+        search_term: term,
+        only_provider: provider
+      };
+      var libraryId = _getLibraryId();
+      if (libraryId) requestBody.library_id = libraryId;
+      if (skipProviders && skipProviders.length) requestBody.skip_providers = skipProviders;
+      if (extraBody) {
+        Object.keys(extraBody).forEach(function (k) { requestBody[k] = extraBody[k]; });
+      }
+
+      fetch('/api/search-metadata', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody)
+      })
+        .then(function (response) { return response.json(); })
+        .then(function (newData) {
+          newBtn.disabled = false;
+          newBtn.innerHTML = '<i class="bi bi-search me-1"></i>Refine';
+          if (newData.success) {
+            var m = bootstrap.Modal.getInstance(document.getElementById('comicVineVolumeModal'));
+            if (m) m.hide();
+          }
+          _handleSearchResponse(newData, filePath, fileName, skipProviders);
+        })
+        .catch(function (error) {
+          newBtn.disabled = false;
+          newBtn.innerHTML = '<i class="bi bi-search me-1"></i>Refine';
+          CLU.showToast('Search Error', error.message || 'Failed to refine search', 'error');
+        });
+    });
+  }
+
+  /**
+   * Shared renderer for providers that use the ComicVine volume modal UI
+   * (ComicVine and Metron). config = { provider, titlePrefix, unit, onSelect }.
+   */
+  function _showCVStyleModal(data, filePath, fileName, skipProviders, config) {
     var isIssueMode = data.selection_type === 'issue';
-    var resultLabel = isIssueMode ? 'Issue(s)' : (providerType === 'metron' ? 'Series' : 'Volume(s)');
     var prompt = document.getElementById('cvSelectionPrompt');
 
     _removeGCDApiLangFilter();
@@ -496,7 +636,9 @@
 
     var modalTitle = document.getElementById('comicVineVolumeModalLabel');
     if (modalTitle) {
-      modalTitle.textContent = 'Select correct match (via ' + providerLabel + ') - ' + data.possible_matches.length + ' ' + resultLabel;
+      var resultLabel = isIssueMode ? 'Issue(s)' : (config.unitPlural || (config.unit + '(s)'));
+      modalTitle.textContent = 'Select correct match (via ' + config.titlePrefix + ') - ' +
+        data.possible_matches.length + ' ' + resultLabel;
     }
     if (prompt) {
       if (isIssueMode) {
@@ -505,7 +647,7 @@
           (selectedVolumeName ? ' from ' + CLU.escapeHtml(selectedVolumeName) : '') +
           ':</strong>';
       } else {
-        prompt.innerHTML = '<strong>Please select the correct ' + (providerType === 'metron' ? 'series' : 'volume') + ':</strong>';
+        prompt.innerHTML = '<strong>Please select the correct ' + (config.promptUnit || config.unit.toLowerCase()) + ':</strong>';
       }
     }
 
@@ -522,88 +664,62 @@
     _cvClickHandler = function (volume) {
       var modal = bootstrap.Modal.getInstance(document.getElementById('comicVineVolumeModal'));
       modal.hide();
-
-      var selectedMatch = { provider: providerType };
-      if (isIssueMode) {
-        selectedMatch.issue_id = volume.id;
-        selectedMatch.volume_id = _cvSelectionContext && _cvSelectionContext.volume_id;
-        selectedMatch.volume_name = _cvSelectionContext && _cvSelectionContext.volume_name;
-        selectedMatch.publisher_name = _cvSelectionContext && _cvSelectionContext.publisher_name;
-        selectedMatch.start_year = _cvSelectionContext && _cvSelectionContext.start_year;
-      } else if (providerType === 'metron') {
-        selectedMatch.series_id = volume.id;
-      } else {
-        selectedMatch.volume_id = volume.id;
-        selectedMatch.volume_name = volume.name;
-        selectedMatch.publisher_name = volume.publisher_name;
-      }
-
-      CLU.searchMetadataWithSelection(filePath, fileName, selectedMatch);
+      config.onSelect(volume);
     };
 
     _wireCVSortAndFilter();
     _renderCVVolumeList(_cvVolumes);
+    _wireSkipButton('cvSkipProviderBtn', data, filePath, fileName, skipProviders);
 
-    // Wire up inline refine search
-    var cvRefineInput = document.getElementById('cvRefineSearchInput');
-    var cvRefineBtn = document.getElementById('cvRefineSearchBtn');
-    if (!isIssueMode && cvRefineInput && data.parsed_filename) {
-      cvRefineInput.value = data.parsed_filename.series_name || '';
-    }
-    if (!isIssueMode && cvRefineBtn) {
-      var newRefineBtn = cvRefineBtn.cloneNode(true);
-      cvRefineBtn.parentNode.replaceChild(newRefineBtn, cvRefineBtn);
-      newRefineBtn.addEventListener('click', function () {
-        var refinedTerm = (document.getElementById('cvRefineSearchInput').value || '').trim();
-        if (!refinedTerm) return;
-        newRefineBtn.disabled = true;
-        newRefineBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status"></span>Searching...';
-
-        var requestBody = {
-          file_path: filePath,
-          file_name: fileName,
-          search_term: refinedTerm,
-          force_provider: providerType,
-          force_manual_selection: true
-        };
-        var libraryId = _getLibraryId();
-        if (libraryId) requestBody.library_id = libraryId;
-
-        fetch('/api/search-metadata', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(requestBody)
-        })
-          .then(function (response) { return response.json(); })
-          .then(function (newData) {
-            newRefineBtn.disabled = false;
-            newRefineBtn.innerHTML = '<i class="bi bi-search me-1"></i>Refine';
-
-            if (newData.requires_selection && (newData.provider === 'comicvine' || newData.provider === 'metron')) {
-              // Re-populate volume list in-place
-              _showCVVolumeModal(newData, filePath, fileName);
-            } else if (newData.success) {
-              var modal = bootstrap.Modal.getInstance(document.getElementById('comicVineVolumeModal'));
-              if (modal) modal.hide();
-              CLU.showToast('Metadata Found', 'Metadata found via ' + newData.source, 'success');
-              var contract = _getContract();
-              if (typeof contract.onMetadataFound === 'function') {
-                contract.onMetadataFound(filePath, newData);
-              }
-            } else {
-              CLU.showToast('No Results', newData.error || 'No metadata found for refined search', 'warning');
-            }
-          })
-          .catch(function (error) {
-            newRefineBtn.disabled = false;
-            newRefineBtn.innerHTML = '<i class="bi bi-search me-1"></i>Refine';
-            CLU.showToast('Search Error', error.message || 'Failed to refine search', 'error');
-          });
-      });
+    // Wire up inline refine search (scoped to this provider via only_provider)
+    if (!isIssueMode) {
+      var parsedSeries = (data.parsed_filename && data.parsed_filename.series_name) || '';
+      _wireInlineRefine(config.provider, filePath, fileName, skipProviders, parsedSeries);
     }
 
     var modal = new bootstrap.Modal(document.getElementById('comicVineVolumeModal'));
     modal.show();
+  }
+
+  function _showCVVolumeModal(data, filePath, fileName, skipProviders) {
+    _showCVStyleModal(data, filePath, fileName, skipProviders, {
+      provider: 'comicvine',
+      titlePrefix: 'ComicVine',
+      unit: 'Volume',
+      unitPlural: data.selection_type === 'issue' ? 'Issue(s)' : 'Volume(s)',
+      promptUnit: 'volume',
+      onSelect: function (volume) {
+        var selectedMatch = { provider: 'comicvine' };
+        if (data.selection_type === 'issue') {
+          selectedMatch.issue_id = volume.id;
+          selectedMatch.volume_id = _cvSelectionContext && _cvSelectionContext.volume_id;
+          selectedMatch.volume_name = _cvSelectionContext && _cvSelectionContext.volume_name;
+          selectedMatch.publisher_name = _cvSelectionContext && _cvSelectionContext.publisher_name;
+          selectedMatch.start_year = _cvSelectionContext && _cvSelectionContext.start_year;
+        } else {
+          selectedMatch.volume_id = volume.id;
+          selectedMatch.volume_name = volume.name;
+          selectedMatch.publisher_name = volume.publisher_name;
+        }
+        CLU.searchMetadataWithSelection(filePath, fileName, selectedMatch, skipProviders);
+      }
+    });
+  }
+
+  function _showMetronVolumeModal(data, filePath, fileName, skipProviders) {
+    _showCVStyleModal(data, filePath, fileName, skipProviders, {
+      provider: 'metron',
+      titlePrefix: 'Metron',
+      unit: 'Series',
+      unitPlural: 'Series',
+      promptUnit: 'series',
+      onSelect: function (volume) {
+        CLU.searchMetadataWithSelection(filePath, fileName, {
+          provider: 'metron',
+          series_id: volume.id
+        }, skipProviders);
+      }
+    });
   }
 
   // ── GCD API series modal (reuses ComicVine volume modal UI) ───────────
@@ -611,12 +727,13 @@
   // Track active GCD API language/country filter
   var _gcdApiLangFilter = '';
 
-  function _showGCDApiVolumeModal(data, filePath, fileName) {
+  function _showGCDApiVolumeModal(data, filePath, fileName, skipProviders) {
     _cvSelectionMode = 'volume';
     _cvSelectionContext = null;
-    // Hide the inline refine row (not applicable for GCD API)
+    // The inline refine row lets the user fix a mis-parsed series name and
+    // re-search GCD API (wired below).
     var refineRow = document.getElementById('cvRefineSearchRow');
-    if (refineRow) refineRow.style.display = 'none';
+    if (refineRow) refineRow.style.display = '';
 
     // Populate parsed info
     var cvSeries = document.getElementById('cvParsedSeries');
@@ -626,8 +743,14 @@
     if (cvIssue && data.parsed_filename) cvIssue.textContent = data.parsed_filename.issue_number || '';
     if (cvYear && data.parsed_filename) cvYear.textContent = data.parsed_filename.year || 'Unknown';
 
-    // Store volumes and set click handler
-    _cvVolumes = data.possible_matches.slice();
+    // Store volumes and set click handler. Tag each as GCD API and stash the
+    // parsed issue so _renderCVVolumeList can lazily fetch a cover thumbnail.
+    var _gcdIssue = (data.parsed_filename && data.parsed_filename.issue_number) || '1';
+    _cvVolumes = data.possible_matches.slice().map(function (v) {
+      v._gcdApi = true;
+      v._gcdIssue = _gcdIssue;
+      return v;
+    });
     _gcdApiLangFilter = '';
     _cvClickHandler = function (volume) {
       var modal = bootstrap.Modal.getInstance(document.getElementById('comicVineVolumeModal'));
@@ -636,7 +759,7 @@
       CLU.searchMetadataWithSelection(filePath, fileName, {
         provider: 'gcd_api',
         series_id: volume.id
-      });
+      }, skipProviders);
     };
 
     // Set custom filter function for GCD API (includes language filtering)
@@ -684,6 +807,11 @@
     }
 
     _renderCVVolumeList(_cvVolumes);
+    _wireSkipButton('cvSkipProviderBtn', data, filePath, fileName, skipProviders);
+
+    // Allow revising the series name and re-searching GCD API.
+    var gcdParsedSeries = (data.parsed_filename && data.parsed_filename.series_name) || '';
+    _wireInlineRefine('gcd_api', filePath, fileName, skipProviders, gcdParsedSeries);
 
     var modal = new bootstrap.Modal(document.getElementById('comicVineVolumeModal'));
     modal.show();
@@ -704,7 +832,7 @@
 
   // ── GCD API start year prompt ─────────────────────────────────────────
 
-  function _showGCDApiStartYearPrompt(data, filePath, fileName) {
+  function _showGCDApiStartYearPrompt(data, filePath, fileName, skipProviders) {
     _cvSelectionMode = 'volume';
     _cvSelectionContext = null;
     var seriesName = (data.parsed_filename && data.parsed_filename.series_name) || 'Unknown';
@@ -731,8 +859,12 @@
     volumeList.innerHTML =
       '<div class="p-3">' +
         '<p class="text-muted">' + CLU.escapeHtml(message) + '</p>' +
-        '<p class="text-muted small">The GCD API filters by the year a series <strong>started</strong>, ' +
-          'not the issue publication year. For example, a 2026 issue may belong to a series that started in 2025.</p>' +
+        '<label class="form-label small mb-1">Series name</label>' +
+        '<input type="text" id="gcdApiSeriesInput" class="form-control mb-2" placeholder="Series name">' +
+        '<p class="text-muted small mb-1">If the name was mis-parsed (e.g. a missing apostrophe), correct it ' +
+          'above. The GCD API filters by the year a series <strong>started</strong>, not the issue ' +
+          'publication year — leave the year blank to search by name only.</p>' +
+        '<label class="form-label small mb-1">Series start year <span class="text-muted">(optional)</span></label>' +
         '<div class="input-group mb-2">' +
           '<input type="number" id="gcdApiStartYearInput" class="form-control" placeholder="e.g. 2025" min="1900" max="2100">' +
           '<button class="btn btn-primary" type="button" id="gcdApiStartYearSearchBtn">' +
@@ -748,8 +880,11 @@
     var searchBtn = document.getElementById('gcdApiStartYearSearchBtn');
     var yearInput = document.getElementById('gcdApiStartYearInput');
     var noYearBtn = document.getElementById('gcdApiNoYearSearchBtn');
+    var seriesInput = document.getElementById('gcdApiSeriesInput');
+    if (seriesInput && seriesName && seriesName !== 'Unknown') seriesInput.value = seriesName;
 
     function doSearch(startYear) {
+      var currentSeries = (seriesInput && seriesInput.value.trim()) || seriesName;
       searchBtn.disabled = true;
       noYearBtn.disabled = true;
       searchBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Searching...';
@@ -757,9 +892,11 @@
       var requestBody = {
         file_path: filePath,
         file_name: fileName,
-        search_term: seriesName,
+        search_term: currentSeries,
+        only_provider: 'gcd_api',
         gcd_api_start_year: startYear || null
       };
+      if (skipProviders && skipProviders.length) requestBody.skip_providers = skipProviders;
       var libraryId = _getLibraryId();
       if (libraryId) requestBody.library_id = libraryId;
 
@@ -778,7 +915,7 @@
             // Got results — close and show selection modal
             var cvModal = bootstrap.Modal.getInstance(document.getElementById('comicVineVolumeModal'));
             if (cvModal) cvModal.hide();
-            _showGCDApiVolumeModal(newData, filePath, fileName);
+            _showGCDApiVolumeModal(newData, filePath, fileName, skipProviders);
           } else if (newData.success) {
             var cvModal = bootstrap.Modal.getInstance(document.getElementById('comicVineVolumeModal'));
             if (cvModal) cvModal.hide();
@@ -816,23 +953,39 @@
       }
     });
 
+    if (seriesInput) {
+      seriesInput.addEventListener('keydown', function (e) {
+        // Enter with no year → search by name only; with a year → use it.
+        if (e.key === 'Enter') {
+          var yr = parseInt(yearInput.value, 10);
+          if (yr && yr >= 1900 && yr <= 2100) doSearch(yr);
+          else doSearch(null);
+        }
+      });
+    }
+
     noYearBtn.addEventListener('click', function () {
       doSearch(null);
     });
 
+    // Allow skipping straight to the next provider instead of supplying a year.
+    _wireSkipButton('cvSkipProviderBtn', data, filePath, fileName, skipProviders);
+
     var modal = new bootstrap.Modal(document.getElementById('comicVineVolumeModal'));
     modal.show();
 
-    // Focus the year input after modal is shown
+    // Focus the series-name input after modal is shown (correcting the name is
+    // the common case when GCD API returns nothing).
     document.getElementById('comicVineVolumeModal').addEventListener('shown.bs.modal', function handler() {
-      yearInput.focus();
+      if (seriesInput) seriesInput.focus(); else yearInput.focus();
       document.getElementById('comicVineVolumeModal').removeEventListener('shown.bs.modal', handler);
     });
   }
 
   // ── Provider series modal (batch/directory context) ───────────────────
 
-  function _showBatchSeriesSelectionModal(data, dirPath, dirName) {
+  function _showBatchCVVolumeModal(data, dirPath, dirName, skipProviders) {
+    skipProviders = skipProviders || [];
     _removeGCDApiLangFilter();
     _cvSelectionMode = 'volume';
     _cvSelectionContext = null;
@@ -875,14 +1028,86 @@
         id: match.id,
         title: match.name || '',
         alternate_title: match.alternate_title || ''
-      }, data._batchOptions || null);
+      }, data._batchOptions || null, skipProviders);
     };
 
     _wireCVSortAndFilter();
     _renderCVVolumeList(_cvVolumes);
 
+    // Skip-to-next-provider for batch: re-run the folder fetch excluding the
+    // current provider so the remaining providers (e.g. GCD API) process the
+    // folder per-file.
+    _wireSkipButton('cvSkipProviderBtn', data, dirPath, dirName, skipProviders, function () {
+      var newSkip = skipProviders.slice();
+      if (data.provider && newSkip.indexOf(data.provider) === -1) {
+        newSkip.push(data.provider);
+      }
+      CLU.showToast('Skipping Provider', 'Trying the next metadata provider for this folder...', 'info');
+      CLU.fetchDirectoryMetadata(dirPath, dirName, newSkip);
+    });
+
     var modal = new bootstrap.Modal(document.getElementById('comicVineVolumeModal'));
     modal.show();
+  }
+
+  // ── Shared response router ────────────────────────────────────────────
+
+  /**
+   * Route a /api/search-metadata response to the right modal/handler.
+   * Shared by the initial search, the skip-to-next-provider flow, and the
+   * inline refine. skipProviders carries the providers already skipped so the
+   * selection modals can decide whether more remain.
+   */
+  function _handleSearchResponse(data, filePath, fileName, skipProviders) {
+    var contract = _getContract();
+    var libraryId = _getLibraryId();
+    skipProviders = skipProviders || [];
+
+    if (data.requires_selection) {
+      if (data.provider === 'metron') {
+        _showMetronVolumeModal(data, filePath, fileName, skipProviders);
+      } else if (data.provider === 'comicvine') {
+        _showCVVolumeModal(data, filePath, fileName, skipProviders);
+      } else if (data.provider === 'gcd') {
+        // Use page-level GCD modal if available, otherwise show info
+        if (typeof showGCDSeriesSelectionModal === 'function') {
+          showGCDSeriesSelectionModal(data, filePath, fileName, skipProviders);
+          window._cascadeGCDSelection = { filePath: filePath, fileName: fileName, libraryId: libraryId };
+        } else {
+          CLU.showToast('GCD Selection', 'GCD series selection requires the Files page', 'warning');
+        }
+      } else if (data.provider === 'gcd_api') {
+        if (data.requires_start_year) {
+          _showGCDApiStartYearPrompt(data, filePath, fileName, skipProviders);
+        } else {
+          _showGCDApiVolumeModal(data, filePath, fileName, skipProviders);
+        }
+      } else if (['mangadex', 'mangaupdates', 'anilist'].indexOf(data.provider) !== -1) {
+        if (typeof showMangaSeriesSelectionModal === 'function') {
+          showMangaSeriesSelectionModal(data, filePath, fileName, libraryId, skipProviders);
+        } else {
+          CLU.showToast('Series Selection', 'Series selection requires the Files page', 'warning');
+        }
+      }
+      return;
+    }
+
+    if (data.success) {
+      CLU.showToast('Metadata Found', 'Metadata found via ' + data.source, 'success');
+      if (typeof contract.onMetadataFound === 'function') {
+        contract.onMetadataFound(filePath, data);
+      }
+      return;
+    }
+
+    if (data.parsed_filename) {
+      _showRefineSearchModal(data, filePath, fileName);
+    } else {
+      CLU.showToast('No Metadata', data.error || 'No metadata found from any provider', 'warning');
+    }
+    if (typeof contract.onMetadataError === 'function') {
+      contract.onMetadataError(filePath, data.error || 'No metadata found');
+    }
   }
 
   // ── Public API: Single-file metadata search ───────────────────────────
@@ -932,51 +1157,7 @@
       .then(function (data) {
         stopProgressWatcher();
         _removeToast(progressToast);
-
-        if (data.requires_selection) {
-          if (data.provider === 'comicvine' || data.provider === 'metron') {
-            _showCVVolumeModal(data, filePath, fileName);
-          } else if (data.provider === 'gcd') {
-            // Use page-level GCD modal if available, otherwise show info
-            if (typeof showGCDSeriesSelectionModal === 'function') {
-              showGCDSeriesSelectionModal(data, filePath, fileName);
-              window._cascadeGCDSelection = { filePath: filePath, fileName: fileName, libraryId: libraryId };
-            } else {
-              CLU.showToast('GCD Selection', 'GCD series selection requires the Files page', 'warning');
-            }
-          } else if (data.provider === 'gcd_api') {
-            if (data.requires_start_year) {
-              _showGCDApiStartYearPrompt(data, filePath, fileName);
-            } else {
-              _showGCDApiVolumeModal(data, filePath, fileName);
-            }
-          } else if (['mangadex', 'mangaupdates', 'anilist'].indexOf(data.provider) !== -1) {
-            if (typeof showMangaSeriesSelectionModal === 'function') {
-              showMangaSeriesSelectionModal(data, filePath, fileName, libraryId);
-            } else {
-              CLU.showToast('Series Selection', 'Series selection requires the Files page', 'warning');
-            }
-          }
-          return;
-        }
-
-        if (data.success) {
-          CLU.showToast('Metadata Found', 'Metadata found via ' + data.source, 'success');
-
-          if (typeof contract.onMetadataFound === 'function') {
-            contract.onMetadataFound(filePath, data);
-          }
-          return;
-        }
-
-        if (data.parsed_filename) {
-          _showRefineSearchModal(data, filePath, fileName);
-        } else {
-          CLU.showToast('No Metadata', data.error || 'No metadata found from any provider', 'warning');
-        }
-        if (typeof contract.onMetadataError === 'function') {
-          contract.onMetadataError(filePath, data.error || 'No metadata found');
-        }
+        _handleSearchResponse(data, filePath, fileName, []);
       })
       .catch(function (error) {
         stopProgressWatcher();
@@ -996,6 +1177,45 @@
     });
   };
 
+  // ── Public API: Skip to next provider ─────────────────────────────────
+
+  /**
+   * Re-run the metadata search excluding the providers already shown/skipped.
+   * Called from the "Skip to next provider" button on the selection modals.
+   * @param {string} filePath
+   * @param {string} fileName
+   * @param {string} currentProvider  Provider whose modal was just dismissed
+   * @param {string[]} skipProviders  Providers skipped before this one
+   */
+  CLU.skipToNextProvider = function (filePath, fileName, currentProvider, skipProviders) {
+    var libraryId = _getLibraryId();
+    var newSkip = (skipProviders || []).slice();
+    if (currentProvider && newSkip.indexOf(currentProvider) === -1) {
+      newSkip.push(currentProvider);
+    }
+
+    CLU.showToast('Skipping Provider', 'Trying the next metadata provider...', 'info');
+
+    var requestBody = { file_path: filePath, file_name: fileName, skip_providers: newSkip };
+    if (libraryId) {
+      requestBody.library_id = libraryId;
+    }
+
+    fetch('/api/search-metadata', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(requestBody)
+    })
+      .then(function (response) { return response.json(); })
+      .then(function (data) {
+        _handleSearchResponse(data, filePath, fileName, newSkip);
+      })
+      .catch(function (error) {
+        console.error('Skip provider error:', error);
+        CLU.showToast('Metadata Error', error.message || 'Failed to search next provider', 'error');
+      });
+  };
+
   // ── Public API: Single-file with user selection ───────────────────────
 
   /**
@@ -1004,12 +1224,13 @@
    * @param {string} fileName
    * @param {Object} selectedMatch  { provider, volume_id, publisher_name }
    */
-  CLU.searchMetadataWithSelection = function (filePath, fileName, selectedMatch) {
+  CLU.searchMetadataWithSelection = function (filePath, fileName, selectedMatch, skipProviders) {
     var libraryId = _getLibraryId();
     var contract = _getContract();
     var providerLabel = selectedMatch.provider || 'provider';
     var progressToast = _buildProgressToast('Fetching Metadata', '0/5', 'Waiting for ' + CLU.escapeHtml(providerLabel) + '...');
     var stopProgressWatcher = _startSingleFileProgressWatcher(filePath, fileName, progressToast);
+    skipProviders = skipProviders || [];
 
     var requestBody = {
       file_path: filePath,
@@ -1029,21 +1250,7 @@
       .then(function (data) {
         stopProgressWatcher();
         _removeToast(progressToast);
-
-        if (data.requires_selection && (data.provider === 'comicvine' || data.provider === 'metron')) {
-          _showCVVolumeModal(data, filePath, fileName);
-        } else if (data.success) {
-          CLU.showToast('Metadata Found', 'Metadata found via ' + data.source, 'success');
-
-          if (typeof contract.onMetadataFound === 'function') {
-            contract.onMetadataFound(filePath, data);
-          }
-        } else {
-          CLU.showToast('Metadata Error', data.error || 'No metadata found for selection', 'error');
-          if (typeof contract.onMetadataError === 'function') {
-            contract.onMetadataError(filePath, data.error);
-          }
-        }
+        _handleSearchResponse(data, filePath, fileName, skipProviders);
       })
       .catch(function (error) {
         stopProgressWatcher();
@@ -1058,7 +1265,9 @@
 
   // ── Public API: Directory batch metadata ──────────────────────────────
 
-  function _requestBatchMetadata(dirPath, dirName, options, selection) {
+  function _requestBatchMetadata(dirPath, dirName, options, selection, skipProviders) {
+    options = options || null;
+    skipProviders = skipProviders || [];
     var libraryId = _getLibraryId();
     var contract = _getContract();
     var operationId = _newOperationId();
@@ -1133,6 +1342,9 @@
     if (options && options.overwriteExistingMetadata) {
       requestBody.overwrite_existing_metadata = true;
     }
+    if (skipProviders.length) {
+      requestBody.skip_providers = skipProviders;
+    }
 
     fetch('/api/batch-metadata', {
       method: 'POST',
@@ -1161,7 +1373,7 @@
             if (data.requires_selection) {
               _removeToast(progressToast);
               data._batchOptions = options || null;
-              _showBatchSeriesSelectionModal(data, dirPath, dirName);
+              _showBatchCVVolumeModal(data, dirPath, dirName, skipProviders);
               return;
             }
             if (data.error) {
@@ -1209,8 +1421,8 @@
    * @param {string} dirPath   Full path to the directory
    * @param {string} dirName   Display name of the directory
    */
-  CLU.fetchDirectoryMetadata = function (dirPath, dirName) {
-    _requestBatchMetadata(dirPath, dirName, null, null);
+  CLU.fetchDirectoryMetadata = function (dirPath, dirName, skipProviders) {
+    _requestBatchMetadata(dirPath, dirName, null, null, skipProviders || []);
   };
 
   CLU.forceFetchDirectoryMetadataViaComicVine = function (dirPath, dirName) {
@@ -1218,7 +1430,7 @@
       forceManualSelection: true,
       forceProvider: 'comicvine',
       overwriteExistingMetadata: true
-    }, null);
+    }, null, []);
   };
 
   CLU.forceFetchDirectoryMetadataViaMetron = function (dirPath, dirName) {
@@ -1226,7 +1438,7 @@
       forceManualSelection: true,
       forceProvider: 'metron',
       overwriteExistingMetadata: true
-    }, null);
+    }, null, []);
   };
 
   CLU.forceFetchDirectoryMetadataViaMangaUpdates = function (dirPath, dirName) {
@@ -1234,7 +1446,7 @@
       forceManualSelection: true,
       forceProvider: 'mangaupdates',
       overwriteExistingMetadata: true
-    }, null);
+    }, null, []);
   };
 
   // ── Public API: Directory batch with pre-selected provider match ──────
@@ -1245,15 +1457,191 @@
    * @param {string} dirName
    * @param {Object} selection  { provider, id }
    */
-  CLU.fetchDirectoryMetadataWithSelection = function (dirPath, dirName, selection, options) {
-    _requestBatchMetadata(dirPath, dirName, options || null, selection || null);
+  CLU.fetchDirectoryMetadataWithSelection = function (dirPath, dirName, selection, options, skipProviders) {
+    _requestBatchMetadata(dirPath, dirName, options || null, selection || null, skipProviders || []);
   };
 
-  CLU.fetchDirectoryMetadataWithVolume = function (dirPath, dirName, volumeId, options) {
+  CLU.fetchDirectoryMetadataWithVolume = function (dirPath, dirName, volumeId, options, skipProviders) {
     _requestBatchMetadata(dirPath, dirName, options || null, {
       provider: 'comicvine',
       id: volumeId
-    });
+    }, skipProviders || []);
+  };
+
+  // ── Shared rename-after-metadata ──────────────────────────────────────
+  //
+  // A single-file metadata fetch (/api/search-metadata) applies ComicInfo.xml
+  // server-side but does NOT rename the file — it returns a `rename_config`
+  // and leaves renaming to the client. These helpers centralize that logic so
+  // every page (Files, Source Wall, Collection) renames identically. Honors
+  // the same gate as the legacy Files-page flow: rename only when auto_rename
+  // is enabled.
+
+  var MONTH_NAMES = ['', 'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December'];
+
+  CLU.padIssueNumber = function (numStr, width) {
+    width = width || 3;
+    numStr = String(numStr).trim();
+    if (!numStr) return '';
+    if (numStr.indexOf('.') !== -1) {
+      var parts = numStr.split('.');
+      return parts[0].padStart(width, '0') + '.' + parts.slice(1).join('.');
+    }
+    return numStr.padStart(width, '0');
+  };
+
+  // Parse a "YYYY-MM-DD" (or "YYYY") date string into rename-template parts.
+  // Returns { year, monthName, monthPadded } with empty strings when unavailable.
+  CLU.parseDateParts = function (dateStr) {
+    var result = { year: '', monthName: '', monthPadded: '' };
+    if (!dateStr) return result;
+    var m = String(dateStr).trim().match(/^(\d{4})(?:-(\d{1,2}))?/);
+    if (!m) return result;
+    result.year = m[1];
+    if (m[2]) {
+      var monthNum = parseInt(m[2], 10);
+      if (monthNum >= 1 && monthNum <= 12) {
+        result.monthName = MONTH_NAMES[monthNum];
+        result.monthPadded = String(monthNum).padStart(2, '0');
+      }
+    }
+    return result;
+  };
+
+  /**
+   * Build the suggested filename from fetched metadata and the rename config.
+   * @returns {string|null}  New filename, or null when it would not change.
+   */
+  CLU.buildRenamedName = function (metadata, renameConfig, fileName) {
+    var suggestedName;
+    var extMatch = fileName.match(/\.(cbz|cbr)$/i);
+    var ext = extMatch ? extMatch[0] : '.cbz';
+
+    if (renameConfig && renameConfig.enabled && renameConfig.pattern) {
+      var pattern = renameConfig.pattern;
+
+      var series = metadata.Series || '';
+      series = series.replace(/:/g, ' -');          // colon -> dash (Windows)
+      series = series.replace(/[<>"/\\|?*]/g, '');   // strip invalid chars
+
+      var issueNumber = CLU.padIssueNumber(metadata.Number);
+      var year = metadata.Year || '';
+      var volumeNumber = '';  // ComicVine uses year as Volume, not a volume number
+      var issueYear = metadata.Year || '';
+      // {volume_year} = series/volume start year (ComicInfo Volume field). GCD stores
+      // a volume number there, so guard to a 4-digit year and fall back to issue year.
+      var volRaw = String(metadata.Volume || '').trim();
+      var volumeYear = /^\d{4}$/.test(volRaw) ? volRaw : '';
+
+      var cover = CLU.parseDateParts(metadata.CoverDate);
+      var store = CLU.parseDateParts(metadata.StoreDate);
+
+      var issueTitle = metadata.Title || '';
+      issueTitle = issueTitle.replace(/:/g, ' -');
+      issueTitle = issueTitle.replace(/[<>"/\\|?*]/g, '');
+      issueTitle = issueTitle.replace(/[\x00-\x1f]/g, '');
+      issueTitle = issueTitle.replace(/^[.\s]+|[.\s]+$/g, '');
+
+      var result = pattern;
+      result = result.replace(/{series_name}/gi, series);
+      result = result.replace(/{issue_number}/gi, issueNumber);
+      result = result.replace(/{issue_year}/gi, issueYear);
+      // Month variants are case-sensitive: {..._M} (name) vs {..._m} (padded)
+      result = result.replace(/{cover_month_M}/g, cover.monthName);
+      result = result.replace(/{cover_month_m}/g, cover.monthPadded);
+      result = result.replace(/{cover_year}/gi, cover.year);
+      result = result.replace(/{store_month_M}/g, store.monthName);
+      result = result.replace(/{store_month_m}/g, store.monthPadded);
+      result = result.replace(/{store_year}/gi, store.year);
+      result = result.replace(/{volume_year}/gi, volumeYear || year);
+      result = result.replace(/{YYYY}/g, year);
+      result = result.replace(/{volume_number}/gi, volumeNumber);
+      result = result.replace(/{issue_title}/gi, issueTitle);
+
+      result = result.replace(/\s+/g, ' ').trim();
+      // Remove a separator left dangling against a parenthesis boundary
+      // (e.g. "(2010-)" -> "(2010)") when a token resolved empty
+      result = result.replace(/\(\s*-\s*/g, '(');
+      result = result.replace(/\s*-\s*\)/g, ')');
+      // Remove empty parentheses
+      result = result.replace(/\s*\(\s*\)/g, '').trim();
+      // Remove orphaned separators (e.g. trailing " - " when issue_title is empty)
+      result = result.replace(/\s*-\s*(?=\(|$)/g, ' ').replace(/\s+/g, ' ').trim();
+
+      suggestedName = result + ext;
+    } else {
+      // Default pattern: "Series Number.ext"
+      var s = (metadata.Series || '');
+      s = s.replace(/:/g, ' -');
+      s = s.replace(/[<>"/\\|?*]/g, '');
+      s = s.replace(/\s+/g, ' ').trim();
+      suggestedName = s + ' ' + CLU.padIssueNumber(metadata.Number) + ext;
+    }
+
+    if (suggestedName === fileName) return null;
+    return suggestedName;
+  };
+
+  /**
+   * Rename a file after metadata via POST /rename.
+   * @param {string}   filePath   Current full path of the file
+   * @param {string}   oldName    Current filename (for messaging)
+   * @param {string}   newName    New filename
+   * @param {function} onRenamed  Called (oldPath, newPath, newName) on success
+   */
+  CLU.renameAfterMetadata = function (filePath, oldName, newName, onRenamed) {
+    var directory = filePath.substring(0, filePath.lastIndexOf('/'));
+    var newPath = directory + '/' + newName;
+
+    fetch('/rename', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ old: filePath, new: newPath })
+    })
+      .then(function (response) {
+        if (!response.ok) {
+          return response.json().then(function (err) {
+            throw new Error(err.error || 'Rename failed');
+          });
+        }
+        return response.json();
+      })
+      .then(function (data) {
+        if (data.success) {
+          CLU.showToast('File Renamed', 'Successfully renamed to: ' + newName, 'success');
+          if (typeof onRenamed === 'function') {
+            onRenamed(filePath, newPath, newName);
+          }
+        } else {
+          CLU.showToast('Rename Failed', data.error || 'Failed to rename file', 'error');
+        }
+      })
+      .catch(function (error) {
+        console.error('Rename error:', error);
+        CLU.showToast('Rename Error', error.message, 'error');
+      });
+  };
+
+  /**
+   * Inspect a single-file metadata response and rename when configured.
+   * Safe no-op unless rename is enabled, auto_rename is on, and the name changes.
+   * @param {string}   filePath   Path passed to onMetadataFound
+   * @param {string}   fileName   Original filename
+   * @param {Object}   data       /api/search-metadata success payload
+   * @param {function} onRenamed  Called (oldPath, newPath, newName) on success
+   */
+  CLU.maybeRenameAfterMetadata = function (filePath, fileName, data, onRenamed) {
+    if (!data || !data.metadata || !data.rename_config || !data.rename_config.enabled) {
+      return;
+    }
+    // If the file was auto-moved, rename the file at its new location.
+    var actualPath = (data.moved && data.new_file_path) ? data.new_file_path : filePath;
+    var newName = CLU.buildRenamedName(data.metadata, data.rename_config, fileName);
+    if (!newName) return;
+    // Match the Files-page gate: only rename automatically when auto_rename is set.
+    if (!data.rename_config.auto_rename) return;
+    CLU.renameAfterMetadata(actualPath, fileName, newName, onRenamed);
   };
 
 })();

@@ -65,7 +65,7 @@
                     </button>
                 </div>
 
-                <!-- Per Page & Refresh -->
+                <!-- Multi-Select Toggle & Refresh -->
                 <div class="d-flex align-items-center gap-2">
                     <div id="collectionIndexStatusCard" class="d-flex align-items-center gap-2 rounded-3 px-3 py-2 border bg-body-tertiary">
                         <div class="small lh-sm">
@@ -76,17 +76,14 @@
                             <i class="bi bi-database-gear me-1"></i>Reindex
                         </button>
                     </div>
-                    <div class="input-group input-group-sm">
-                        <label class="input-group-text bg-body border-0" for="itemsPerPage">Per page</label>
-                        <select class="form-select border-0 shadow-none bg-body" id="itemsPerPage" onchange="changeItemsPerPage(this.value)">
-                            <option value="21" selected>20</option>
-                            <option value="49">50</option>
-                            <option value="98">100</option>
-                            <option value="252">250</option>
-                        </select>
-                    </div>
-                    <button class="btn btn-outline-secondary btn-sm" onclick="refreshCurrentView(true, true)" title="Refresh">
-                        <i class="bi bi-arrow-clockwise"></i>
+                    <button class="btn btn-outline-secondary btn-sm d-flex align-items-center gap-1"
+                        id="toggleCollectionSelectModeBtn" onclick="toggleCollectionSelectMode()"
+                        title="Toggle multi-select mode">
+                        <i class="bi bi-check2-square"></i>
+                        <span>Multi-Select</span>
+                    </button>
+                    <button class="btn btn-light border btn-sm" onclick="refreshCurrentView(true, true)" title="Refresh">
+                        <i class="bi bi-arrow-clockwise text-muted"></i>
                     </button>
                 </div>
             </div>
@@ -102,6 +99,17 @@
             <div id="gridSearchRow" class="clu-search-row" style="flex: 0 0 auto; width: 100%; max-width: 250px;">
                 <!-- Search input will be dynamically populated by JS -->
             </div>
+            <div class="d-flex align-items-center" style="flex: 0 0 auto;">
+                <div class="input-group input-group-sm">
+                    <label class="input-group-text bg-body border-0" for="itemsPerPage">Per page</label>
+                    <select class="form-select border-0 shadow-none bg-body" id="itemsPerPage" onchange="changeItemsPerPage(this.value)">
+                        <option value="21" selected>20</option>
+                        <option value="49">50</option>
+                        <option value="98">100</option>
+                        <option value="252">250</option>
+                    </select>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -115,10 +123,10 @@
                 <h4 class="m-0" id="library-header-title"><i class="bi {{ section.icon }} me-2"></i>{{ section.title }}
                 </h4>
             </div>
-            <!-- Selection Hint -->
+            <!-- Selection Hint (shown only in Multi-Select mode) -->
             <div id="selectionHint" class="selection-hint" style="display: none;">
                 <i class="bi bi-info-circle me-1"></i>
-                <span>Ctrl+Click to select files &bull; Shift+Click for range</span>
+                <span>Click to select &bull; Shift+Click for range</span>
             </div>
             <div id="file-grid" class="file-grid">
             </div>
@@ -239,6 +247,7 @@
 {% include 'partials/modal_metadata_select.html' %}
 {% include 'partials/modal_edit_comicinfo.html' %}
 {% include 'partials/modal_add_to_reading_list.html' %}
+{% include 'partials/modal_bulk_metadata_review.html' %}
 <!-- Comic Reader Modal -->
 <div id="comicReaderModal" class="comic-reader-modal" style="display: none;">
     <div class="comic-reader-overlay"></div>
@@ -439,6 +448,9 @@
             <button class="btn btn-sm btn-info" onclick="bulkCombineFiles()">
                 <i class="bi bi-files me-1"></i>Combine Files
             </button>
+            <button class="btn btn-sm btn-success" onclick="bulkFetchMetadata()">
+                <i class="bi bi-cloud-download me-1"></i>Fetch Metadata
+            </button>
             <button class="btn btn-sm btn-warning" onclick="bulkRemoveXml()">
                 <i class="bi bi-eraser me-1"></i>Remove XML
             </button>
@@ -544,6 +556,7 @@
     };
 </script>
 <script src="{{ url_for('static', filename='js/collection.js') }}?v={{ range(1, 10000) | random }}"></script>
+<script src="{{ url_for('static', filename='js/bulk-metadata-review.js') }}?v={{ range(1, 10000) | random }}"></script>
 <script>
     document.addEventListener('DOMContentLoaded', () => {
         // Initialize Dashboard Swipers

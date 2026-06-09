@@ -292,6 +292,11 @@ def update_cvinfo_with_metron_id(cvinfo_path: str, series_id: int) -> bool:
     Returns:
         True if successful, False otherwise
     """
+    from os.path import dirname
+    from core.config import is_oneshot_folder
+    if is_oneshot_folder(dirname(cvinfo_path)):
+        app_logger.debug(f"Skipping cvinfo write in one-shot folder: {cvinfo_path}")
+        return False
     try:
         with open(cvinfo_path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -360,6 +365,11 @@ def write_cvinfo_fields(
     Returns:
         True if successful, False otherwise
     """
+    from os.path import dirname
+    from core.config import is_oneshot_folder
+    if is_oneshot_folder(dirname(cvinfo_path)):
+        app_logger.debug(f"Skipping cvinfo write in one-shot folder: {cvinfo_path}")
+        return False
     try:
         existing = read_cvinfo_fields(cvinfo_path)
         lines_to_add = []
@@ -512,6 +522,7 @@ def map_to_comicinfo(issue_data) -> Dict[str, Any]:
 
     # Parse cover_date for Year/Month/Day
     cover_date = _get_attr(issue_data, "cover_date", "")
+    store_date = _get_attr(issue_data, "store_date", "")
     year = None
     month = None
     day = None
@@ -598,6 +609,10 @@ def map_to_comicinfo(issue_data) -> Dict[str, Any]:
         "Year": year,
         "Month": month,
         "Day": day,
+        # Raw provider dates (NOT written to ComicInfo.xml — generate_comicinfo_xml
+        # uses an explicit tag allowlist; consumed only by rename templating)
+        "CoverDate": str(cover_date) if cover_date else None,
+        "StoreDate": str(store_date) if store_date else None,
         "Writer": writer or None,
         "Penciller": penciller or None,
         "Inker": inker or None,
@@ -832,11 +847,16 @@ def search_series_by_name(
     return _api_call(_call, f"searching for series '{series_name}'")
 
 
-def search_series_candidates_by_name(
+def _search_series_candidates(
     api, series_name: str, year: Optional[int] = None
 ) -> List[Dict[str, Any]]:
-    """
-    Search Metron for candidate series matches, optionally ranked by year.
+    """Search Metron for all candidate series matches.
+
+    Search Metron for a series by name and return *all* candidate matches.
+
+    Unlike search_series_by_name (which returns the single best match for the
+    auto-tag path), this returns every result shaped for the selection modal so
+    the user can pick when there are multiple ambiguous matches.
 
     Args:
         api: Mokkari API client
@@ -844,7 +864,9 @@ def search_series_candidates_by_name(
         year: Optional year to rank results by year_began proximity
 
     Returns:
-        List of dicts with id, name, cv_id, publisher_name, year_began
+        List of dicts with id, name, start_year, publisher_name, image_url,
+        description, count_of_issues, cv_id, and year_began. Empty list if
+        nothing is found.
     """
     if not api or not series_name:
         return []
@@ -872,16 +894,36 @@ def search_series_candidates_by_name(
         candidates = []
         for series in series_list:
             publisher = getattr(series, "publisher", None)
+            publisher_name = getattr(publisher, "name", None) if publisher else None
+            image = getattr(series, "image", None)
             candidates.append({
                 "id": getattr(series, "id", None),
                 "name": getattr(series, "name", "") or getattr(series, "display_name", ""),
                 "cv_id": getattr(series, "cv_id", None),
-                "publisher_name": getattr(publisher, "name", None) if publisher else None,
+                "publisher_name": publisher_name or "",
                 "year_began": getattr(series, "year_began", None),
+                "start_year": getattr(series, "year_began", None),
+                "image_url": str(image) if image else None,
+                "description": getattr(series, "desc", "") or "",
+                "count_of_issues": getattr(series, "issue_count", None),
             })
         return candidates
 
     return _api_call(_call, f"searching candidates for series '{series_name}'", default=[]) or []
+
+
+def search_series_candidates_by_name(
+    api, series_name: str, year: Optional[int] = None
+) -> List[Dict[str, Any]]:
+    """Return Metron candidates using the local forced-selection API."""
+    return _search_series_candidates(api, series_name, year)
+
+
+def search_series_list(
+    api, series_name: str, year: Optional[int] = None
+) -> List[Dict[str, Any]]:
+    """Return Metron candidates using the selection-modal API."""
+    return _search_series_candidates(api, series_name, year)
 
 
 def get_series_details(api, series_id: int) -> Optional[Dict[str, Any]]:
@@ -944,6 +986,11 @@ def add_cvinfo_url(cvinfo_path: str, cv_id: int) -> bool:
     Returns:
         True if successful, False otherwise
     """
+    from os.path import dirname
+    from core.config import is_oneshot_folder
+    if is_oneshot_folder(dirname(cvinfo_path)):
+        app_logger.debug(f"Skipping cvinfo write in one-shot folder: {cvinfo_path}")
+        return False
     try:
         cv_url = f"https://comicvine.gamespot.com/volume/4050-{cv_id}/"
 
@@ -997,6 +1044,11 @@ def create_cvinfo_file(
     Returns:
         True if successful, False otherwise
     """
+    from os.path import dirname
+    from core.config import is_oneshot_folder
+    if is_oneshot_folder(dirname(cvinfo_path)):
+        app_logger.debug(f"Skipping cvinfo write in one-shot folder: {cvinfo_path}")
+        return False
     try:
         lines = []
 

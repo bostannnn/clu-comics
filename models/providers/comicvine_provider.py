@@ -38,8 +38,9 @@ class ComicVineProvider(BaseProvider):
                 app_logger.warning("Simyan library not available")
                 return None
 
-            from simyan.comicvine import Comicvine
-            self._cv = Comicvine(api_key=self.credentials.api_key, cache=None)
+            # Reuse the timeout-bounded factory so adapter calls (get_issues,
+            # get_issue, test_connection) can't stall a worker indefinitely.
+            self._cv = cv_module._make_cv_client(self.credentials.api_key)
             return self._cv
         except Exception as e:
             app_logger.error(f"Failed to initialize ComicVine client: {e}")
@@ -131,8 +132,13 @@ class ComicVineProvider(BaseProvider):
             if not cv:
                 return []
 
-            # Get volume issues through API
-            issues = cv.list_issues(params={"filter": f"volume:{series_id}"})
+            # Get volume issues through API. Retry on rate-limit so a burst
+            # throttle doesn't drop the whole volume to the review queue.
+            from models.comicvine import _cv_call_with_retry
+            issues = _cv_call_with_retry(
+                lambda: cv.list_issues(params={"filter": f"volume:{series_id}"}),
+                f"volume issues {series_id}",
+            )
 
             if not issues:
                 return []
@@ -152,11 +158,18 @@ class ComicVineProvider(BaseProvider):
                     elif hasattr(issue.image, 'thumb_url'):
                         image_url = str(issue.image.thumb_url)
 
+                # Simyan's BasicIssue exposes the issue number as ``number``,
+                # not ``issue_number`` — see models/comicvine.py:184 for the
+                # same pattern. Using getattr keeps us safe against either name.
+                raw_number = (
+                    getattr(issue, 'number', None)
+                    or getattr(issue, 'issue_number', None)
+                )
                 results.append(IssueResult(
                     provider=self.provider_type,
                     id=str(issue.id),
                     series_id=series_id,
-                    issue_number=str(issue.issue_number) if issue.issue_number else '',
+                    issue_number=str(raw_number) if raw_number is not None else '',
                     title=issue.name if hasattr(issue, 'name') else None,
                     cover_date=cover_date,
                     store_date=str(issue.store_date) if hasattr(issue, 'store_date') and issue.store_date else None,
@@ -176,7 +189,11 @@ class ComicVineProvider(BaseProvider):
             if not cv:
                 return None
 
-            issue = cv.issue(int(issue_id))
+            from models.comicvine import _cv_call_with_retry
+            issue = _cv_call_with_retry(
+                lambda: cv.issue(int(issue_id)),
+                f"issue detail {issue_id}",
+            )
             if not issue:
                 return None
 
@@ -251,7 +268,11 @@ class ComicVineProvider(BaseProvider):
         try:
             api_key = self._get_api_key()
             if api_key and issue.series_id and issue.issue_number:
-                # Get full metadata using the existing function
+                # get_metadata_by_volume_id already returns a fully-mapped
+                # ComicInfo dict (it calls map_to_comicinfo internally), so
+                # forward series context and return it directly. Re-running
+                # map_to_comicinfo on this dict would strip every issue-level
+                # field because the keys are already ComicInfo-cased.
                 from models import comicvine as cv_module
                 metadata = cv_module.get_metadata_by_volume_id(
                     api_key,
@@ -261,6 +282,7 @@ class ComicVineProvider(BaseProvider):
                     publisher_name=series.publisher if series else None,
                 )
                 if metadata:
+                    metadata.pop('_image_url', None)
                     return metadata
 
             # Fallback: build from IssueResult
@@ -269,6 +291,9 @@ class ComicVineProvider(BaseProvider):
                 'Number': issue.issue_number,
                 'Title': issue.title,
                 'Summary': issue.summary,
+                # Raw provider dates for rename templating (not written to XML)
+                'CoverDate': issue.cover_date,
+                'StoreDate': issue.store_date,
                 'Notes': f'Metadata from ComicVine. Issue ID: {issue.id}',
             }
 

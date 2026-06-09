@@ -1092,6 +1092,85 @@ def init_db():
         except Exception as e:
             app_logger.debug(f"TIMEZONE migration skipped or already done: {e}")
 
+        # Bulk metadata processing tables (used by routes/bulk_metadata.py)
+        # Job header — one row per "Fetch Metadata" run.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS bulk_metadata_job (
+                id TEXT PRIMARY KEY,
+                started_at INTEGER NOT NULL,
+                finished_at INTEGER,
+                status TEXT NOT NULL,
+                scope_type TEXT NOT NULL,
+                scope_payload TEXT NOT NULL,
+                library_id INTEGER,
+                overwrite_existing INTEGER DEFAULT 0,
+                total_folders INTEGER DEFAULT 0,
+                total_files INTEGER DEFAULT 0,
+                auto_accepted INTEGER DEFAULT 0,
+                needs_review INTEGER DEFAULT 0,
+                errors INTEGER DEFAULT 0,
+                skipped INTEGER DEFAULT 0
+            )
+        """)
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_bulk_job_started ON bulk_metadata_job(started_at DESC)"
+        )
+
+        # Audit log — every metadata write done by a bulk job (and by review resolutions).
+        # prior_xml is the bytes of any ComicInfo.xml that existed before the write
+        # (NULL when the file had no metadata), enabling a true revert.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS bulk_metadata_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                folder_path TEXT NOT NULL,
+                provider TEXT,
+                series_id TEXT,
+                issue_id TEXT,
+                series_name TEXT,
+                issue_number TEXT,
+                year INTEGER,
+                matched_via TEXT,
+                prior_xml BLOB,
+                new_xml BLOB,
+                written_at INTEGER NOT NULL,
+                reverted_at INTEGER,
+                FOREIGN KEY (job_id) REFERENCES bulk_metadata_job(id)
+            )
+        """)
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_bulk_audit_job ON bulk_metadata_audit(job_id)"
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_bulk_audit_file ON bulk_metadata_audit(file_path)"
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_bulk_audit_written ON bulk_metadata_audit(written_at DESC)"
+        )
+
+        # Review queue — folders or files the orchestrator could not auto-resolve.
+        # candidates is JSON of provider matches the user can pick from.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS bulk_metadata_review (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT NOT NULL,
+                folder_path TEXT NOT NULL,
+                file_path TEXT,
+                parsed_series TEXT,
+                parsed_issue TEXT,
+                parsed_year INTEGER,
+                reason TEXT NOT NULL,
+                candidates TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                resolved_at INTEGER,
+                FOREIGN KEY (job_id) REFERENCES bulk_metadata_job(id)
+            )
+        """)
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_bulk_review_job ON bulk_metadata_review(job_id, status)"
+        )
+
         conn.commit()
 
         # Check whether the normalised tag table needs a one-shot backfill from
@@ -1222,13 +1301,17 @@ def backup_database(max_backups: int = 3, force: bool = False):
         with zipfile.ZipFile(backup_path, "w", zipfile.ZIP_DEFLATED) as zf:
             zf.write(db_path, "comic_utils.db")
 
-            # Include WAL files if they exist
-            wal_path = db_path + "-wal"
-            shm_path = db_path + "-shm"
-            if os.path.exists(wal_path):
-                zf.write(wal_path, "comic_utils.db-wal")
-            if os.path.exists(shm_path):
-                zf.write(shm_path, "comic_utils.db-shm")
+            # Include WAL/SHM sidecars when present. SQLite can checkpoint and
+            # remove them concurrently, so guard against the TOCTOU race —
+            # the sidecars aren't load-bearing for restore (SQLite rebuilds
+            # them on next open).
+            for suffix, arcname in (("-wal", "comic_utils.db-wal"),
+                                    ("-shm", "comic_utils.db-shm")):
+                side_path = db_path + suffix
+                try:
+                    zf.write(side_path, arcname)
+                except (FileNotFoundError, OSError):
+                    pass
 
         app_logger.info(f"Database backup created: {backup_name}")
 
@@ -2601,16 +2684,26 @@ def search_file_index(query, limit=100):
 
         c = conn.cursor()
 
-        # Search with LIKE for partial matching (case-insensitive)
+        # Search with LIKE for partial matching (case-insensitive). The WHERE
+        # clause filters by substring; the ORDER BY ranks matches by relevance
+        # so that names beginning with the query (and shorter/tighter matches)
+        # rank above ones where the query appears mid-string. Ranking is
+        # computed only over the already-filtered, limited rows so cost is
+        # negligible.
         c.execute(
             """
             SELECT name, path, type, size, parent
             FROM file_index
             WHERE LOWER(name) LIKE LOWER(?)
-            ORDER BY type DESC, name ASC
+            ORDER BY
+                type DESC,
+                CASE WHEN LOWER(name) LIKE LOWER(? || '%') THEN 0 ELSE 1 END,
+                INSTR(LOWER(name), LOWER(?)),
+                LENGTH(name),
+                name ASC
             LIMIT ?
         """,
-            (f"%{query}%", limit),
+            (f"%{query}%", query, query, limit),
         )
 
         rows = c.fetchall()
@@ -10069,6 +10162,55 @@ def update_file_index_ci_field(path, field, value):
         return False
 
 
+def get_file_index_ci_for_paths(paths):
+    """
+    Read all ci_ metadata columns for a list of file paths.
+
+    Used by the Source Wall reconcile flow to write XML from DB state — it
+    pulls the current ci_ values for each selected file so the background
+    worker can rewrite ComicInfo.xml to match.
+
+    Args:
+        paths: List of file paths to look up
+
+    Returns:
+        Dict of {path: {ci_field: value, ...}} containing only paths that
+        exist in file_index. Missing paths are silently omitted.
+    """
+    if not paths:
+        return {}
+
+    result = {}
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return {}
+
+        c = conn.cursor()
+        ci_cols = sorted(ALLOWED_CI_FIELDS)
+        cols_sql = ", ".join(ci_cols)
+
+        # SQLite default SQLITE_MAX_VARIABLE_NUMBER is 999 in older builds;
+        # chunk at 500 to stay well under that on any platform.
+        for i in range(0, len(paths), 500):
+            chunk = paths[i:i + 500]
+            placeholders = ",".join("?" * len(chunk))
+            c.execute(
+                f"SELECT path, {cols_sql} FROM file_index WHERE path IN ({placeholders})",
+                chunk,
+            )
+            for row in c.fetchall():
+                d = dict(row)
+                path = d.pop("path")
+                result[path] = {k: (v or "") for k, v in d.items()}
+
+        conn.close()
+        return result
+    except Exception as e:
+        app_logger.error(f"Failed to read ci fields for paths: {e}")
+        return result
+
+
 def bulk_update_file_index_ci_field(paths, field, value):
     """
     Batch update a single ci_ field for multiple files.
@@ -10383,3 +10525,349 @@ def sync_reading_list_entries(list_id, new_entries, preserve_manual=True):
     except Exception as e:
         app_logger.error(f"Error syncing reading list entries for {list_id}: {e}")
         return None
+
+
+# =============================================================================
+# Bulk metadata job helpers (used by core/bulk_metadata.py + routes/bulk_metadata.py)
+# =============================================================================
+
+
+def create_bulk_job(job_id, scope_type, scope_payload, library_id=None, overwrite_existing=False):
+    """Insert a new bulk_metadata_job row in 'running' state."""
+    import json as _json
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False
+        c = conn.cursor()
+        c.execute(
+            """INSERT INTO bulk_metadata_job
+                 (id, started_at, status, scope_type, scope_payload, library_id, overwrite_existing)
+               VALUES (?, ?, 'running', ?, ?, ?, ?)""",
+            (
+                job_id,
+                int(time.time()),
+                scope_type,
+                _json.dumps(scope_payload),
+                library_id,
+                1 if overwrite_existing else 0,
+            ),
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        app_logger.error(f"create_bulk_job failed: {e}")
+        return False
+
+
+def update_bulk_job_counts(job_id, **counters):
+    """Increment any of total_folders/total_files/auto_accepted/needs_review/errors/skipped."""
+    allowed = {"total_folders", "total_files", "auto_accepted", "needs_review", "errors", "skipped"}
+    sets = []
+    params = []
+    for k, v in counters.items():
+        if k in allowed and v:
+            sets.append(f"{k} = {k} + ?")
+            params.append(int(v))
+    if not sets:
+        return True
+    params.append(job_id)
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False
+        c = conn.cursor()
+        c.execute(f"UPDATE bulk_metadata_job SET {', '.join(sets)} WHERE id = ?", params)
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        app_logger.error(f"update_bulk_job_counts failed: {e}")
+        return False
+
+
+def complete_bulk_job(job_id, status="completed"):
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False
+        c = conn.cursor()
+        c.execute(
+            "UPDATE bulk_metadata_job SET status = ?, finished_at = ? WHERE id = ?",
+            (status, int(time.time()), job_id),
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        app_logger.error(f"complete_bulk_job failed: {e}")
+        return False
+
+
+def get_bulk_job(job_id):
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return None
+        c = conn.cursor()
+        c.execute("SELECT * FROM bulk_metadata_job WHERE id = ?", (job_id,))
+        row = c.fetchone()
+        conn.close()
+        return dict(row) if row else None
+    except Exception as e:
+        app_logger.error(f"get_bulk_job failed: {e}")
+        return None
+
+
+def list_bulk_jobs(limit=50, offset=0):
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return []
+        c = conn.cursor()
+        c.execute(
+            "SELECT * FROM bulk_metadata_job ORDER BY started_at DESC LIMIT ? OFFSET ?",
+            (int(limit), int(offset)),
+        )
+        rows = [dict(r) for r in c.fetchall()]
+        conn.close()
+        return rows
+    except Exception as e:
+        app_logger.error(f"list_bulk_jobs failed: {e}")
+        return []
+
+
+def log_bulk_audit(
+    job_id,
+    file_path,
+    folder_path,
+    provider,
+    series_id,
+    issue_id,
+    series_name,
+    issue_number,
+    year,
+    matched_via,
+    prior_xml,
+    new_xml,
+):
+    """Append an audit row recording one ComicInfo.xml write."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return None
+        c = conn.cursor()
+        c.execute(
+            """INSERT INTO bulk_metadata_audit
+                 (job_id, file_path, folder_path, provider, series_id, issue_id,
+                  series_name, issue_number, year, matched_via,
+                  prior_xml, new_xml, written_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                job_id,
+                file_path,
+                folder_path,
+                provider,
+                str(series_id) if series_id is not None else None,
+                str(issue_id) if issue_id is not None else None,
+                series_name,
+                issue_number,
+                int(year) if year else None,
+                matched_via,
+                sqlite3.Binary(prior_xml) if prior_xml else None,
+                sqlite3.Binary(new_xml) if new_xml else None,
+                int(time.time()),
+            ),
+        )
+        new_id = c.lastrowid
+        conn.commit()
+        conn.close()
+        return new_id
+    except Exception as e:
+        app_logger.error(f"log_bulk_audit failed: {e}")
+        return None
+
+
+def get_bulk_audit(audit_id):
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return None
+        c = conn.cursor()
+        c.execute("SELECT * FROM bulk_metadata_audit WHERE id = ?", (int(audit_id),))
+        row = c.fetchone()
+        conn.close()
+        return dict(row) if row else None
+    except Exception as e:
+        app_logger.error(f"get_bulk_audit failed: {e}")
+        return None
+
+
+def mark_audit_reverted(audit_id):
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False
+        c = conn.cursor()
+        c.execute(
+            "UPDATE bulk_metadata_audit SET reverted_at = ? WHERE id = ?",
+            (int(time.time()), int(audit_id)),
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        app_logger.error(f"mark_audit_reverted failed: {e}")
+        return False
+
+
+def get_audit_history(limit=100, offset=0, provider=None, status=None, search=None):
+    """Paged audit history.
+
+    status: 'written' (reverted_at IS NULL) | 'reverted' (reverted_at NOT NULL) | None for both.
+    """
+    clauses = []
+    params = []
+    if provider:
+        clauses.append("provider = ?")
+        params.append(provider)
+    if status == "written":
+        clauses.append("reverted_at IS NULL")
+    elif status == "reverted":
+        clauses.append("reverted_at IS NOT NULL")
+    if search:
+        s = search.strip()
+        if s:
+            clauses.append("(file_path LIKE ? OR series_name LIKE ?)")
+            params.extend([f"%{s}%", f"%{s}%"])
+
+    where_sql = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return [], 0
+        c = conn.cursor()
+        c.execute(f"SELECT COUNT(*) FROM bulk_metadata_audit {where_sql}", params)
+        total = c.fetchone()[0]
+
+        # Don't ship the BLOBs in the listing — only select metadata columns.
+        c.execute(
+            f"""SELECT id, job_id, file_path, folder_path, provider,
+                       series_id, issue_id, series_name, issue_number, year,
+                       matched_via, written_at, reverted_at
+                FROM bulk_metadata_audit {where_sql}
+                ORDER BY written_at DESC
+                LIMIT ? OFFSET ?""",
+            params + [int(limit), int(offset)],
+        )
+        rows = [dict(r) for r in c.fetchall()]
+        conn.close()
+        return rows, total
+    except Exception as e:
+        app_logger.error(f"get_audit_history failed: {e}")
+        return [], 0
+
+
+def add_review_item(
+    job_id,
+    folder_path,
+    file_path,
+    parsed_series,
+    parsed_issue,
+    parsed_year,
+    reason,
+    candidates,
+):
+    import json as _json
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return None
+        c = conn.cursor()
+        c.execute(
+            """INSERT INTO bulk_metadata_review
+                 (job_id, folder_path, file_path, parsed_series, parsed_issue,
+                  parsed_year, reason, candidates, status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')""",
+            (
+                job_id,
+                folder_path,
+                file_path,
+                parsed_series,
+                parsed_issue,
+                int(parsed_year) if parsed_year else None,
+                reason,
+                _json.dumps(candidates) if candidates is not None else None,
+            ),
+        )
+        new_id = c.lastrowid
+        conn.commit()
+        conn.close()
+        return new_id
+    except Exception as e:
+        app_logger.error(f"add_review_item failed: {e}")
+        return None
+
+
+def get_review_queue(job_id=None, status="pending", limit=500):
+    clauses = []
+    params = []
+    if job_id:
+        clauses.append("job_id = ?")
+        params.append(job_id)
+    if status:
+        clauses.append("status = ?")
+        params.append(status)
+    where_sql = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return []
+        c = conn.cursor()
+        c.execute(
+            f"SELECT * FROM bulk_metadata_review {where_sql} ORDER BY id ASC LIMIT ?",
+            params + [int(limit)],
+        )
+        rows = [dict(r) for r in c.fetchall()]
+        conn.close()
+        return rows
+    except Exception as e:
+        app_logger.error(f"get_review_queue failed: {e}")
+        return []
+
+
+def get_review_item(review_id):
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return None
+        c = conn.cursor()
+        c.execute("SELECT * FROM bulk_metadata_review WHERE id = ?", (int(review_id),))
+        row = c.fetchone()
+        conn.close()
+        return dict(row) if row else None
+    except Exception as e:
+        app_logger.error(f"get_review_item failed: {e}")
+        return None
+
+
+def update_review_status(review_id, status):
+    """Set a review row's status to 'resolved' or 'dismissed'."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False
+        c = conn.cursor()
+        c.execute(
+            "UPDATE bulk_metadata_review SET status = ?, resolved_at = ? WHERE id = ?",
+            (status, int(time.time()), int(review_id)),
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        app_logger.error(f"update_review_status failed: {e}")
+        return False

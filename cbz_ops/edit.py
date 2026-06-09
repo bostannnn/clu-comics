@@ -1,4 +1,6 @@
 import os
+import json
+import uuid
 import zipfile
 import shutil
 import io
@@ -11,6 +13,28 @@ from helpers import create_thumbnail_streaming, safe_image_open
 from helpers import capture_file_ownership, restore_file_ownership
 import gc
 
+
+def _safe_join(base_folder, rel_path):
+    """Resolve rel_path under base_folder, rejecting traversal escapes.
+
+    Returns the absolute path or raises ValueError.
+    """
+    base_abs = os.path.abspath(base_folder)
+    candidate = os.path.abspath(os.path.join(base_abs, rel_path))
+    if candidate != base_abs and not candidate.startswith(base_abs + os.sep):
+        raise ValueError(f"Path escapes base folder: {rel_path}")
+    return candidate
+
+
+def _validate_final_name(name):
+    """Reject final filenames that could escape the base folder."""
+    if not name or not isinstance(name, str):
+        raise ValueError("final_name must be a non-empty string")
+    if '/' in name or '\\' in name or '\0' in name:
+        raise ValueError(f"final_name contains path separators or NUL: {name!r}")
+    if name in ('.', '..'):
+        raise ValueError(f"final_name reserved: {name!r}")
+
 load_config()
 skipped_exts = config.get("SETTINGS", "SKIPPED_FILES", fallback="")
 deleted_exts = config.get("SETTINGS", "DELETED_FILES", fallback="")
@@ -21,45 +45,27 @@ deletedFiles = [ext.strip().lower() for ext in deleted_exts.split(",") if ext.st
 # Partial template for the modal body (the grid of Bootstrap Cards)
 modal_body_template = '''
     {% for card in file_cards %}
-      <div class="col">
-        <div class="card h-100 shadow-sm">
-          <div class="row g-0">
-            <div class="col-3">
-              {% if card.img_data %}
-                <img src="{{ card.img_data }}" class="img-fluid rounded-start object-fit-scale border rounded" alt="{{ card.filename }}">
-              {% else %}
-                <img src="https://via.placeholder.com/100" class="img-fluid rounded-start object-fit-scale border rounded" alt="No image">
-              {% endif %}
-            </div>
-            <div class="col-9">
-              <div class="card-body">
-                <p class="card-text small">
-                    <span class="editable-filename" data-rel-path="{{ card.rel_path }}" onclick="CLU.enableFilenameEdit(this)">
-                      {{ card.filename }}
-                    </span>
-                    <input type="text" class="form-control d-none filename-input form-control-sm" value="{{ card.filename }}" data-rel-path="{{ card.rel_path }}">
-                </p>
-                <div class="d-flex justify-content-end">
-                <div class="btn-group" role="group" aria-label="Basic example">
-                  <button type="button" class="btn btn-outline-primary btn-sm" onclick="CLU.cropImageFreeForm(this)" title="Free Form Crop">
-                    <i class="bi bi-crop"></i> Free
-                  </button>
-                  <button type="button" class="btn btn-outline-secondary btn-sm" onclick="CLU.cropImageLeft(this)" title="Crop Image Left">
-                    <i class="bi bi-arrow-bar-left"></i> Left
-                  </button>
-                  <button type="button" class="btn btn-outline-secondary" onclick="CLU.cropImageCenter(this)" title="Crop Image Center">Middle</button>
-                  <button type="button" class="btn btn-outline-secondary btn-sm" onclick="CLU.cropImageRight(this)" title="Crop Image Right">
-                    Right <i class="bi bi-arrow-bar-right"></i>
-                  </button>
-                  <button type="button" class="btn btn-outline-warning btn-sm" onclick="CLU.triggerReplaceImage(this)" title="Replace Image">
-                    <i class="bi bi-arrow-repeat"></i> Replace
-                  </button>
-                  <button type="button" class="btn btn-outline-danger btn-sm" onclick="CLU.deleteCardImage(this)">
-                    <i class="bi bi-trash"></i>
-                  </button>
-                </div>
-                </div>
-              </div>
+      <div class="col" data-rel-path="{{ card.rel_path }}">
+        <div class="card h-100 shadow-sm cbz-edit-card">
+          <div class="cbz-edit-thumb-wrap">
+            {% if card.img_data %}
+              <img src="{{ card.img_data }}" class="cbz-edit-thumb" alt="{{ card.filename }}">
+            {% else %}
+              <img src="https://via.placeholder.com/400x600" class="cbz-edit-thumb" alt="No image">
+            {% endif %}
+          </div>
+          <div class="card-body d-flex flex-column p-2">
+            <p class="card-text small text-break mb-2 cbz-edit-filename-wrap">
+                <span class="editable-filename" data-rel-path="{{ card.rel_path }}" onclick="CLU.enableFilenameEdit(this)">{{ card.filename }}</span>
+                <input type="text" class="form-control d-none filename-input form-control-sm" value="{{ card.filename }}" data-rel-path="{{ card.rel_path }}">
+            </p>
+            <div class="btn-group btn-group-sm w-100 mt-auto" role="group">
+              <button type="button" class="btn btn-outline-primary" onclick="CLU.cropImageFreeForm(this)" title="Free Form Crop"><i class="bi bi-crop"></i></button>
+              <button type="button" class="btn btn-outline-primary" onclick="CLU.cropImageLeft(this)" title="Crop Left"><i class="bi bi-arrow-bar-left"></i></button>
+              <button type="button" class="btn btn-outline-primary" onclick="CLU.cropImageCenter(this)" title="Crop Center"><i class="bi bi-bounding-box"></i></button>
+              <button type="button" class="btn btn-outline-primary" onclick="CLU.cropImageRight(this)" title="Crop Right"><i class="bi bi-arrow-bar-right"></i></button>
+              <button type="button" class="btn btn-outline-warning" onclick="CLU.triggerReplaceImage(this)" title="Replace Image"><i class="bi bi-arrow-repeat"></i></button>
+              <button type="button" class="btn btn-outline-danger" onclick="CLU.deleteCardImage(this)" title="Delete"><i class="bi bi-trash"></i></button>
             </div>
           </div>
         </div>
@@ -210,7 +216,7 @@ def get_edit_modal(file_path):
                     full_path = os.path.join(root, f)
                     
                     # Use streaming thumbnail generation
-                    thumbnail_data = create_thumbnail_streaming(full_path, max_size=(100, 100), quality=85)
+                    thumbnail_data = create_thumbnail_streaming(full_path, max_size=(400, 600), quality=85)
                     
                     if thumbnail_data:
                         encoded = base64.b64encode(thumbnail_data).decode('utf-8')
@@ -249,12 +255,95 @@ def save_cbz():
     folder_name = request.form.get('folder_name')
     zip_file_path = request.form.get('zip_file_path')
     original_file_path = request.form.get('original_file_path')
-    
+    pending_deletes_raw = request.form.get('pending_deletes', '[]')
+    pending_order_raw = request.form.get('pending_order', '[]')
+
     if not folder_name or not zip_file_path or not original_file_path:
         return "Missing required data", 400
 
+    # Parse + validate pending operations BEFORE touching disk.
     try:
-        ownership = capture_file_ownership(original_file_path)
+        pending_deletes = json.loads(pending_deletes_raw) if pending_deletes_raw else []
+        pending_order = json.loads(pending_order_raw) if pending_order_raw else []
+        if not isinstance(pending_deletes, list):
+            raise ValueError("pending_deletes must be a list")
+        if not isinstance(pending_order, list):
+            raise ValueError("pending_order must be a list")
+        # Validate every delete resolves under folder_name.
+        for rel in pending_deletes:
+            if not isinstance(rel, str):
+                raise ValueError("pending_deletes entries must be strings")
+            _safe_join(folder_name, rel)
+        # Validate every order entry.
+        for entry in pending_order:
+            if not isinstance(entry, dict):
+                raise ValueError("pending_order entries must be objects")
+            rel = entry.get('rel_path')
+            final = entry.get('final_name')
+            if not isinstance(rel, str):
+                raise ValueError("pending_order rel_path must be a string")
+            _safe_join(folder_name, rel)
+            _validate_final_name(final)
+    except (ValueError, json.JSONDecodeError) as e:
+        app_logger.error(f"Invalid pending operations: {e}")
+        return jsonify({"success": False, "error": f"Invalid pending operations: {e}"}), 400
+
+    ownership = capture_file_ownership(zip_file_path)
+
+    try:
+        # ── Apply pending deletes ────────────────────────────────────
+        for rel in pending_deletes:
+            target = _safe_join(folder_name, rel)
+            if os.path.isfile(target):
+                try:
+                    os.remove(target)
+                    app_logger.info(f"Pending-delete applied: {rel}")
+                except Exception as e:
+                    app_logger.warning(f"Failed to delete {rel}: {e}")
+            else:
+                app_logger.info(f"Pending-delete target missing (skipped): {rel}")
+
+        # ── Apply pending renames in two phases ──────────────────────
+        # Phase A: source → unique temp name (avoids collisions)
+        # Phase B: temp name → final_name (flat in folder_name)
+        phase_a = []   # list of (orig_abs, temp_abs, final_name)
+        deleted_set = set(pending_deletes)
+        for entry in pending_order:
+            rel = entry['rel_path']
+            if rel in deleted_set:
+                continue
+            final_name = entry['final_name']
+            src_abs = _safe_join(folder_name, rel)
+            if not os.path.isfile(src_abs):
+                app_logger.warning(f"Pending-order source missing (skipped): {rel}")
+                continue
+            target_abs = os.path.join(os.path.abspath(folder_name), final_name)
+            # No-op when source basename already matches final and it's already at the root.
+            if os.path.abspath(src_abs) == target_abs:
+                continue
+            temp_abs = os.path.join(os.path.abspath(folder_name), f".__reorder_{uuid.uuid4().hex}.tmp")
+            phase_a.append((src_abs, temp_abs, target_abs, rel, final_name))
+
+        # Execute phase A
+        for src_abs, temp_abs, _target_abs, rel, _final in phase_a:
+            try:
+                os.rename(src_abs, temp_abs)
+            except Exception as e:
+                app_logger.error(f"Phase A rename failed for {rel}: {e}")
+                raise
+
+        # Execute phase B
+        for _src_abs, temp_abs, target_abs, rel, final_name in phase_a:
+            try:
+                # If a stale file sits at target_abs (e.g., another entry's source
+                # we already temped), this is fine — that file was renamed in
+                # phase A so it no longer occupies target_abs. If something else
+                # blocks, raise.
+                os.rename(temp_abs, target_abs)
+                app_logger.info(f"Pending-rename applied: {rel} -> {final_name}")
+            except Exception as e:
+                app_logger.error(f"Phase B rename failed for {rel} -> {final_name}: {e}")
+                raise
         # Step 6: Rename the original .zip file to .bak.
         bak_file_path = zip_file_path + '.bak'
         os.rename(zip_file_path, bak_file_path)
@@ -537,15 +626,19 @@ def cropFreeForm(image_path, x, y, width, height):
         raise
 
 
-def get_image_data_url(image_path):
-    """Open an image, resize it to a height of 100 (keeping aspect ratio),
-    encode it as a PNG in memory, and return a data URL."""
+def get_image_data_url(image_path, target_height=600):
+    """Open an image, resize it to the given height (keeping aspect ratio),
+    encode it as a PNG in memory, and return a data URL.
+
+    Default target_height matches the edit-modal main thumbnail (600px) so
+    crop-result cards render at the same size as the rest of the grid.
+    """
     try:
         with Image.open(image_path) as img:
-            if img.height > 0:
-                ratio = 100 / float(img.height)
-                new_width = int(img.width * ratio)
-                img = img.resize((new_width, 100), Image.LANCZOS)
+            if img.height > 0 and img.height > target_height:
+                ratio = target_height / float(img.height)
+                new_width = max(1, int(img.width * ratio))
+                img = img.resize((new_width, target_height), Image.LANCZOS)
             buffered = io.BytesIO()
             img.save(buffered, format="PNG")
             encoded = base64.b64encode(buffered.getvalue()).decode('utf-8')

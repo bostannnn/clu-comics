@@ -819,6 +819,26 @@ def map_series(series_id):
         success = save_series_mapping(series_data, mapped_path)
 
         if success:
+            # Create cvinfo file with available metadata (mirrors subscribe flow).
+            # series_data comes from the frontend, where publisher is a nested dict.
+            publisher_name = series_data.get("publisher_name")
+            if not publisher_name:
+                pub = series_data.get("publisher")
+                if isinstance(pub, dict):
+                    publisher_name = pub.get("name")
+
+            if os.path.isdir(mapped_path):
+                cvinfo_path = os.path.join(mapped_path, "cvinfo")
+                created = metron.create_cvinfo_file(
+                    cvinfo_path,
+                    cv_id=series_data.get("cv_id"),  # Pass None if cv_id is missing
+                    series_id=series_data.get("id") or series_id,
+                    publisher_name=publisher_name,
+                    start_year=series_data.get("year_began"),
+                )
+                if not created:
+                    app_logger.error(f"Failed to create cvinfo at {cvinfo_path}")
+
             from models.series_json import write_series_json
             write_series_json(mapped_path, series_data, api=metron.get_flask_api())
             return jsonify({"success": True, "mapped_path": mapped_path})
@@ -869,28 +889,18 @@ def get_series_search_aliases(series_id):
         return jsonify({"success": False, "error": "Series name not found"}), 404
 
     from models.getcomics import (
+        get_series_aliases,
         get_sitemap_subseries_aliases,
-        normalize_series_name,
     )
-    from core.database import get_db_connection
 
-    # Get current aliases from scrape index
-    norm_series, _ = normalize_series_name(series_name)
-    norm_lower = norm_series.lower().replace('-', ' ').replace('\u2013', ' ').replace('\u2014', ' ')
-
-    conn = get_db_connection()
-    row = conn.execute("""
-        SELECT search_aliases FROM getcomics_urls
-        WHERE LOWER(REPLACE(REPLACE(series_norm, '-', ' '), '\u2013', ' ')) = ?
-        LIMIT 1
-    """, (norm_lower,)).fetchone()
-    current = row[0] if row else ""
-    conn.close()
+    # Get current aliases (reads scrape index, falls back to alias table)
+    current = get_series_aliases(series_name)
 
     # Get pre-populated candidates from sitemap
     candidates = get_sitemap_subseries_aliases(series_name)
 
     return jsonify({
+        "success": True,
         "series_name": series_name,
         "current_aliases": current,
         "candidate_aliases": candidates,

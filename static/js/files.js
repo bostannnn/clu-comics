@@ -393,8 +393,35 @@ function searchMetadataForFile(filePath, fileName, panel, options) {
   CLU.searchMetadata(filePath, fileName, options.searchTerm || undefined);
 }
 
-// Set up metadata contract for directory batch and call CLU.fetchDirectoryMetadata
-function fetchDirectoryMetadataForPanel(dirPath, dirName, panel, forceProvider) {
+// Set up metadata contract for directory batch and call CLU.fetchDirectoryMetadata.
+// When the target directory contains subfolders, route through the bulk
+// metadata orchestrator instead (which auto-resolves what it can and queues
+// the rest for end-of-run review). Leaf folders keep the existing SSE flow.
+async function fetchDirectoryMetadataForPanel(dirPath, dirName, panel, forceProvider) {
+  if (!forceProvider) {
+    let hasSub = false;
+    try {
+      const resp = await fetch(`/api/bulk-metadata/has-subfolders?path=${encodeURIComponent(dirPath)}`);
+      if (resp.ok) {
+        const data = await resp.json();
+        hasSub = !!(data && data.has_subfolders);
+      }
+    } catch (e) {
+      // Network/server error - fall back to legacy single-folder flow.
+      hasSub = false;
+    }
+
+    if (hasSub && typeof BulkMetadataReview !== 'undefined' && BulkMetadataReview.startJob) {
+      BulkMetadataReview.startJob({
+        scope: 'folder',
+        paths: [dirPath],
+        library_id: getLibraryIdForPanel(panel),
+        onDone: function () { refreshPanelForPath(dirPath); }
+      });
+      return;
+    }
+  }
+
   window._cluMetadata = {
     getLibraryId: function () { return getLibraryIdForPanel(panel); },
     onMetadataFound: function (fp, data) {
@@ -3976,6 +4003,10 @@ function displaySearchResults(results, query) {
       resultsContainer.appendChild(resultItem);
     });
   }
+
+  // Reset scroll to the top whenever results are (re)rendered, so a new search
+  // or changed term doesn't leave the user scrolled into the previous results.
+  resultsContainer.scrollTop = 0;
 }
 
 function navigateToSearchResult(item) {
@@ -5084,7 +5115,7 @@ function processBulkGCDMetadata(directoryPath, directoryName, seriesId, comicFil
 }
 
 // Function to show GCD series selection modal
-function showGCDSeriesSelectionModal(data, filePath, fileName) {
+function showGCDSeriesSelectionModal(data, filePath, fileName, skipProviders) {
   // Populate the parsed filename information
   document.getElementById('gcdParsedSeries').textContent = data.parsed_filename.series_name;
   document.getElementById('gcdParsedIssue').textContent = data.parsed_filename.issue_number;
@@ -5104,6 +5135,11 @@ function showGCDSeriesSelectionModal(data, filePath, fileName) {
 
   // Render the series list with initial order
   renderSeriesList(currentSeriesData);
+
+  // Wire the "Skip to next provider" button (shared logic from clu-metadata.js)
+  if (window.CLU && typeof CLU.wireSkipButton === 'function') {
+    CLU.wireSkipButton('gcdSkipProviderBtn', data, filePath, fileName, skipProviders || []);
+  }
 
   // Show the modal
   const modal = new bootstrap.Modal(document.getElementById('gcdSeriesModal'));
@@ -5882,7 +5918,7 @@ function showGCDApiStartYearPrompt(data, filePath, fileName) {
 
 // showBatchVolumeSelectionModal, fetchAllMetadataWithVolume – delegated to clu-metadata.js
 
-function showMangaSeriesSelectionModal(data, filePath, fileName, libraryId) {
+function showMangaSeriesSelectionModal(data, filePath, fileName, libraryId, skipProviders) {
   console.log('Showing manga series selection modal', data);
 
   const provider = data.provider;
@@ -5943,6 +5979,11 @@ function showMangaSeriesSelectionModal(data, filePath, fileName, libraryId) {
 
     seriesList.appendChild(seriesItem);
   });
+
+  // Wire the "Skip to next provider" button (shared logic from clu-metadata.js)
+  if (window.CLU && typeof CLU.wireSkipButton === 'function') {
+    CLU.wireSkipButton('mangaSkipProviderBtn', data, filePath, fileName, skipProviders || []);
+  }
 
   const modal = new bootstrap.Modal(document.getElementById('mangaSeriesModal'));
   modal.show();
@@ -6075,99 +6116,20 @@ function selectComicVineVolume(filePath, fileName, volumeId, publisherName, issu
     });
 }
 
-function padIssueNumber(numStr, width = 3) {
-  numStr = String(numStr).trim();
-  if (!numStr) return '';
-  if (/^v\d+(?:\.\d+)?$/i.test(numStr)) {
-    const prefix = numStr[0];
-    const inner = numStr.slice(1);
-    if (inner.includes('.')) {
-      const parts = inner.split('.');
-      return prefix + parts[0].padStart(width - 1, '0') + '.' + parts.slice(1).join('.');
-    }
-    return prefix + inner.padStart(width - 1, '0');
-  }
-  if (numStr.includes('.')) {
-    const parts = numStr.split('.');
-    return parts[0].padStart(width, '0') + '.' + parts.slice(1).join('.');
-  }
-  return numStr.padStart(width, '0');
-}
+// Rename-template name building lives in clu-metadata.js (CLU.buildRenamedName /
+// CLU.padIssueNumber / CLU.parseDateParts) so every page renames identically.
 
 function promptRenameAfterMetadata(filePath, fileName, metadata, renameConfig) {
-  console.log('promptRenameAfterMetadata called with:', { filePath, fileName, metadata, renameConfig });
-
-  let suggestedName;
-  const ext = fileName.match(/\.(cbz|cbr)$/i)?.[0] || '.cbz';
-
-  // Check if custom rename pattern is enabled and defined
-  if (renameConfig && renameConfig.enabled && renameConfig.pattern) {
-    console.log('Using custom rename pattern:', renameConfig.pattern);
-
-    // Apply custom pattern - similar to rename.py logic
-    let pattern = renameConfig.pattern;
-
-    // Prepare values for replacement
-    let series = metadata.Series || '';
-    series = series.replace(/:/g, ' -');  // Replace colon with dash for Windows
-    series = series.replace(/[<>"/\\|?*]/g, '');  // Remove invalid chars
-
-    const issueNumber = padIssueNumber(metadata.Number);
-    const year = metadata.Year || '';
-    const volumeNumber = '';  // ComicVine uses year as Volume, not volume number
-
-    let issueTitle = metadata.Title || '';
-    issueTitle = issueTitle.replace(/:/g, ' -');
-    issueTitle = issueTitle.replace(/[<>"/\\|?*]/g, '');
-    issueTitle = issueTitle.replace(/[\x00-\x1f]/g, '');
-    issueTitle = issueTitle.replace(/^[.\s]+|[.\s]+$/g, '');
-
-    console.log('Pattern replacement values:', { series, issueNumber, year, volumeNumber, issueTitle, metadata });
-
-    // Replace pattern variables (case-insensitive for flexibility)
-    let result = pattern;
-    result = result.replace(/{series_name}/gi, series);
-    result = result.replace(/{issue_number}/gi, issueNumber);
-    result = result.replace(/{year}/gi, year);
-    result = result.replace(/{YYYY}/g, year);  // Support YYYY as well
-    result = result.replace(/{volume_number}/gi, volumeNumber);
-    result = result.replace(/{issue_title}/gi, issueTitle);
-
-    // Clean up extra spaces
-    result = result.replace(/\s+/g, ' ').trim();
-
-    // Remove empty parentheses
-    result = result.replace(/\s*\(\s*\)/g, '').trim();
-
-    // Remove orphaned separators (e.g., trailing " - " when issue_title is empty)
-    result = result.replace(/\s*-\s*(?=\(|$)/g, ' ').replace(/\s+/g, ' ').trim();
-
-    suggestedName = result + ext;
-  } else {
-    // Default rename pattern: Series Number.ext
-    let series = metadata.Series;
-    series = series.replace(/:/g, ' -');  // Replace colon with dash
-    series = series.replace(/[<>"/\\|?*]/g, '');  // Remove other invalid filename chars
-    series = series.replace(/\s+/g, ' ').trim();  // Normalize whitespace
-
-    const number = padIssueNumber(metadata.Number);
-    suggestedName = `${series} ${number}${ext}`;
-  }
-
-  // Only proceed if the name would actually change
-  if (suggestedName === fileName) {
+  // Name building is shared across pages — see CLU.buildRenamedName.
+  const suggestedName = CLU.buildRenamedName(metadata, renameConfig, fileName);
+  if (!suggestedName) {
+    // null when the name wouldn't change.
     return;
   }
 
-  // Check if auto-rename is enabled
+  // Only auto-rename when enabled; otherwise leave the file as-is.
   if (renameConfig && renameConfig.auto_rename) {
-    console.log('Auto-rename is enabled, renaming file automatically');
-    // Automatically rename without prompting
     renameFileAfterMetadata(filePath, fileName, suggestedName);
-  } else {
-    console.log('Auto-rename is disabled, skipping rename');
-    // Auto-rename is disabled, do nothing (no prompt, no rename)
-    return;
   }
 }
 
@@ -6585,6 +6547,10 @@ function openEditModal(filePath) {
   editModal.show();
   CLU.setupEditModalDropZone();
 
+  // Update modal title with filename
+  const filename = filePath.split('/').pop().split('\\').pop();
+  document.getElementById('editCBZModalText').textContent = `Editing ${filename}`;
+
   // Load CBZ contents
   fetch(`/edit?file_path=${encodeURIComponent(filePath)}`)
     .then(response => {
@@ -6599,6 +6565,7 @@ function openEditModal(filePath) {
       document.getElementById('editInlineZipFilePath').value = data.zip_file_path;
       document.getElementById('editInlineOriginalFilePath').value = data.original_file_path;
       CLU.sortInlineEditCards();
+      CLU.initEditModalReorder();
     })
     .catch(error => {
       container.innerHTML = `<div class="alert alert-danger" role="alert">

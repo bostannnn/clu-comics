@@ -11,9 +11,7 @@ from typing import Optional, Dict, List, Any
 import os
 import shutil
 import re
-import threading
-from contextlib import contextmanager
-import requests
+import time
 from cbz_ops.rename import rename_comic_from_metadata
 
 try:
@@ -26,33 +24,83 @@ try:
 except ImportError:
     SIMYAN_AVAILABLE = False
 
+
+def _get_cv_request_timeout() -> int:
+    """Per-request timeout (seconds) for the Simyan ComicVine client.
+
+    Bounds each HTTP call so a slow/unresponsive ComicVine can't stall the
+    worker indefinitely. Overridable via the COMICVINE_TIMEOUT env var.
+    """
+    try:
+        return int(os.environ.get("COMICVINE_TIMEOUT", "20"))
+    except (ValueError, TypeError):
+        return 20
+
+
+CV_REQUEST_TIMEOUT = _get_cv_request_timeout()
+
+
+def _make_cv_client(api_key: str):
+    """Construct a Simyan ComicVine client with an explicit request timeout."""
+    return Comicvine(api_key=api_key, cache=None, timeout=CV_REQUEST_TIMEOUT)
+
+
+def _cv_retry_config():
+    """Retry budget for ComicVine rate-limit rejections.
+
+    ``COMICVINE_RATE_LIMIT_RETRIES`` — extra attempts after the first (default 3).
+    ``COMICVINE_RATE_LIMIT_BACKOFF`` — base seconds, scaled linearly per retry
+    (default 5 → waits of 5s, 10s, 15s).
+    """
+    try:
+        retries = int(os.environ.get("COMICVINE_RATE_LIMIT_RETRIES", "3"))
+    except (ValueError, TypeError):
+        retries = 3
+    try:
+        backoff = float(os.environ.get("COMICVINE_RATE_LIMIT_BACKOFF", "5"))
+    except (ValueError, TypeError):
+        backoff = 5.0
+    return max(0, retries), max(0.0, backoff)
+
+
+def _is_rate_limit_error(exc) -> bool:
+    """True when a Simyan/ComicVine error is a rate-limit rejection.
+
+    ComicVine returns the status text "Rate limit exceeded. Slow down cowboy.",
+    which Simyan surfaces as a ServiceError. Match on the message so we stay
+    robust to Simyan's exception class names changing across versions.
+    """
+    return 'rate limit' in str(exc).lower()
+
+
+def _cv_call_with_retry(fn, description: str):
+    """Run a Simyan operation, retrying on ComicVine rate-limit errors.
+
+    ComicVine throttles burst traffic aggressively ("Slow down cowboy"). A
+    single throttle shouldn't make the bulk-metadata flow fail over to a
+    lower-quality provider (GCD), so we back off and re-attempt a few times
+    before letting the error propagate. Non-rate-limit errors raise immediately.
+    """
+    retries, backoff = _cv_retry_config()
+    attempt = 0
+    while True:
+        try:
+            return fn()
+        except Exception as e:
+            if not _is_rate_limit_error(e) or attempt >= retries:
+                raise
+            attempt += 1
+            wait = backoff * attempt
+            app_logger.warning(
+                f"ComicVine rate-limited on {description}; "
+                f"retry {attempt}/{retries} in {wait:.0f}s"
+            )
+            time.sleep(wait)
+
+
 def is_simyan_available() -> bool:
     """Check if the Simyan library is available."""
     return SIMYAN_AVAILABLE
-
-
-_METADATA_HTTP_TIMEOUT = 30
-if not hasattr(requests.sessions.Session, "_clu_timeout_lock"):
-    requests.sessions.Session._clu_timeout_lock = threading.RLock()
-_REQUEST_TIMEOUT_LOCK = requests.sessions.Session._clu_timeout_lock
-
-
-@contextmanager
-def _default_request_timeout(timeout=_METADATA_HTTP_TIMEOUT):
-    """Apply a default requests timeout around Simyan calls."""
-    with _REQUEST_TIMEOUT_LOCK:
-        original_request = requests.sessions.Session.request
-
-        def request_with_timeout(session, method, url, **kwargs):
-            if kwargs.get("timeout") is None:
-                kwargs["timeout"] = timeout
-            return original_request(session, method, url, **kwargs)
-
-        requests.sessions.Session.request = request_with_timeout
-        try:
-            yield
-        finally:
-            requests.sessions.Session.request = original_request
 
 
 def is_comicvine_configured(app=None):
@@ -129,7 +177,7 @@ def fetch_cv_arcs(api_key, search=None):
         return []
 
     try:
-        cv = Comicvine(api_key=api_key, cache=None)
+        cv = _make_cv_client(api_key)
         if search:
             arcs = cv.search(resource=ComicvineResource.STORY_ARC, query=search)
         else:
@@ -174,7 +222,7 @@ def fetch_cv_arc_detail(api_key, arc_id):
         return None
 
     try:
-        cv = Comicvine(api_key=api_key, cache=None)
+        cv = _make_cv_client(api_key)
         arc = cv.get_story_arc(arc_id)
         if not arc:
             return None
@@ -217,7 +265,7 @@ def fetch_cv_arc_issues(api_key, arc_id):
         if not detail or not detail.get('issues'):
             return []
 
-        cv = Comicvine(api_key=api_key, cache=None)
+        cv = _make_cv_client(api_key)
         resolved = []
 
         for i, entry in enumerate(detail['issues']):
@@ -285,12 +333,15 @@ def search_volumes(api_key: str, series_name: str, year: Optional[int] = None) -
     try:
         app_logger.info(f"Searching ComicVine for volume: '{series_name}' (year: {year})")
 
-        with _default_request_timeout():
-            # Initialize ComicVine API client
-            cv = Comicvine(api_key=api_key, cache=None)
+        # Initialize ComicVine API client
+        cv = _make_cv_client(api_key)
 
-            # Search for volumes using fuzzy search
-            volumes = cv.search(resource=ComicvineResource.VOLUME, query=series_name)
+        # Search for volumes using fuzzy search. Retry on rate-limit so a burst
+        # throttle doesn't force a premature failover to a lesser provider.
+        volumes = _cv_call_with_retry(
+            lambda: cv.search(resource=ComicvineResource.VOLUME, query=series_name),
+            f"volume search '{series_name}'",
+        )
 
         if not volumes:
             app_logger.info(f"No volumes found for '{series_name}'")
@@ -374,15 +425,16 @@ def get_issue_by_number(api_key: str, volume_id: int, issue_number: str, year: O
     try:
         app_logger.info(f"Searching for issue #{issue_number} in volume {volume_id} (year: {year})")
 
-        with _default_request_timeout():
-            # Initialize ComicVine API client
-            cv = Comicvine(api_key=api_key, cache=None)
+        # Initialize ComicVine API client
+        cv = _make_cv_client(api_key)
 
-            # Get issues from the volume
-            # Build filter string
-            filter_str = f"volume:{volume_id},issue_number:{issue_number}"
+        # Get issues from the volume
+        filter_str = f"volume:{volume_id},issue_number:{issue_number}"
 
-            issues = cv.list_issues(params={"filter": filter_str})
+        issues = _cv_call_with_retry(
+            lambda: cv.list_issues(params={"filter": filter_str}),
+            f"issue lookup volume:{volume_id} #{issue_number}",
+        )
 
         if not issues:
             app_logger.info(f"No issues found for volume {volume_id}, issue #{issue_number}")
@@ -400,8 +452,10 @@ def get_issue_by_number(api_key: str, volume_id: int, issue_number: str, year: O
         basic_issue = issues[0]
 
         # Fetch full issue details to get all metadata (credits, characters, etc.)
-        with _default_request_timeout():
-            issue = cv.get_issue(basic_issue.id)
+        issue = _cv_call_with_retry(
+            lambda: cv.get_issue(basic_issue.id),
+            f"issue detail {basic_issue.id}",
+        )
 
         # Convert to dict format
         issue_dict = _issue_to_dict(issue)
@@ -430,9 +484,11 @@ def get_issue_by_id(api_key: str, issue_id: int) -> Optional[Dict[str, Any]]:
         raise Exception("Simyan library not installed. Install with: pip install simyan")
 
     try:
-        with _default_request_timeout():
-            cv = Comicvine(api_key=api_key, cache=None)
-            issue = cv.get_issue(issue_id)
+        cv = _make_cv_client(api_key)
+        issue = _cv_call_with_retry(
+            lambda: cv.get_issue(issue_id),
+            f"issue detail {issue_id}",
+        )
         if not issue:
             app_logger.info(f"No issue found for ComicVine issue id {issue_id}")
             return None
@@ -458,9 +514,11 @@ def list_issue_candidates_for_volume(api_key: str, volume_id: int, year: Optiona
         raise Exception("Simyan library not installed. Install with: pip install simyan")
 
     try:
-        with _default_request_timeout():
-            cv = Comicvine(api_key=api_key, cache=None)
-            issues = cv.list_issues(params={"filter": f"volume:{volume_id}"})
+        cv = _make_cv_client(api_key)
+        issues = _cv_call_with_retry(
+            lambda: cv.list_issues(params={"filter": f"volume:{volume_id}"}),
+            f"issue candidates for volume:{volume_id}",
+        )
         if not issues:
             app_logger.info(f"No issue candidates found for volume {volume_id}")
             return []
@@ -598,6 +656,18 @@ def _issue_to_dict(issue: Any) -> Dict[str, Any]:
             year = _extract_year_from_date(date_str)
             app_logger.info(f"DEBUG _issue_to_dict: unknown type {type(date_value)}, converted to string={date_str}, year={year}")
 
+    # Preserve BOTH raw dates separately (normalized to YYYY-MM-DD strings) so
+    # downstream rename templating can distinguish cover vs store dates. The
+    # Year/Month/Day above intentionally remain cover-preferred-then-store.
+    def _norm_date(d):
+        if not d:
+            return None
+        if isinstance(d, (datetime, date)):
+            return d.strftime("%Y-%m-%d")
+        return str(d)
+    cover_date_raw = _norm_date(getattr(issue, 'cover_date', None))
+    store_date_raw = _norm_date(getattr(issue, 'store_date', None))
+
     # Extract person credits (creators)
     writers = []
     pencillers = []
@@ -668,7 +738,8 @@ def _issue_to_dict(issue: Any) -> Dict[str, Any]:
         "volume_name": volume_name,  # BasicIssue.volume.name -> Series
         "volume_id": volume_id,
         "publisher": publisher,
-        "cover_date": date_str,  # BasicIssue.cover_date or store_date
+        "cover_date": cover_date_raw,  # raw cover_date (YYYY-MM-DD) or None
+        "store_date": store_date_raw,  # raw store_date (YYYY-MM-DD) or None
         "year": year,  # Parsed from cover_date or store_date -> Year
         "month": month,  # Parsed from cover_date or store_date -> Month
         "day": day,  # Parsed from cover_date or store_date -> Day
@@ -720,8 +791,8 @@ def map_to_comicinfo(issue_data: Dict[str, Any], volume_data: Optional[Dict[str,
         notes = f'Metadata from ComicVine CVDB — retrieved {current_date}.'
 
     # Append cover_date or store_date if available
-    if issue_data.get('cover_date'):
-        notes += f' Cover/Store Date: {issue_data.get("cover_date")}.'
+    if issue_data.get('cover_date') or issue_data.get('store_date'):
+        notes += f' Cover/Store Date: {issue_data.get("cover_date") or issue_data.get("store_date")}.'
 
     comicinfo = {
         'Series': series_name,
@@ -734,6 +805,10 @@ def map_to_comicinfo(issue_data: Dict[str, Any], volume_data: Optional[Dict[str,
         'Year': issue_data.get('year'),
         'Month': issue_data.get('month'),
         'Day': issue_data.get('day'),
+        # Raw provider dates (NOT written to ComicInfo.xml — generate_comicinfo_xml
+        # uses an explicit tag allowlist; consumed only by rename templating)
+        'CoverDate': issue_data.get('cover_date'),
+        'StoreDate': issue_data.get('store_date'),
         'Writer': ', '.join(issue_data.get('writers', [])) if issue_data.get('writers') else None,
         'Penciller': ', '.join(issue_data.get('pencillers', [])) if issue_data.get('pencillers') else None,
         'Inker': ', '.join(issue_data.get('inkers', [])) if issue_data.get('inkers') else None,
@@ -1053,6 +1128,10 @@ def write_cvinfo_fields(cvinfo_path: str, publisher_name: Optional[str], start_y
     Returns:
         True if successful, False otherwise
     """
+    from core.config import is_oneshot_folder
+    if is_oneshot_folder(os.path.dirname(cvinfo_path)):
+        app_logger.debug(f"Skipping cvinfo write in one-shot folder: {cvinfo_path}")
+        return False
     try:
         try:
             with open(cvinfo_path, 'r', encoding='utf-8') as f:
@@ -1205,6 +1284,10 @@ def write_cvinfo_manga_fields(cvinfo_path: str, fields: Dict[str, str]) -> bool:
     Returns:
         True if successful, False otherwise
     """
+    from core.config import is_oneshot_folder
+    if is_oneshot_folder(os.path.dirname(cvinfo_path)):
+        app_logger.debug(f"Skipping cvinfo write in one-shot folder: {cvinfo_path}")
+        return False
     try:
         raw_present = set()
         try:
@@ -1268,9 +1351,11 @@ def get_volume_details(api_key: str, volume_id: int) -> Dict[str, Any]:
 
     try:
         app_logger.info(f"Fetching volume details for volume ID: {volume_id}")
-        with _default_request_timeout():
-            cv = Comicvine(api_key=api_key, cache=None)
-            volume = cv.get_volume(volume_id)
+        cv = _make_cv_client(api_key)
+        volume = _cv_call_with_retry(
+            lambda: cv.get_volume(volume_id),
+            f"volume details {volume_id}",
+        )
 
         if volume:
             result['start_year'] = getattr(volume, 'start_year', None)
@@ -1538,10 +1623,16 @@ def auto_fetch_metadata_for_folder(folder_path: str, api_key: str, target_file: 
             # Extract issue number from filename
             issue_number = extract_issue_number(os.path.basename(file_path))
             if not issue_number:
-                app_logger.warning(f"Could not extract issue number from {file_path}")
-                result['errors'] += 1
-                result['details'].append({'file': file_path, 'status': 'error', 'reason': 'no issue number'})
-                continue
+                # One-shot operations (a single target file) fall back to issue
+                # #1; multi-file folders error rather than map every file to #1.
+                if len(comic_files) == 1:
+                    issue_number = "1"
+                    app_logger.info(f"No issue number in {os.path.basename(file_path)}; defaulting to #1 (one-shot)")
+                else:
+                    app_logger.warning(f"Could not extract issue number from {file_path}")
+                    result['errors'] += 1
+                    result['details'].append({'file': file_path, 'status': 'error', 'reason': 'no issue number'})
+                    continue
 
             # Fetch metadata from ComicVine (pass start_year + publisher_name
             # so Volume and Publisher fields are populated from cvinfo cache)

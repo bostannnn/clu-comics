@@ -24,7 +24,12 @@ STALE_TIMEOUT = 300  # seconds with no update before a running op is marked stal
 
 
 def register_operation(op_type, label, total=0, op_id=None):
-    """Register a new long-running operation. Returns the operation ID."""
+    """Register a new long-running operation. Returns the operation ID.
+
+    Pass ``op_id`` to use a caller-chosen identifier (e.g. a client-generated
+    token for synchronous endpoints that want polled progress). Defaults to a
+    fresh uuid when omitted.
+    """
     requested_op_id = str(op_id).strip() if op_id else ""
     op_id = requested_op_id or uuid.uuid4().hex
     now = time.time()

@@ -147,6 +147,59 @@ class TestSearchSeriesByName:
         assert mock_api.series_list.call_count == 1
 
 
+class TestSearchSeriesList:
+
+    def _make(self, **kwargs):
+        s = make_mock_series(**kwargs)
+        # MagicMock auto-creates truthy attrs; pin the optional ones so the
+        # mapped dict has clean values.
+        s.image = None
+        s.desc = ""
+        s.issue_count = 12
+        return s
+
+    def test_returns_all_candidates(self):
+        from models.metron import search_series_list
+
+        mock_api = MagicMock()
+        mock_api.series_list.return_value = [
+            self._make(id=1, name="Batman", year_began=1940),
+            self._make(id=2, name="Batman Beyond", year_began=1999),
+        ]
+
+        results = search_series_list(mock_api, "Batman")
+        assert len(results) == 2
+        assert {r["id"] for r in results} == {1, 2}
+        first = next(r for r in results if r["id"] == 1)
+        assert first["name"] == "Batman"
+        assert first["start_year"] == 1940
+        assert first["publisher_name"] == "DC Comics"
+        assert first["count_of_issues"] == 12
+
+    def test_year_ranking(self):
+        from models.metron import search_series_list
+
+        mock_api = MagicMock()
+        mock_api.series_list.return_value = [
+            self._make(id=1, name="Batman", year_began=1940),
+            self._make(id=2, name="Batman", year_began=2016),
+        ]
+
+        results = search_series_list(mock_api, "Batman", year=2016)
+        assert results[0]["id"] == 2  # closest year first
+
+    def test_no_results(self):
+        from models.metron import search_series_list
+
+        mock_api = MagicMock()
+        mock_api.series_list.return_value = []
+        assert search_series_list(mock_api, "Nonexistent") == []
+
+    def test_no_api(self):
+        from models.metron import search_series_list
+        assert search_series_list(None, "Batman") == []
+
+
 class TestGetSeriesDetails:
 
     def test_returns_details(self):
@@ -261,6 +314,22 @@ class TestMapToComicinfo:
         assert "Number" in result
         assert result["Number"] == "1"
         assert "Notes" in result
+
+    def test_preserves_cover_and_store_dates(self):
+        from models.metron import map_to_comicinfo
+
+        issue_data = {"id": 1, "number": "1", "cover_date": "2020-06-15",
+                      "store_date": "2020-06-03"}
+        result = map_to_comicinfo(issue_data)
+        assert result["CoverDate"] == "2020-06-15"
+        assert result["StoreDate"] == "2020-06-03"
+
+    def test_omits_absent_store_date(self):
+        from models.metron import map_to_comicinfo
+
+        result = map_to_comicinfo({"id": 1, "number": "1", "cover_date": "2020-06-15"})
+        assert result["CoverDate"] == "2020-06-15"
+        assert "StoreDate" not in result
 
 
 class TestExtractCreditsByRole:

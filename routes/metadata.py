@@ -101,6 +101,18 @@ def _cancelable_sleep(seconds, cancel_requested, interval=0.1):
     return cancel_requested()
 
 
+# Hard wall-clock budget (seconds) for a single ComicVine attempt in the
+# search-metadata cascade. Slightly above the Simyan per-request httpx timeout
+# (COMICVINE_TIMEOUT, default 20s) so a slow-but-completing response isn't
+# killed, while a true hang (rate-limiter / SQLite-lock blocking that happens
+# before the HTTP call) is bounded so the cascade can fail over to the next
+# provider. Overridable via COMICVINE_TIMEOUT (+5s headroom).
+try:
+    CV_ATTEMPT_TIMEOUT = int(os.environ.get("COMICVINE_TIMEOUT", "20")) + 5
+except (ValueError, TypeError):
+    CV_ATTEMPT_TIMEOUT = 25
+
+
 # =============================================================================
 # Helper Functions (used by multiple routes)
 # =============================================================================
@@ -669,6 +681,45 @@ def _write_selected_metron_cvinfo_fields(cvinfo_path, series_id, series_details)
         publisher_name=series_details.get('publisher_name'),
         start_year=series_details.get('year_began'),
     )
+
+
+def extract_year_from_name(name):
+    """Extract year from a filename or folder name in (YYYY) or vYYYY format.
+
+    Module-level so the bulk-metadata orchestrator can reuse the same parsing.
+    """
+    if not name:
+        return None
+    match = re.search(r'\((\d{4})\)', name)
+    if match:
+        return int(match.group(1))
+    match = re.search(r'v(\d{4})', name)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def extract_series_name_from_folder(folder_name):
+    """Strip year/volume/'- complete' suffixes from a folder name to get the series."""
+    if not folder_name:
+        return ""
+    s = folder_name
+    s = re.sub(r'\s*\(\d{4}\).*$', '', s)
+    s = re.sub(r'\s*v\d+.*$', '', s)
+    s = re.sub(r'\s*-\s*complete.*$', '', s, flags=re.IGNORECASE)
+    return s.strip()
+
+
+def extract_series_name_from_filename(filename):
+    """Best-effort series name extraction from a CBZ filename."""
+    if not filename:
+        return ""
+    s = os.path.splitext(filename)[0]
+    s = re.sub(r'\s*\(\d{4}\)', '', s)
+    s = re.sub(r'\s*#?\d{1,4}\s*$', '', s)
+    s = re.sub(r'\s*-\s*\d{1,4}\s*$', '', s)
+    s = re.sub(r'\s+Issue\s+\d+', '', s, flags=re.IGNORECASE)
+    return s.strip()
 
 
 def generate_comicinfo_xml(issue_data, series_data=None):
@@ -1399,6 +1450,14 @@ def save_provider_creds(provider_type):
                 load_flask_config(current_app)
             except Exception:
                 pass
+            # GCD credentials may now point at a different MySQL dump with a
+            # different table set — drop the cached table list.
+            if provider_type == 'gcd':
+                try:
+                    from models.gcd import invalidate_gcd_table_cache
+                    invalidate_gcd_table_cache()
+                except Exception:
+                    pass
             return jsonify({"success": True, "message": f"Credentials saved for {provider_type}"})
         else:
             return jsonify({"error": "Failed to save credentials"}), 500
@@ -1415,6 +1474,12 @@ def delete_provider_creds(provider_type):
 
         success = delete_provider_credentials(provider_type)
         if success:
+            if provider_type == 'gcd':
+                try:
+                    from models.gcd import invalidate_gcd_table_cache
+                    invalidate_gcd_table_cache()
+                except Exception:
+                    pass
             return jsonify({"success": True, "message": f"Credentials deleted for {provider_type}"})
         else:
             return jsonify({"error": "Failed to delete credentials"}), 500
@@ -1736,6 +1801,9 @@ def batch_metadata():
         force_provider = (data.get('force_provider') or '').strip().lower()
         overwrite_existing_metadata = bool(data.get('overwrite_existing_metadata'))
         requested_op_id = (data.get('op_id') or '').strip()
+        # Providers the user skipped via "Skip to next provider" on the batch
+        # ComicVine modal — excluded from both cvinfo creation and the per-file loop.
+        skip_providers = data.get('skip_providers') or []
 
         if not directory:
             return jsonify({"error": "Missing directory parameter"}), 400
@@ -1786,6 +1854,36 @@ def batch_metadata():
             mangaupdates_available = False
 
         app_logger.info(f"Batch metadata: CV={comicvine_available}, Metron={metron_available}, GCD={gcd_available}, AniList={anilist_available}, MangaDex={mangadex_available}, MU={mangaupdates_available}")
+
+        # Resolved provider order (used by the frontend skip button to know what
+        # comes after the current provider). Library order when available,
+        # otherwise a sensible default of the available providers.
+        if library_id:
+            provider_order = list(enabled_providers)
+        else:
+            provider_order = [p for p, avail in (
+                ('metron', metron_available),
+                ('comicvine', comicvine_available),
+                ('gcd', gcd_available),
+                ('gcd_api', True),  # gcd_api has no availability flag; gated per-file
+            ) if avail]
+
+        # Honor user-skipped providers: drop them from availability so neither
+        # cvinfo creation nor the per-file loop consults them.
+        if skip_providers:
+            app_logger.info(f"Batch metadata: skipping providers {skip_providers}")
+            if 'metron' in skip_providers:
+                metron_available = False
+            if 'comicvine' in skip_providers:
+                comicvine_available = False
+            if 'gcd' in skip_providers:
+                gcd_available = False
+            if 'anilist' in skip_providers:
+                anilist_available = False
+            if 'mangadex' in skip_providers:
+                mangadex_available = False
+            if 'mangaupdates' in skip_providers:
+                mangaupdates_available = False
 
         # Initialize Metron API early (needed for cvinfo creation)
         metron_api = metron.get_flask_api() if metron_available else None
@@ -1850,6 +1948,12 @@ def batch_metadata():
         cvinfo_start_year = None
         cvinfo_publisher_name = None
         cv_id_missing_warning = False  # Track if CV ID is missing from Metron
+
+        # One-shot folders (oneshots/specials/...) hold unrelated single issues,
+        # so a folder-level cvinfo must never be read or created here — it would
+        # match every file to the same series. Each file is resolved from its own
+        # filename in the per-file loop below.
+        is_oneshot = _is_oneshot_folder_safe(directory)
 
         # Determine if manga providers have higher priority than comic providers
         manga_providers_set = {'mangadex', 'mangaupdates', 'anilist'}
@@ -1929,8 +2033,9 @@ def batch_metadata():
                     return timeout_response(exc)
                 if cancel_requested():
                     return cancelled_response()
-                _write_selected_comicvine_cvinfo_fields(cvinfo_path, cv_volume_id, volume_details)
-                cvinfo_created = True
+                if not is_oneshot:
+                    _write_selected_comicvine_cvinfo_fields(cvinfo_path, cv_volume_id, volume_details)
+                    cvinfo_created = True
                 if volume_details:
                     cvinfo_start_year = volume_details.get('start_year')
                     cvinfo_publisher_name = volume_details.get('publisher_name')
@@ -1997,8 +2102,9 @@ def batch_metadata():
                     return timeout_response(exc)
                 if cancel_requested():
                     return cancelled_response()
-                _write_selected_metron_cvinfo_fields(cvinfo_path, series_id, series_details)
-                cvinfo_created = True
+                if not is_oneshot:
+                    _write_selected_metron_cvinfo_fields(cvinfo_path, series_id, series_details)
+                    cvinfo_created = True
                 metron_id_added = True
                 if series_details:
                     cv_volume_id = series_details.get('cv_id')
@@ -2061,16 +2167,19 @@ def batch_metadata():
                         selected_title = selected_series.title or selected_title
 
                 app_state.update_operation(op_id, detail="Writing selected MangaUpdates series...")
-                _write_selected_manga_cvinfo(
-                    cvinfo_path,
-                    'mangaupdates',
-                    str(selected_series_id),
-                    selected_title,
-                    selected_alternate_title,
-                )
+                if not is_oneshot:
+                    _write_selected_manga_cvinfo(
+                        cvinfo_path,
+                        'mangaupdates',
+                        str(selected_series_id),
+                        selected_title,
+                        selected_alternate_title,
+                    )
                 if cancel_requested():
                     return cancelled_response()
-                cvinfo_created = True
+                cvinfo_created = not is_oneshot
+        elif is_oneshot:
+            app_logger.info("Batch metadata: one-shot folder — skipping folder-level cvinfo (per-file matching)")
         elif not os.path.exists(cvinfo_path):
             app_logger.info(f"No cvinfo found, searching for series: '{series_name}' (year: {extracted_year})")
 
@@ -2140,6 +2249,8 @@ def batch_metadata():
                                 return jsonify({
                                     "requires_selection": True,
                                     "op_id": op_id,
+                                    "provider": "comicvine",
+                                    "provider_order": provider_order,
                                     "directory": directory,
                                     "parsed_filename": {
                                         "series_name": series_name,
@@ -2147,7 +2258,6 @@ def batch_metadata():
                                         "year": extracted_year
                                     },
                                     "possible_matches": volumes,
-                                    "provider": "comicvine",
                                 })
                             cv_volume_id = volumes[0]['id']
 
@@ -2210,7 +2320,7 @@ def batch_metadata():
                     app_logger.warning(f"Series in Metron but no ComicVine ID available for series_id={series_id}")
 
         # Step 3: Add Metron series ID and details if not present in existing cvinfo
-        if metron_api and os.path.exists(cvinfo_path) and not series_id:
+        if metron_api and not is_oneshot and os.path.exists(cvinfo_path) and not series_id:
             cv_id = metron.parse_cvinfo_for_comicvine_id(cvinfo_path)
             if cv_id:
                 if cancel_requested():
@@ -2256,7 +2366,7 @@ def batch_metadata():
 
         # Step 4: Read start_year + publisher_name from cvinfo for ComicVine calls
         # (Volume and Publisher fields in ComicInfo.xml)
-        if (not cvinfo_start_year or not cvinfo_publisher_name) and os.path.exists(cvinfo_path):
+        if (not cvinfo_start_year or not cvinfo_publisher_name) and not is_oneshot and os.path.exists(cvinfo_path):
             cvinfo_fields = comicvine.read_cvinfo_fields(cvinfo_path)
             if not cvinfo_start_year:
                 cvinfo_start_year = cvinfo_fields.get('start_year')
@@ -2288,7 +2398,10 @@ def batch_metadata():
 
         # Store year for GCD lookups
         gcd_year = extracted_year or cvinfo_start_year
-        cached_manga_fields = comicvine.read_cvinfo_manga_fields(cvinfo_path)
+        if is_oneshot or not os.path.exists(cvinfo_path):
+            cached_manga_fields = {}
+        else:
+            cached_manga_fields = comicvine.read_cvinfo_manga_fields(cvinfo_path)
         has_manga_series_cache = any(cached_manga_fields.get(key) for key in comicvine.MANGA_CVINFO_KEYS)
 
         def generate():
@@ -2378,10 +2491,27 @@ def batch_metadata():
                     issue_number = lookup['issue_number']
                     issue_year = lookup['year']
                     if not issue_number:
-                        app_logger.warning(f"Could not extract issue number from {filename}")
-                        result['errors'] += 1
-                        result['details'].append({'file': filename, 'status': 'error', 'reason': 'no issue number'})
-                        continue
+                        filename_without_ext = os.path.splitext(filename)[0]
+                        has_volume_only_token = bool(
+                            re.search(
+                                r"\bv\d+\b(?!\s+\d)",
+                                filename_without_ext,
+                                re.IGNORECASE,
+                            )
+                        ) and not _has_explicit_issue_marker(filename)
+
+                        # A single unnumbered comic can be a one-shot and falls
+                        # back to issue #1. An explicit Western-style volume
+                        # token such as "v02" is not an issue number.
+                        if len(comic_files) == 1 and not has_volume_only_token:
+                            issue_number = "1"
+                            issue_year = extracted_year
+                            app_logger.info(f"No issue number in {filename}; defaulting to #1 (one-shot)")
+                        else:
+                            app_logger.warning(f"Could not extract issue number from {filename}")
+                            result['errors'] += 1
+                            result['details'].append({'file': filename, 'status': 'error', 'reason': 'no issue number'})
+                            continue
 
                     app_logger.info(f"Processing {filename} (issue/vol #{issue_number})")
 
@@ -2800,6 +2930,9 @@ def batch_metadata():
                             p for p in provider_order if p != force_provider
                         ]
 
+                    if skip_providers:
+                        provider_order = [p for p in provider_order if p not in skip_providers]
+
                     provider_errors = []
                     for provider_name in provider_order:
                         if cancel_requested():
@@ -2843,11 +2976,16 @@ def batch_metadata():
                         xml_bytes = comicvine.generate_comicinfo_xml(metadata)
                         add_comicinfo_to_cbz(file_path, xml_bytes)
 
-                        # Auto-rename FIRST (before index update)
+                        # Auto-rename FIRST (before index update). Skipped in
+                        # one-shot folders so a guessed match doesn't silently
+                        # rename the file — the user reviews/renames it.
                         from cbz_ops.rename import rename_comic_from_metadata
                         old_filename = filename
                         old_path = file_path
-                        new_path, was_renamed = rename_comic_from_metadata(file_path, metadata)
+                        if is_oneshot:
+                            new_path, was_renamed = file_path, False
+                        else:
+                            new_path, was_renamed = rename_comic_from_metadata(file_path, metadata)
                         if was_renamed:
                             file_path = new_path
                             filename = os.path.basename(new_path)
@@ -3094,6 +3232,12 @@ def search_gcd_metadata():
             cursor = connection.cursor(dictionary=True)
             # Set query timeout to 30 seconds
             cursor.execute("SET SESSION MAX_EXECUTION_TIME=30000")  # 30000 milliseconds = 30 seconds
+
+            # Detect which GCD tables this dump actually contains so we can
+            # skip credit/character/story-type joins when their tables are absent
+            # (the public comics.org dump periodically excludes them).
+            from models.gcd import get_available_gcd_tables
+            gcd_tables = get_available_gcd_tables(conn=connection)
 
             # Helper: build safe IN (...) placeholder list + params
             def build_in_clause(codes):
@@ -3421,8 +3565,10 @@ def search_gcd_metadata():
                 app_logger.debug(f"DEBUG: Basic issue info retrieved for issue #{issue_number}")
                 issue_id = issue_basic['id']
 
-                # Query 2: Get all credits in a single query (much faster than multiple subqueries)
-                credits_query = """
+                # Query 2: Get all credits in a single query (much faster than multiple subqueries).
+                # Compose the UNION from whichever halves the dump actually has — some
+                # comics.org dumps exclude gcd_story_credit, gcd_issue_credit, or gcd_creator.
+                STORY_CREDIT_HALF = """
                     SELECT
                         ct.name AS credit_type,
                         TRIM(COALESCE(NULLIF(sc.credited_as,''), NULLIF(sc.credit_name,''), c.gcd_official_name)) AS creator_name,
@@ -3434,7 +3580,8 @@ def search_gcd_metadata():
                     WHERE s.issue_id = %s
                         AND (sc.deleted = 0 OR sc.deleted IS NULL)
                         AND NULLIF(TRIM(COALESCE(NULLIF(sc.credited_as,''), NULLIF(sc.credit_name,''), c.gcd_official_name)), '') IS NOT NULL
-                    UNION
+                """
+                ISSUE_CREDIT_HALF = """
                     SELECT
                         ct.name AS credit_type,
                         TRIM(COALESCE(NULLIF(ic.credited_as,''), NULLIF(ic.credit_name,''), c.gcd_official_name)) AS creator_name,
@@ -3447,47 +3594,81 @@ def search_gcd_metadata():
                         AND NULLIF(TRIM(COALESCE(NULLIF(ic.credited_as,''), NULLIF(ic.credit_name,''), c.gcd_official_name)), '') IS NOT NULL
                 """
 
-                cursor.execute(credits_query, (issue_id, issue_id))
-                credits = cursor.fetchall()
+                story_credit_ok = {'gcd_story', 'gcd_story_credit', 'gcd_credit_type', 'gcd_creator'}.issubset(gcd_tables)
+                issue_credit_ok = {'gcd_issue_credit', 'gcd_credit_type', 'gcd_creator'}.issubset(gcd_tables)
 
-                # Query 3: Story details (title, summary, genre, characters, page count)
-                story_query = """
-                    SELECT
-                        NULLIF(TRIM(s.title), '') AS title,
-                        NULLIF(TRIM(s.synopsis), '') AS synopsis,
-                        NULLIF(TRIM(s.notes), '') AS notes,
-                        NULLIF(TRIM(s.genre), '') AS genre,
-                        NULLIF(TRIM(s.characters), '') AS characters,
-                        s.page_count,
-                        s.sequence_number,
-                        st.name AS story_type
-                    FROM gcd_story s
-                    LEFT JOIN gcd_story_type st ON st.id = s.type_id
-                    WHERE s.issue_id = %s
-                    ORDER BY
-                        CASE WHEN s.sequence_number = 0 THEN 1 ELSE 0 END,
-                        CASE
-                            WHEN LOWER(st.name) IN ('comic story','story') THEN 0
-                            WHEN LOWER(st.name) IN ('text story','text') THEN 1
-                            ELSE 3
-                        END,
-                        s.sequence_number
-                """
+                if story_credit_ok and issue_credit_ok:
+                    cursor.execute(STORY_CREDIT_HALF + "\nUNION\n" + ISSUE_CREDIT_HALF, (issue_id, issue_id))
+                    credits = cursor.fetchall()
+                elif story_credit_ok:
+                    cursor.execute(STORY_CREDIT_HALF, (issue_id,))
+                    credits = cursor.fetchall()
+                elif issue_credit_ok:
+                    cursor.execute(ISSUE_CREDIT_HALF, (issue_id,))
+                    credits = cursor.fetchall()
+                else:
+                    credits = []
 
-                cursor.execute(story_query, (issue_id,))
-                stories = cursor.fetchall()
+                # Query 3: Story details (title, summary, genre, characters, page count).
+                # Drop the gcd_story_type join when that table is absent.
+                if 'gcd_story' not in gcd_tables:
+                    stories = []
+                else:
+                    if 'gcd_story_type' in gcd_tables:
+                        story_query = """
+                            SELECT
+                                NULLIF(TRIM(s.title), '') AS title,
+                                NULLIF(TRIM(s.synopsis), '') AS synopsis,
+                                NULLIF(TRIM(s.notes), '') AS notes,
+                                NULLIF(TRIM(s.genre), '') AS genre,
+                                NULLIF(TRIM(s.characters), '') AS characters,
+                                s.page_count,
+                                s.sequence_number,
+                                st.name AS story_type
+                            FROM gcd_story s
+                            LEFT JOIN gcd_story_type st ON st.id = s.type_id
+                            WHERE s.issue_id = %s
+                            ORDER BY
+                                CASE WHEN s.sequence_number = 0 THEN 1 ELSE 0 END,
+                                CASE
+                                    WHEN LOWER(st.name) IN ('comic story','story') THEN 0
+                                    WHEN LOWER(st.name) IN ('text story','text') THEN 1
+                                    ELSE 3
+                                END,
+                                s.sequence_number
+                        """
+                    else:
+                        story_query = """
+                            SELECT
+                                NULLIF(TRIM(s.title), '') AS title,
+                                NULLIF(TRIM(s.synopsis), '') AS synopsis,
+                                NULLIF(TRIM(s.notes), '') AS notes,
+                                NULLIF(TRIM(s.genre), '') AS genre,
+                                NULLIF(TRIM(s.characters), '') AS characters,
+                                s.page_count,
+                                s.sequence_number,
+                                NULL AS story_type
+                            FROM gcd_story s
+                            WHERE s.issue_id = %s
+                            ORDER BY CASE WHEN s.sequence_number = 0 THEN 1 ELSE 0 END, s.sequence_number
+                        """
+                    cursor.execute(story_query, (issue_id,))
+                    stories = cursor.fetchall()
 
-                # Query 4: Character names from character table
-                characters_query = """
-                    SELECT DISTINCT c.name
-                    FROM gcd_story s
-                    LEFT JOIN gcd_story_character sc ON sc.story_id = s.id
-                    LEFT JOIN gcd_character c ON c.id = sc.character_id
-                    WHERE s.issue_id = %s AND c.name IS NOT NULL
-                """
-
-                cursor.execute(characters_query, (issue_id,))
-                character_results = cursor.fetchall()
+                # Query 4: Character names from character table — skip entirely
+                # if either join table is missing from the dump.
+                if {'gcd_story', 'gcd_story_character', 'gcd_character'}.issubset(gcd_tables):
+                    characters_query = """
+                        SELECT DISTINCT c.name
+                        FROM gcd_story s
+                        LEFT JOIN gcd_story_character sc ON sc.story_id = s.id
+                        LEFT JOIN gcd_character c ON c.id = sc.character_id
+                        WHERE s.issue_id = %s AND c.name IS NOT NULL
+                    """
+                    cursor.execute(characters_query, (issue_id,))
+                    character_results = cursor.fetchall()
+                else:
+                    character_results = []
 
                 # Process credits in Python (faster than 6 separate subqueries)
                 credits_dict = {
@@ -3793,6 +3974,11 @@ def search_gcd_metadata_with_selection():
             )
             cursor = connection.cursor(dictionary=True)
 
+            # Detect available GCD tables so we can compose the credits / genre /
+            # characters subqueries against whatever tables this dump contains.
+            from models.gcd import get_available_gcd_tables
+            gcd_tables = get_available_gcd_tables(conn=connection)
+
             # Get series information
             series_query = """
                 SELECT s.id, s.name, s.year_began, s.year_ended, s.publisher_id,
@@ -3810,11 +3996,121 @@ def search_gcd_metadata_with_selection():
                     "error": f"Series with ID {series_id} not found"
                 }), 404
 
-            # Search for the specific issue using comprehensive query
-            issue_query = """
-                SELECT
-                  i.id,
-                  COALESCE(
+            # Compose credit-role subqueries (Writer/Penciller/Inker/Colorist/
+            # Letterer/CoverArtist) from whichever halves the dump supports.
+            story_credit_ok = {'gcd_story', 'gcd_story_credit', 'gcd_credit_type', 'gcd_creator'}.issubset(gcd_tables)
+            issue_credit_ok = {'gcd_issue_credit', 'gcd_credit_type', 'gcd_creator'}.issubset(gcd_tables)
+
+            def _role_subq(story_where_extra: str, type_clause: str, issue_type_clause: str = None) -> str:
+                """
+                Build the (SELECT GROUP_CONCAT ... FROM (STORY_HALF UNION ISSUE_HALF) ...)
+                expression for one ComicInfo role. Returns the literal "NULL" when
+                neither credit table is available.
+
+                story_where_extra : extra WHERE fragment for the story half (e.g. sequence filter)
+                type_clause       : credit-type LIKE clause for the story half
+                issue_type_clause : credit-type LIKE clause for the issue half (defaults to type_clause)
+                """
+                if issue_type_clause is None:
+                    issue_type_clause = type_clause
+                halves = []
+                if story_credit_ok:
+                    halves.append(f"""
+                      SELECT TRIM(COALESCE(NULLIF(sc.credited_as,''), NULLIF(sc.credit_name,''), c.gcd_official_name)) AS name
+                      FROM gcd_story s
+                      JOIN gcd_story_credit sc ON sc.story_id = s.id
+                      JOIN gcd_credit_type ct   ON ct.id = sc.credit_type_id
+                      LEFT JOIN gcd_creator c   ON c.id = sc.creator_id
+                      WHERE s.issue_id = i.id
+                        AND {story_where_extra}
+                        AND {type_clause}
+                        AND (sc.deleted = 0 OR sc.deleted IS NULL)
+                    """)
+                if issue_credit_ok:
+                    halves.append(f"""
+                      SELECT TRIM(COALESCE(NULLIF(ic.credited_as,''), NULLIF(ic.credit_name,''), c.gcd_official_name)) AS name
+                      FROM gcd_issue_credit ic
+                      JOIN gcd_credit_type ct ON ct.id = ic.credit_type_id
+                      LEFT JOIN gcd_creator c ON c.id = ic.creator_id
+                      WHERE ic.issue_id = i.id
+                        AND {issue_type_clause}
+                        AND (ic.deleted = 0 OR ic.deleted IS NULL)
+                    """)
+                if not halves:
+                    return "NULL"
+                inner = "\nUNION\n".join(halves)
+                return f"""(
+                    SELECT GROUP_CONCAT(DISTINCT name ORDER BY name SEPARATOR ', ')
+                    FROM ({inner}) x
+                    WHERE NULLIF(name,'') IS NOT NULL
+                )"""
+
+            non_zero_seq = "(s.sequence_number IS NULL OR s.sequence_number <> 0)"
+
+            writer_expr      = _role_subq(non_zero_seq, "(ct.name LIKE 'script%' OR ct.name LIKE 'writer%' OR ct.name LIKE 'plot%')")
+            penciller_expr   = _role_subq(non_zero_seq, "(ct.name LIKE 'pencil%' OR ct.name LIKE 'penc%' OR ct.name LIKE 'illustrat%')")
+            inker_expr       = _role_subq(non_zero_seq, "(ct.name LIKE 'ink%')")
+            colorist_expr    = _role_subq(non_zero_seq, "(ct.name LIKE 'color%' OR ct.name LIKE 'colour%')")
+            letterer_expr    = _role_subq(non_zero_seq, "(ct.name LIKE 'letter%')")
+            cover_expr       = _role_subq(
+                "(s.sequence_number = 0 OR ct.name LIKE 'cover%')",
+                "(ct.name LIKE 'pencil%' OR ct.name LIKE 'penc%' OR ct.name LIKE 'ink%' OR ct.name LIKE 'art%' OR ct.name LIKE 'cover%' OR ct.name LIKE 'illustrat%')",
+                issue_type_clause="(ct.name LIKE 'cover%')",
+            )
+
+            # Genre uses only gcd_story.genre text column.
+            if 'gcd_story' in gcd_tables:
+                genre_expr = """(
+                    SELECT TRIM(BOTH ', ' FROM
+                           REPLACE(
+                             GROUP_CONCAT(DISTINCT NULLIF(TRIM(s.genre), '') SEPARATOR ', '),
+                             ';', ','
+                           ))
+                    FROM gcd_story s
+                    WHERE s.issue_id = i.id
+                )"""
+            else:
+                genre_expr = "NULL"
+
+            # Characters: prefer normalized story_character/character join; fall
+            # back to the text column on gcd_story; emit NULL if neither path works.
+            story_char_ok = {'gcd_story', 'gcd_story_character', 'gcd_character'}.issubset(gcd_tables)
+            story_text_ok = 'gcd_story' in gcd_tables
+            if story_char_ok and story_text_ok:
+                characters_expr = """COALESCE(
+                    (
+                      SELECT NULLIF(GROUP_CONCAT(DISTINCT c.name SEPARATOR ', '), '')
+                      FROM gcd_story s
+                      LEFT JOIN gcd_story_character sc ON sc.story_id = s.id
+                      LEFT JOIN gcd_character c ON c.id = sc.character_id
+                      WHERE s.issue_id = i.id
+                    ),
+                    (
+                      SELECT TRIM(BOTH ', ' FROM
+                             REPLACE(
+                               GROUP_CONCAT(DISTINCT NULLIF(TRIM(s.characters), '') SEPARATOR ', '),
+                               ';', ','
+                             ))
+                      FROM gcd_story s
+                      WHERE s.issue_id = i.id
+                    )
+                )"""
+            elif story_text_ok:
+                characters_expr = """(
+                    SELECT TRIM(BOTH ', ' FROM
+                           REPLACE(
+                             GROUP_CONCAT(DISTINCT NULLIF(TRIM(s.characters), '') SEPARATOR ', '),
+                             ';', ','
+                           ))
+                    FROM gcd_story s
+                    WHERE s.issue_id = i.id
+                )"""
+            else:
+                characters_expr = "NULL"
+
+            # Title fallback and Summary subqueries depend on gcd_story.
+            if 'gcd_story' in gcd_tables:
+                title_fallback_expr = """COALESCE(
                     NULLIF(TRIM(i.title), ''),
                     (
                       SELECT NULLIF(TRIM(s.title), '')
@@ -3823,16 +4119,8 @@ def search_gcd_metadata_with_selection():
                       ORDER BY s.sequence_number
                       LIMIT 1
                     )
-                  )                                                   AS Title,
-                  sr.name                                             AS Series,
-                  i.number                                            AS Number,
-                  (
-                    SELECT COUNT(*)
-                    FROM gcd_issue i2
-                    WHERE i2.series_id = i.series_id AND i2.deleted = 0
-                  )                                                   AS `Count`,
-                  i.volume                                            AS Volume,
-                  (
+                )"""
+                summary_expr = """(
                     SELECT COALESCE(
                       NULLIF(TRIM(s.synopsis), ''),
                       NULLIF(TRIM(s.notes), ''),
@@ -3851,7 +4139,25 @@ def search_gcd_metadata_with_selection():
                       CASE WHEN NULLIF(TRIM(s.notes), '') IS NOT NULL THEN 0 ELSE 1 END,
                       s.sequence_number
                     LIMIT 1
-                  )                                                   AS Summary,
+                )"""
+            else:
+                title_fallback_expr = "NULLIF(TRIM(i.title), '')"
+                summary_expr = "NULL"
+
+            # Search for the specific issue using comprehensive query
+            issue_query = f"""
+                SELECT
+                  i.id,
+                  {title_fallback_expr}                                AS Title,
+                  sr.name                                             AS Series,
+                  i.number                                            AS Number,
+                  (
+                    SELECT COUNT(*)
+                    FROM gcd_issue i2
+                    WHERE i2.series_id = i.series_id AND i2.deleted = 0
+                  )                                                   AS `Count`,
+                  i.volume                                            AS Volume,
+                  {summary_expr}                                       AS Summary,
                   CASE
                     WHEN COALESCE(i.key_date, i.on_sale_date) IS NOT NULL
                          AND LENGTH(COALESCE(i.key_date, i.on_sale_date)) >= 4
@@ -3862,172 +4168,15 @@ def search_gcd_metadata_with_selection():
                          AND LENGTH(COALESCE(i.key_date, i.on_sale_date)) >= 7
                       THEN CAST(SUBSTRING(COALESCE(i.key_date, i.on_sale_date), 6, 2) AS UNSIGNED)
                   END AS `Month`,
-                  (
-                    SELECT GROUP_CONCAT(DISTINCT name ORDER BY name SEPARATOR ', ')
-                    FROM (
-                      SELECT TRIM(COALESCE(NULLIF(sc.credited_as,''), NULLIF(sc.credit_name,''), c.gcd_official_name)) AS name
-                      FROM gcd_story s
-                      JOIN gcd_story_credit sc ON sc.story_id = s.id
-                      JOIN gcd_credit_type ct   ON ct.id = sc.credit_type_id
-                      LEFT JOIN gcd_creator c   ON c.id = sc.creator_id
-                      WHERE s.issue_id = i.id
-                        AND (s.sequence_number IS NULL OR s.sequence_number <> 0)
-                        AND (ct.name LIKE 'script%' OR ct.name LIKE 'writer%' OR ct.name LIKE 'plot%')
-                        AND (sc.deleted = 0 OR sc.deleted IS NULL)
-                      UNION
-                      SELECT TRIM(COALESCE(NULLIF(ic.credited_as,''), NULLIF(ic.credit_name,''), c.gcd_official_name)) AS name
-                      FROM gcd_issue_credit ic
-                      JOIN gcd_credit_type ct ON ct.id = ic.credit_type_id
-                      LEFT JOIN gcd_creator c ON c.id = ic.creator_id
-                      WHERE ic.issue_id = i.id
-                        AND (ct.name LIKE 'script%' OR ct.name LIKE 'writer%' OR ct.name LIKE 'plot%')
-                        AND (ic.deleted = 0 OR ic.deleted IS NULL)
-                    ) x
-                    WHERE NULLIF(name,'') IS NOT NULL
-                  )                                                   AS Writer,
-                  (
-                    SELECT GROUP_CONCAT(DISTINCT name ORDER BY name SEPARATOR ', ')
-                    FROM (
-                      SELECT TRIM(COALESCE(NULLIF(sc.credited_as,''), NULLIF(sc.credit_name,''), c.gcd_official_name)) AS name
-                      FROM gcd_story s
-                      JOIN gcd_story_credit sc ON sc.story_id = s.id
-                      JOIN gcd_credit_type ct   ON ct.id = sc.credit_type_id
-                      LEFT JOIN gcd_creator c   ON c.id = sc.creator_id
-                      WHERE s.issue_id = i.id
-                        AND (s.sequence_number IS NULL OR s.sequence_number <> 0)
-                        AND (ct.name LIKE 'pencil%' OR ct.name LIKE 'penc%' OR ct.name LIKE 'illustrat%')
-                        AND (sc.deleted = 0 OR sc.deleted IS NULL)
-                      UNION
-                      SELECT TRIM(COALESCE(NULLIF(ic.credited_as,''), NULLIF(ic.credit_name,''), c.gcd_official_name)) AS name
-                      FROM gcd_issue_credit ic
-                      JOIN gcd_credit_type ct ON ct.id = ic.credit_type_id
-                      LEFT JOIN gcd_creator c ON c.id = ic.creator_id
-                      WHERE ic.issue_id = i.id
-                        AND (ct.name LIKE 'pencil%' OR ct.name LIKE 'penc%' OR ct.name LIKE 'illustrat%')
-                        AND (ic.deleted = 0 OR ic.deleted IS NULL)
-                    ) x
-                    WHERE NULLIF(name,'') IS NOT NULL
-                  )                                                   AS Penciller,
-                  (
-                    SELECT GROUP_CONCAT(DISTINCT name ORDER BY name SEPARATOR ', ')
-                    FROM (
-                      SELECT TRIM(COALESCE(NULLIF(sc.credited_as,''), NULLIF(sc.credit_name,''), c.gcd_official_name)) AS name
-                      FROM gcd_story s
-                      JOIN gcd_story_credit sc ON sc.story_id = s.id
-                      JOIN gcd_credit_type ct   ON ct.id = sc.credit_type_id
-                      LEFT JOIN gcd_creator c   ON c.id = sc.creator_id
-                      WHERE s.issue_id = i.id
-                        AND (s.sequence_number IS NULL OR s.sequence_number <> 0)
-                        AND (ct.name LIKE 'ink%')
-                        AND (sc.deleted = 0 OR sc.deleted IS NULL)
-                      UNION
-                      SELECT TRIM(COALESCE(NULLIF(ic.credited_as,''), NULLIF(ic.credit_name,''), c.gcd_official_name)) AS name
-                      FROM gcd_issue_credit ic
-                      JOIN gcd_credit_type ct ON ct.id = ic.credit_type_id
-                      LEFT JOIN gcd_creator c ON c.id = ic.creator_id
-                      WHERE ic.issue_id = i.id
-                        AND (ct.name LIKE 'ink%')
-                        AND (ic.deleted = 0 OR ic.deleted IS NULL)
-                    ) x
-                    WHERE NULLIF(name,'') IS NOT NULL
-                  )                                                   AS Inker,
-                  (
-                    SELECT GROUP_CONCAT(DISTINCT name ORDER BY name SEPARATOR ', ')
-                    FROM (
-                      SELECT TRIM(COALESCE(NULLIF(sc.credited_as,''), NULLIF(sc.credit_name,''), c.gcd_official_name)) AS name
-                      FROM gcd_story s
-                      JOIN gcd_story_credit sc ON sc.story_id = s.id
-                      JOIN gcd_credit_type ct   ON ct.id = sc.credit_type_id
-                      LEFT JOIN gcd_creator c   ON c.id = sc.creator_id
-                      WHERE s.issue_id = i.id
-                        AND (s.sequence_number IS NULL OR s.sequence_number <> 0)
-                        AND (ct.name LIKE 'color%' OR ct.name LIKE 'colour%')
-                        AND (sc.deleted = 0 OR sc.deleted IS NULL)
-                      UNION
-                      SELECT TRIM(COALESCE(NULLIF(ic.credited_as,''), NULLIF(ic.credit_name,''), c.gcd_official_name)) AS name
-                      FROM gcd_issue_credit ic
-                      JOIN gcd_credit_type ct ON ct.id = ic.credit_type_id
-                      LEFT JOIN gcd_creator c ON c.id = ic.creator_id
-                      WHERE ic.issue_id = i.id
-                        AND (ct.name LIKE 'color%' OR ct.name LIKE 'colour%')
-                        AND (ic.deleted = 0 OR ic.deleted IS NULL)
-                    ) x
-                    WHERE NULLIF(name,'') IS NOT NULL
-                  )                                                   AS Colorist,
-                  (
-                    SELECT GROUP_CONCAT(DISTINCT name ORDER BY name SEPARATOR ', ')
-                    FROM (
-                      SELECT TRIM(COALESCE(NULLIF(sc.credited_as,''), NULLIF(sc.credit_name,''), c.gcd_official_name)) AS name
-                      FROM gcd_story s
-                      JOIN gcd_story_credit sc ON sc.story_id = s.id
-                      JOIN gcd_credit_type ct   ON ct.id = sc.credit_type_id
-                      LEFT JOIN gcd_creator c   ON c.id = sc.creator_id
-                      WHERE s.issue_id = i.id
-                        AND (s.sequence_number IS NULL OR s.sequence_number <> 0)
-                        AND (ct.name LIKE 'letter%')
-                        AND (sc.deleted = 0 OR sc.deleted IS NULL)
-                      UNION
-                      SELECT TRIM(COALESCE(NULLIF(ic.credited_as,''), NULLIF(ic.credit_name,''), c.gcd_official_name)) AS name
-                      FROM gcd_issue_credit ic
-                      JOIN gcd_credit_type ct ON ct.id = ic.credit_type_id
-                      LEFT JOIN gcd_creator c ON c.id = ic.creator_id
-                      WHERE ic.issue_id = i.id
-                        AND (ct.name LIKE 'letter%')
-                        AND (ic.deleted = 0 OR ic.deleted IS NULL)
-                    ) x
-                    WHERE NULLIF(name,'') IS NOT NULL
-                  )                                                   AS Letterer,
-                  (
-                    SELECT GROUP_CONCAT(DISTINCT name ORDER BY name SEPARATOR ', ')
-                    FROM (
-                      SELECT TRIM(COALESCE(NULLIF(sc.credited_as,''), NULLIF(sc.credit_name,''), c.gcd_official_name)) AS name
-                      FROM gcd_story s
-                      JOIN gcd_story_credit sc ON sc.story_id = s.id
-                      JOIN gcd_credit_type ct   ON ct.id = sc.credit_type_id
-                      LEFT JOIN gcd_creator c   ON c.id = sc.creator_id
-                      WHERE s.issue_id = i.id
-                        AND (s.sequence_number = 0 OR ct.name LIKE 'cover%')
-                        AND (ct.name LIKE 'pencil%' OR ct.name LIKE 'penc%' OR ct.name LIKE 'ink%' OR ct.name LIKE 'art%' OR ct.name LIKE 'cover%' OR ct.name LIKE 'illustrat%')
-                        AND (sc.deleted = 0 OR sc.deleted IS NULL)
-                      UNION
-                      SELECT TRIM(COALESCE(NULLIF(ic.credited_as,''), NULLIF(ic.credit_name,''), c.gcd_official_name)) AS name
-                      FROM gcd_issue_credit ic
-                      JOIN gcd_credit_type ct ON ct.id = ic.credit_type_id
-                      LEFT JOIN gcd_creator c ON c.id = ic.creator_id
-                      WHERE ic.issue_id = i.id
-                        AND (ct.name LIKE 'cover%')
-                        AND (ic.deleted = 0 OR ic.deleted IS NULL)
-                    ) z
-                    WHERE NULLIF(name,'') IS NOT NULL
-                  )                                                   AS CoverArtist,
+                  {writer_expr}                                        AS Writer,
+                  {penciller_expr}                                     AS Penciller,
+                  {inker_expr}                                         AS Inker,
+                  {colorist_expr}                                      AS Colorist,
+                  {letterer_expr}                                      AS Letterer,
+                  {cover_expr}                                         AS CoverArtist,
                   COALESCE(ip.name, p.name)                           AS Publisher,
-                  (
-                    SELECT TRIM(BOTH ', ' FROM
-                           REPLACE(
-                             GROUP_CONCAT(DISTINCT NULLIF(TRIM(s.genre), '') SEPARATOR ', '),
-                             ';', ','
-                           ))
-                    FROM gcd_story s
-                    WHERE s.issue_id = i.id
-                  )                                                   AS Genre,
-                  COALESCE(
-                    (
-                      SELECT NULLIF(GROUP_CONCAT(DISTINCT c.name SEPARATOR ', '), '')
-                      FROM gcd_story s
-                      LEFT JOIN gcd_story_character sc ON sc.story_id = s.id
-                      LEFT JOIN gcd_character c ON c.id = sc.character_id
-                      WHERE s.issue_id = i.id
-                    ),
-                    (
-                      SELECT TRIM(BOTH ', ' FROM
-                             REPLACE(
-                               GROUP_CONCAT(DISTINCT NULLIF(TRIM(s.characters), '') SEPARATOR ', '),
-                               ';', ','
-                             ))
-                      FROM gcd_story s
-                      WHERE s.issue_id = i.id
-                    )
-                  )                                                   AS Characters,
+                  {genre_expr}                                         AS Genre,
+                  {characters_expr}                                    AS Characters,
                   i.rating                                            AS AgeRating,
                   l.code                                              AS LanguageISO,
                   i.page_count                                        AS PageCount
@@ -4131,11 +4280,15 @@ def search_gcd_metadata_with_selection():
 # =============================================================================
 
 def _try_metron_single(cvinfo_path, series_name, issue_number, year):
-    """Try Metron provider for a single file. Returns (metadata_dict, image_url) or (None, None)."""
+    """Try Metron provider for a single file.
+    Returns (metadata_dict, image_url, None) on success,
+    or (None, None, selection_data) when user selection is needed,
+    or (None, None, None) when nothing found.
+    """
     try:
         metron_api = metron.get_flask_api()
         if not metron_api:
-            return None, None
+            return None, None, None
 
         series_id = None
 
@@ -4143,18 +4296,36 @@ def _try_metron_single(cvinfo_path, series_name, issue_number, year):
         if cvinfo_path:
             series_id = metron.parse_cvinfo_for_metron_id(cvinfo_path)
 
-        # Fall back to searching by series name
+        # Fall back to searching by series name. When more than one candidate
+        # matches and none is a confident (exact) title match, pause for the
+        # user to pick rather than silently auto-tagging the wrong series.
         if not series_id and series_name:
-            series_result = _run_metadata_provider_call(
+            candidates = _run_metadata_provider_call(
                 "Metron",
                 f"searching series '{series_name}'",
-                lambda: metron.search_series_by_name(metron_api, series_name, year),
+                lambda: metron.search_series_list(metron_api, series_name, year),
             )
-            if series_result:
-                series_id = series_result.get("id")
+            if not candidates:
+                return None, None, None
+
+            search_lower = series_name.lower().strip()
+            confident = next(
+                (c for c in candidates if (c.get('name') or '').lower().strip() == search_lower),
+                None
+            )
+            if confident:
+                series_id = confident.get("id")
+            elif len(candidates) > 1:
+                return None, None, {
+                    "requires_selection": True,
+                    "provider": "metron",
+                    "possible_matches": candidates,
+                }
+            else:
+                series_id = candidates[0].get("id")
 
         if not series_id:
-            return None, None
+            return None, None, None
 
         issue_data = _run_metadata_provider_call(
             "Metron",
@@ -4162,7 +4333,7 @@ def _try_metron_single(cvinfo_path, series_name, issue_number, year):
             lambda: metron.get_issue_metadata(metron_api, series_id, issue_number),
         )
         if not issue_data:
-            return None, None
+            return None, None, None
 
         metadata = metron.map_to_comicinfo(issue_data)
 
@@ -4173,12 +4344,12 @@ def _try_metron_single(cvinfo_path, series_name, issue_number, year):
             if image:
                 img_url = str(image) if not isinstance(image, str) else image
 
-        return metadata, img_url
+        return metadata, img_url, None
     except MetadataProviderTimeoutError:
         raise
     except Exception as e:
         app_logger.warning(f"[search-metadata] Metron lookup failed: {e}")
-        return None, None
+        return None, None, None
 
 
 def _try_metron_single_selection(series_name, year):
@@ -4215,6 +4386,47 @@ def _try_metron_single_selection(series_name, year):
 
 
 def _try_comicvine_single(cvinfo_path, series_name, issue_number, year):
+    """Try ComicVine provider for a single file, bounded by a wall-clock guard.
+
+    Runs the actual lookup in a worker thread and gives up after
+    CV_ATTEMPT_TIMEOUT seconds so a hung ComicVine request (rate-limiter or
+    SQLite-lock blocking that the httpx timeout doesn't cover) can't stall the
+    request. On timeout or any error it returns (None, None, None, None), which
+    the search-metadata cascade treats as "no result → try next provider"
+    (e.g. gcd_api).
+    """
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+
+    # current_app is request-bound; capture the real app so the worker thread
+    # (which has no request/app context of its own) can push one.
+    app = current_app._get_current_object()
+
+    def _run():
+        with app.app_context():
+            return _try_comicvine_single_impl(cvinfo_path, series_name, issue_number, year)
+
+    # Don't use ThreadPoolExecutor as a context manager: its __exit__ calls
+    # shutdown(wait=True), which would block on a hung worker and defeat the
+    # timeout. shutdown(wait=False) lets the request return immediately; the
+    # orphaned worker unwinds on its own once the Simyan per-request timeout
+    # (CV_REQUEST_TIMEOUT) fires.
+    ex = ThreadPoolExecutor(max_workers=1)
+    try:
+        return ex.submit(_run).result(timeout=CV_ATTEMPT_TIMEOUT)
+    except FutureTimeout:
+        app_logger.warning(
+            f"[search-metadata] ComicVine timed out after {CV_ATTEMPT_TIMEOUT}s "
+            "— failing over to next provider"
+        )
+        return None, None, None, None
+    except Exception as e:
+        app_logger.warning(f"[search-metadata] ComicVine lookup failed: {e}")
+        return None, None, None, None
+    finally:
+        ex.shutdown(wait=False)
+
+
+def _try_comicvine_single_impl(cvinfo_path, series_name, issue_number, year):
     """Try ComicVine provider for a single file.
     Returns (metadata_dict, image_url, volume_data, None) on success,
     or (None, None, None, selection_data) when user selection is needed,
@@ -4569,6 +4781,57 @@ def _try_gcd_api_single(series_name, issue_number, year, file_path=None, user_st
         return None, None, None
 
 
+@metadata_bp.route('/api/gcd-api/cover', methods=['GET'])
+def gcd_api_cover():
+    """Lazily resolve a GCD (comics.org) cover image for a series + issue.
+
+    GCD series search results carry no cover; the image only exists on the
+    issue detail endpoint. The selection modals call this per result card as
+    it scrolls into view to fill the thumbnail without a full metadata fetch.
+    """
+    series_id = (request.args.get('series_id') or '').strip()
+    issue = (request.args.get('issue') or '').strip() or '1'
+    if not series_id:
+        return jsonify({"success": False, "error": "series_id required"}), 400
+    try:
+        from models.providers.gcd_api_provider import GCDApiProvider
+        prov = GCDApiProvider()
+        if not prov._get_client():
+            return jsonify({"success": False, "error": "GCD API not configured"})
+        cover_url = prov.get_cover_url(series_id, issue)
+        return jsonify({"success": bool(cover_url), "cover_url": cover_url})
+    except Exception as e:
+        app_logger.warning(f"[gcd-api-cover] lookup failed for series {series_id} #{issue}: {e}")
+        return jsonify({"success": False, "error": str(e)})
+
+
+def _is_oneshot_folder_safe(folder_path):
+    """True when ``folder_path`` is a one-shot folder (oneshots/specials/...).
+
+    One-shot folders hold unrelated single issues, so a folder-level cvinfo must
+    not be applied across them and auto-rename should wait for confirmation.
+    """
+    try:
+        from core.bulk_metadata import _is_oneshot_folder
+        return bool(folder_path) and _is_oneshot_folder(folder_path)
+    except Exception:
+        return False
+
+
+def _rename_config_for(folder_path):
+    """Build the response's rename_config, suppressing auto-rename in one-shot
+    folders so a fetched match is applied but the rename waits for the user to
+    confirm (guards against a wrong one-shot guess silently renaming the file)."""
+    auto = current_app.config.get("ENABLE_AUTO_RENAME", False)
+    if _is_oneshot_folder_safe(folder_path):
+        auto = False
+    return {
+        "enabled": current_app.config.get("ENABLE_CUSTOM_RENAME", False),
+        "pattern": current_app.config.get("CUSTOM_RENAME_PATTERN", ""),
+        "auto_rename": auto,
+    }
+
+
 @metadata_bp.route('/api/search-metadata', methods=['POST'])
 def search_metadata():
     """
@@ -4590,9 +4853,15 @@ def search_metadata():
         library_id = data.get('library_id')
         selected_match = data.get('selected_match')
         search_term_override = data.get('search_term')
-        gcd_api_start_year = data.get('gcd_api_start_year')  # User-provided series start year for GCD API
         force_provider = (data.get('force_provider') or '').strip().lower()
         force_manual_selection = bool(data.get('force_manual_selection'))
+        search_year_override = data.get('search_year')  # User-provided series start year (manual search)
+        gcd_api_start_year = data.get('gcd_api_start_year')  # User-provided series start year for GCD API (legacy)
+        # Providers the user has already skipped (via "Skip to next provider").
+        skip_providers = data.get('skip_providers') or []
+        # Restrict the cascade to a single provider (used by per-provider inline
+        # refine so refining inside the Metron modal re-searches Metron only).
+        only_provider = data.get('only_provider')
 
         if not file_path or not file_name:
             return jsonify({"success": False, "error": "Missing file_path or file_name"}), 400
@@ -4657,6 +4926,40 @@ def search_metadata():
                 detail="Unsupported force provider",
             )
 
+        # When the caller passes an explicit year (manual search from the
+        # bulk review modal), it overrides the year parsed from the filename.
+        # File year tracks the issue's publication date and is often a year
+        # or two ahead of the series start — Metron/ComicVine search_series
+        # rank results by year proximity, so the parsed file year picks the
+        # wrong volume when the series ran across multiple years.
+        if search_year_override is not None and search_year_override != '':
+            try:
+                year = int(search_year_override)
+                app_logger.info(f"[search-metadata] Using manual search year override: {year}")
+            except (TypeError, ValueError):
+                app_logger.warning(
+                    f"[search-metadata] Ignoring invalid search_year override: {search_year_override!r}"
+                )
+
+        # Check for cvinfo file in parent folder. When the caller passes an
+        # explicit search_term override (manual search from the bulk review
+        # modal), bypass cvinfo so a stale series_id from a prior failed
+        # attempt doesn't short-circuit and search the wrong series. Provider
+        # helpers fall back to a fresh search-by-name when cvinfo is absent.
+        folder_path = os.path.dirname(file_path)
+        if search_term_override or force_provider:
+            cvinfo_path = None
+            reason = "search_term override" if search_term_override else "forced provider search"
+            app_logger.info(f"[search-metadata] Bypassing cvinfo ({reason})")
+        elif _is_oneshot_folder_safe(folder_path):
+            # One-shot folders hold unrelated singles — a shared folder cvinfo
+            # would wrongly match every file to the same series. Search by the
+            # file's own parsed name instead.
+            cvinfo_path = None
+            app_logger.info("[search-metadata] Bypassing cvinfo (one-shot folder)")
+        else:
+            cvinfo_path = comicvine.find_cvinfo_in_folder(folder_path)
+
         # Handle selection follow-up (user picked from a selection modal)
         if selected_match:
             update_single_metadata_progress(2, "Preparing selected provider lookup...")
@@ -4679,10 +4982,13 @@ def search_metadata():
             img_url = None
             volume_data = None
             folder_path = os.path.dirname(file_path)
-            cvinfo_path = comicvine.find_cvinfo_in_folder(folder_path)
+            if search_term_override or _is_oneshot_folder_safe(folder_path):
+                cvinfo_path = None
+            else:
+                cvinfo_path = comicvine.find_cvinfo_in_folder(folder_path)
 
             if provider == 'comicvine':
-                volume_id = selected_match.get('volume_id')
+                volume_id = selected_match.get('volume_id') or selected_match.get('id')
                 selected_start_year = selected_match.get('start_year')
                 selected_issue_id = selected_match.get('issue_id')
                 api_key = current_app.config.get("COMICVINE_API_KEY", "").strip()
@@ -4765,7 +5071,7 @@ def search_metadata():
                             img_url = str(img_url)
 
             elif provider == 'metron':
-                series_id = selected_match.get('series_id')
+                series_id = selected_match.get('series_id') or selected_match.get('id')
                 metron_api = metron.get_flask_api()
                 if series_id and metron_api:
                     try:
@@ -4784,12 +5090,12 @@ def search_metadata():
                                 img_url = str(image) if not isinstance(image, str) else image
 
             elif provider == 'gcd':
-                series_id = selected_match.get('series_id')
+                series_id = selected_match.get('series_id') or selected_match.get('id')
                 if series_id:
                     metadata = gcd.get_issue_metadata(series_id, issue_number)
 
             elif provider == 'gcd_api':
-                series_id = selected_match.get('series_id')
+                series_id = selected_match.get('series_id') or selected_match.get('id')
                 if series_id:
                     from models.providers.gcd_api_provider import GCDApiProvider
                     gcd_api_prov = GCDApiProvider()
@@ -4799,7 +5105,7 @@ def search_metadata():
                         metadata = api_metadata
 
             elif provider in ('anilist', 'mangadex', 'mangaupdates'):
-                series_id = selected_match.get('series_id')
+                series_id = selected_match.get('series_id') or selected_match.get('id')
                 preferred_title = selected_match.get('preferred_title')
                 alternate_title = selected_match.get('alternate_title')
                 if series_id:
@@ -4852,11 +5158,7 @@ def search_metadata():
                 "source": provider,
                 "metadata": metadata,
                 "image_url": img_url,
-                "rename_config": {
-                    "enabled": current_app.config.get("ENABLE_CUSTOM_RENAME", False),
-                    "pattern": current_app.config.get("CUSTOM_RENAME_PATTERN", ""),
-                    "auto_rename": current_app.config.get("ENABLE_AUTO_RENAME", False)
-                }
+                "rename_config": _rename_config_for(folder_path)
             }
 
             if new_file_path:
@@ -4904,6 +5206,11 @@ def search_metadata():
                     detail=f"{force_provider} is not enabled",
                 )
             provider_order = [force_provider]
+        elif only_provider:
+            provider_order = [p for p in provider_order if p == only_provider]
+
+        if skip_providers and not force_provider:
+            provider_order = [p for p in provider_order if p not in skip_providers]
 
         if force_manual_selection and force_provider in {'comicvine', 'metron', 'mangaupdates'}:
             update_single_metadata_progress(2, f"Preparing forced {force_provider} selection...")
@@ -4923,6 +5230,12 @@ def search_metadata():
 
             if selection_data:
                 update_single_metadata_progress(4, f"{force_provider} requires selection")
+                selection_data["provider_order"] = provider_order
+                selection_data.setdefault("parsed_filename", {
+                    "series_name": series_name,
+                    "issue_number": issue_number,
+                    "year": year,
+                })
                 app_logger.info(f"[search-metadata] forced {force_provider} selection required for {file_name}")
                 return jsonify(selection_data)
 
@@ -4941,10 +5254,7 @@ def search_metadata():
                 detail=f"No {force_provider} candidates found",
             )
 
-        # Check for cvinfo file in parent folder
         update_single_metadata_progress(2, "Preparing provider search...")
-        folder_path = os.path.dirname(file_path)
-        cvinfo_path = comicvine.find_cvinfo_in_folder(folder_path)
 
         app_logger.info(f"[search-metadata] Provider order: {provider_order}")
 
@@ -4960,12 +5270,24 @@ def search_metadata():
 
             if provider_type == 'metron':
                 try:
-                    metadata, img_url = _try_metron_single(cvinfo_path, series_name, issue_number, year)
+                    metadata, img_url, selection_data = _try_metron_single(
+                        cvinfo_path, series_name, issue_number, year
+                    )
                 except MetadataProviderTimeoutError as exc:
                     app_logger.warning(f"[search-metadata] {exc}")
                     if force_provider == provider_type:
                         return fail_single_timeout(exc, current=3)
                     continue
+                if selection_data:
+                    update_single_metadata_progress(4, f"{provider_type} requires selection")
+                    selection_data["parsed_filename"] = {
+                        "series_name": series_name,
+                        "issue_number": issue_number,
+                        "year": year
+                    }
+                    selection_data["provider_order"] = provider_order
+                    app_logger.info(f"[search-metadata] {provider_type} requires selection for {file_name}")
+                    return jsonify(selection_data)
 
             elif provider_type == 'comicvine':
                 try:
@@ -4985,6 +5307,7 @@ def search_metadata():
                         "year": year
                     }
                     update_single_metadata_progress(4, f"{provider_type} requires selection")
+                    selection_data["provider_order"] = provider_order
                     app_logger.info(f"[search-metadata] {provider_type} requires selection for {file_name}")
                     return jsonify(selection_data)
 
@@ -4997,6 +5320,7 @@ def search_metadata():
                         "year": year
                     }
                     update_single_metadata_progress(4, f"{provider_type} requires selection")
+                    selection_data["provider_order"] = provider_order
                     app_logger.info(f"[search-metadata] {provider_type} requires selection for {file_name}")
                     return jsonify(selection_data)
 
@@ -5012,6 +5336,7 @@ def search_metadata():
                         "year": year
                     }
                     update_single_metadata_progress(4, f"{provider_type} requires selection")
+                    selection_data["provider_order"] = provider_order
                     app_logger.info(f"[search-metadata] {provider_type} requires selection for {file_name}")
                     return jsonify(selection_data)
 
@@ -5045,6 +5370,7 @@ def search_metadata():
                                 results,
                             )
                             update_single_metadata_progress(4, f"{provider_type} requires selection")
+                            selection_data["provider_order"] = provider_order
                             app_logger.info(f"[search-metadata] {provider_type} requires selection for {file_name}")
                             return jsonify(selection_data)
                         else:
@@ -5097,11 +5423,7 @@ def search_metadata():
                     "source": provider_type,
                     "metadata": metadata,
                     "image_url": img_url,
-                    "rename_config": {
-                        "enabled": current_app.config.get("ENABLE_CUSTOM_RENAME", False),
-                        "pattern": current_app.config.get("CUSTOM_RENAME_PATTERN", ""),
-                        "auto_rename": current_app.config.get("ENABLE_AUTO_RENAME", False)
-                    }
+                    "rename_config": _rename_config_for(folder_path)
                 }
 
                 if new_file_path:
@@ -5292,11 +5614,7 @@ def search_comicvine_metadata():
                             "name": volume_data.get('name', ''),
                             "start_year": volume_data.get('start_year')
                         },
-                        "rename_config": {
-                            "enabled": current_app.config.get("ENABLE_CUSTOM_RENAME", False),
-                            "pattern": current_app.config.get("CUSTOM_RENAME_PATTERN", ""),
-                            "auto_rename": current_app.config.get("ENABLE_AUTO_RENAME", False)
-                        }
+                        "rename_config": _rename_config_for(folder_path)
                     }
 
                     if new_file_path:
@@ -5460,11 +5778,7 @@ def search_comicvine_metadata():
                 "name": selected_volume['name'],
                 "start_year": selected_volume['start_year']
             },
-            "rename_config": {
-                "enabled": current_app.config.get("ENABLE_CUSTOM_RENAME", False),
-                "pattern": current_app.config.get("CUSTOM_RENAME_PATTERN", ""),
-                "auto_rename": current_app.config.get("ENABLE_AUTO_RENAME", False)
-            }
+            "rename_config": _rename_config_for(folder_path)
         }
 
         # Add new file path to response if file was moved
@@ -5594,11 +5908,7 @@ def search_comicvine_metadata_with_selection():
             "success": True,
             "metadata": comicinfo_data,
             "image_url": img_url,
-            "rename_config": {
-                "enabled": current_app.config.get("ENABLE_CUSTOM_RENAME", False),
-                "pattern": current_app.config.get("CUSTOM_RENAME_PATTERN", ""),
-                "auto_rename": current_app.config.get("ENABLE_AUTO_RENAME", False)
-            }
+            "rename_config": _rename_config_for(os.path.dirname(file_path))
         }
 
         # Add new file path to response if file was moved
