@@ -1184,6 +1184,7 @@ function updateFilterBar(panel, directories) {
   if (!btnGroup) return;
   const alphaRow = outerContainer.querySelector('.files-filter-row');
   const searchContainer = document.getElementById(panel + '-directory-search-container');
+  const actionRow = document.getElementById(panel + '-directory-rename-row');
 
   // Handle undefined or null directories - provide empty array as fallback
   if (!directories) {
@@ -1256,7 +1257,8 @@ function updateFilterBar(panel, directories) {
     searchContainer.style.display = showSearch ? 'flex' : 'none';
   }
 
-  outerContainer.style.display = (showAlphaFilter || showSearch) ? '' : 'none';
+  const showActions = actionRow && actionRow.style.display !== 'none';
+  outerContainer.style.display = (showAlphaFilter || showSearch || showActions) ? '' : 'none';
 }
 
 // Function to restore filter from history if valid for the given path
@@ -2953,10 +2955,6 @@ function refreshDirectoryOverflowVisibility(renameRow) {
   overflowWrap.classList.toggle('show-actions', hasVisibleOverflowActions);
 }
 
-function shouldCompactDirectoryActions() {
-  return window.matchMedia('(max-width: 1399.98px)').matches;
-}
-
 function refreshVisibleDirectoryActionLayouts() {
   ['source', 'destination'].forEach((panel) => {
     const renameRowId = panel === 'source' ? 'source-directory-rename-row' : 'destination-directory-rename-row';
@@ -2998,7 +2996,6 @@ function updateRenameButtonVisibility(panel) {
   if (isNotRoot) {
     console.log('Showing rename row:', panel, 'files=', fileTracking[panel].fileCount, 'path=', currentPath);
     const actionContainers = ensureDirectoryActionContainers(renameRow, panel);
-    const compactActions = shouldCompactDirectoryActions();
 
     // File-related buttons (only show when there are files)
     let renameButton = renameRow.querySelector('.rename-files-btn');
@@ -3114,7 +3111,7 @@ function updateRenameButtonVisibility(panel) {
           forceComicVineButton.title = 'Force match all files in this directory via ComicVine';
         }
         forceComicVineButton.style.display = '';
-        placeDirectoryAction(forceComicVineButton, compactActions ? actionContainers.overflowMenu : actionContainers.primary);
+        placeDirectoryAction(forceComicVineButton, actionContainers.primary);
         forceComicVineButton.dataset.currentPath = currentPath;
         forceComicVineButton.dataset.currentPanel = panel;
         forceComicVineButton.onclick = function (e) {

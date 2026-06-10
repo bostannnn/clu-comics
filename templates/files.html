@@ -9,9 +9,9 @@
 
 {% block content %}
 
-<div class="container-fluid px-4">
-  <div class="py-3">
-  <h2 class="text-primary-emphasis mb-4">File Manager</h2>
+<div class="container-fluid px-4 files-page-shell">
+  <div class="py-2">
+  <h2 class="text-primary-emphasis files-page-title">File Manager</h2>
 
   <!-- Progress indicator -->
   {% include 'partials/progress_container.html' %}
@@ -23,7 +23,7 @@
     <span class="badge-hint">Drag to move • Right-click for options</span>
   </div>
 
-  <div class="row g-4 align-items-start">
+  <div class="row g-4 align-items-start files-panels-row">
     <!-- Source Panel -->
     <div class="col-md-6">
       <section class="files-panel clu-stack">
@@ -56,17 +56,17 @@
           </nav>
         </div>
       </div>
-      <div id="source-directory-filter" class="clu-stack-sm">
-        <div class="clu-section-row-tight files-filter-row">
-          <div class="btn-group d-grid grid-filter-buttons clu-alpha-filter" role="group" aria-label="Directory Filter">
+      <div id="source-directory-filter" class="files-filter-strip">
+        <div class="files-filter-row files-alpha-scroll">
+          <div class="btn-group clu-alpha-filter files-alpha-filter" role="group" aria-label="Directory Filter">
             <!-- Dynamically inserted buttons go here -->
           </div>
         </div>
-        <div id="source-directory-search-container" class="clu-section-row files-filter-row files-filter-row-secondary">
+        <div id="source-directory-search-container" class="files-filter-row-secondary">
           <div id="source-directory-search-row" class="clu-search-row"></div>
         </div>
+        <div id="source-directory-rename-row" class="clu-action-row files-list-actions"></div>
       </div>
-      <div id="source-directory-rename-row" class="clu-action-row files-list-actions"></div>
       <ul id="source-list" class="list-group drop-target"></ul>
       </section>
     </div>
@@ -102,17 +102,17 @@
           </nav>
         </div>
       </div>
-      <div id="destination-directory-filter" class="clu-stack-sm">
-        <div class="clu-section-row-tight files-filter-row">
-          <div class="btn-group d-grid grid-filter-buttons clu-alpha-filter" role="group" aria-label="Directory Filter">
+      <div id="destination-directory-filter" class="files-filter-strip">
+        <div class="files-filter-row files-alpha-scroll">
+          <div class="btn-group clu-alpha-filter files-alpha-filter" role="group" aria-label="Directory Filter">
             <!-- Dynamically inserted buttons go here -->
           </div>
         </div>
-        <div id="destination-directory-search-container" class="clu-section-row files-filter-row files-filter-row-secondary">
+        <div id="destination-directory-search-container" class="files-filter-row-secondary">
           <div id="destination-directory-search-row" class="clu-search-row"></div>
         </div>
+        <div id="destination-directory-rename-row" class="clu-action-row files-list-actions"></div>
       </div>
-      <div id="destination-directory-rename-row" class="clu-action-row files-list-actions"></div>
       <ul id="destination-list" class="list-group drop-target"></ul>
       </section>
     </div>

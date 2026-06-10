@@ -42,17 +42,38 @@
         opacity: 1;
     }
 
+    .files-page-title {
+        margin-bottom: var(--clu-space-2);
+        font-size: 1.85rem;
+    }
+
+    .files-panels-row > [class*="col-"] {
+        display: flex;
+        min-width: 0;
+    }
+
     .files-panel {
-        height: 100%;
-        padding: var(--clu-space-3) var(--clu-space-4) var(--clu-space-4);
+        display: flex;
+        flex-direction: column;
+        gap: var(--clu-space-2);
+        width: 100%;
+        min-height: 32rem;
+        height: calc(100dvh - 12.25rem);
+        padding: var(--clu-space-2) var(--clu-space-3) var(--clu-space-3);
         border: 1px solid var(--bs-border-color-translucent);
         border-radius: var(--bs-border-radius-xl);
         background: var(--bs-body-bg);
         box-shadow: 0 0.125rem 0.5rem rgba(0, 0, 0, 0.05);
     }
 
+    @supports not (height: 100dvh) {
+        .files-panel {
+            height: calc(100vh - 12.25rem);
+        }
+    }
+
     .files-panel h3 {
-        font-size: 1.65rem;
+        font-size: 1.4rem;
     }
 
     .files-panel .clu-panel-toolbar {
@@ -75,32 +96,85 @@
         justify-content: flex-start;
     }
 
-    .grid-filter-buttons {
-        grid-template-columns: repeat(auto-fill, minmax(42px, 1fr));
-    }
-
     #source-directory-filter,
     #destination-directory-filter {
+        display: flex;
+        align-items: center;
+        gap: var(--clu-compact-gap);
+        flex-wrap: wrap;
+        min-width: 0;
         max-width: 100%;
     }
 
     .files-filter-row {
-        width: 100%;
-        align-items: flex-start;
+        flex: 999 1 18rem;
+        min-width: 0;
+        width: auto;
+        align-items: center;
+    }
+
+    .files-alpha-scroll {
+        overflow-x: auto;
+        overflow-y: hidden;
+        padding-bottom: 0.1rem;
+        scrollbar-width: thin;
+    }
+
+    .files-alpha-scroll::-webkit-scrollbar {
+        height: 0.35rem;
+    }
+
+    .files-alpha-scroll::-webkit-scrollbar-thumb {
+        background: var(--bs-border-color);
+        border-radius: var(--bs-border-radius-pill);
     }
 
     .files-filter-row .clu-alpha-filter {
-        flex: 1 1 100%;
-        max-width: 100%;
+        display: flex;
+        flex: 0 0 auto;
+        flex-wrap: nowrap;
+        gap: 0.25rem;
+        width: max-content;
+        max-width: none;
+    }
+
+    .files-filter-row .clu-alpha-filter .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex: 0 0 1.625rem;
+        width: 1.625rem;
+        min-width: 1.625rem;
+        min-height: 1.625rem;
+        padding: 0.125rem;
+        font-size: 0.72rem;
+        line-height: 1;
+    }
+
+    .files-filter-row .clu-alpha-filter .btn:first-child {
+        flex-basis: 2.25rem;
+        width: 2.25rem;
+        min-width: 2.25rem;
     }
 
     .files-filter-row-secondary {
-        padding-top: var(--clu-space-2);
+        display: flex;
+        flex: 0 1 12rem;
+        min-width: 10rem;
+        padding-top: 0;
     }
 
     .files-filter-row-secondary .clu-search-row {
-        flex: 0 1 20rem;
-        min-width: 16rem;
+        flex: 1 1 auto;
+        min-width: 0;
+    }
+
+    .files-filter-row-secondary .clu-search-row .form-control {
+        width: 100%;
+        min-height: 1.875rem;
+        padding: 0.25rem 0.5rem;
+        font-size: 0.875rem;
+        margin-bottom: 0;
     }
 
     .files-filter-row-secondary .clu-action-row {
@@ -110,22 +184,33 @@
     }
 
     .files-list-actions {
-        width: 100%;
+        flex: 1 1 14rem;
+        min-width: min(100%, 14rem);
+        width: auto;
         margin-left: 0;
         justify-content: flex-start;
         align-items: center;
     }
 
-    @media (max-width: 1199.98px) {
-        .files-filter-row-secondary {
-            padding-top: var(--clu-space-1);
-        }
+    .files-list-actions .clu-action-primary {
+        flex-wrap: wrap;
+        justify-content: flex-start;
+        min-width: 0;
+    }
 
+    .files-list-actions .clu-action-primary .btn,
+    .files-list-actions .clu-action-overflow > .btn {
+        min-height: 1.875rem;
+        padding: 0.25rem 0.5rem;
+        font-size: 0.8rem;
+    }
+
+    @media (max-width: 1199.98px) {
         .files-filter-row-secondary .clu-search-row {
             flex: 1 1 18rem;
         }
 
-        .files-filter-row-secondary .clu-action-row {
+        .files-list-actions {
             width: auto;
         }
     }
@@ -138,12 +223,25 @@
 
     #destination-list,
     #source-list {
-        /* 100vh is the full height of the screen.
-           We subtract approx 485px to account for the header, buttons, and breadcrumbs above it. */
-        height: calc(100vh - 485px);
+        flex: 1 1 auto;
+        min-height: 16rem;
+        height: auto;
         overflow-y: auto;
         border-radius: var(--bs-border-radius);
         background-color: var(--bs-body-bg);
+    }
+
+    @media (max-width: 767.98px) {
+        .files-panel {
+            height: auto;
+            min-height: 34rem;
+        }
+
+        .files-filter-row,
+        .files-filter-row-secondary,
+        .files-list-actions {
+            flex: 1 1 100%;
+        }
     }
 
     /* Drag and drop hover effects */
