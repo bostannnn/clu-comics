@@ -12,6 +12,13 @@ class TestSourceWallPage:
         resp = client.get("/source-wall")
         assert resp.status_code == 200
 
+    @patch("routes.source_wall.config")
+    def test_page_exposes_tags_bulk_field(self, mock_config, client):
+        mock_config.get.return_value = ""
+        resp = client.get("/source-wall")
+        assert resp.status_code == 200
+        assert b'value="ci_tags">Tags' in resp.data
+
 
 class TestSourceWallFiles:
 

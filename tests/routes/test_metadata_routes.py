@@ -3385,6 +3385,17 @@ class TestOneShotFolderHandling:
     """One-shot folders (oneshots/specials/...) hold unrelated singles, so a
     shared folder cvinfo must be ignored and auto-rename must be gated."""
 
+    def test_rename_config_normalizes_legacy_year_token(self, app, tmp_path):
+        from routes.metadata import _rename_config_for
+
+        app.config["ENABLE_CUSTOM_RENAME"] = True
+        app.config["CUSTOM_RENAME_PATTERN"] = "{series_name} {issue_number} ({year})"
+
+        data = _rename_config_for(str(tmp_path / "Some Series"))
+
+        assert data["enabled"] is True
+        assert data["pattern"] == "{series_name} {issue_number} ({volume_year})"
+
     def test_search_metadata_bypasses_cvinfo_and_gates_autorename(self, app, client, tmp_path):
         from contextlib import ExitStack
         app.config["COMICVINE_API_KEY"] = "k"

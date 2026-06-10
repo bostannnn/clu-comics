@@ -1555,6 +1555,7 @@
       result = result.replace(/{store_month_m}/g, store.monthPadded);
       result = result.replace(/{store_year}/gi, store.year);
       result = result.replace(/{volume_year}/gi, volumeYear || year);
+      result = result.replace(/{year}/gi, year);
       result = result.replace(/{YYYY}/g, year);
       result = result.replace(/{volume_number}/gi, volumeNumber);
       result = result.replace(/{issue_title}/gi, issueTitle);

@@ -4825,9 +4825,11 @@ def _rename_config_for(folder_path):
     auto = current_app.config.get("ENABLE_AUTO_RENAME", False)
     if _is_oneshot_folder_safe(folder_path):
         auto = False
+    pattern = current_app.config.get("CUSTOM_RENAME_PATTERN", "")
+    pattern = (pattern or "").replace("{year}", "{volume_year}")
     return {
         "enabled": current_app.config.get("ENABLE_CUSTOM_RENAME", False),
-        "pattern": current_app.config.get("CUSTOM_RENAME_PATTERN", ""),
+        "pattern": pattern,
         "auto_rename": auto,
     }
 
