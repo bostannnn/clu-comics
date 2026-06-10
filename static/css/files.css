@@ -186,16 +186,32 @@
     .files-list-actions {
         flex: 1 1 14rem;
         min-width: min(100%, 14rem);
+        max-width: 100%;
         width: auto;
         margin-left: 0;
         justify-content: flex-start;
         align-items: center;
     }
 
+    .files-list-actions.has-multiple-actions {
+        flex: 1 1 100%;
+        width: 100%;
+        min-width: 0;
+        align-items: flex-start;
+    }
+
     .files-list-actions .clu-action-primary {
         flex-wrap: wrap;
         justify-content: flex-start;
         min-width: 0;
+    }
+
+    .files-list-actions.has-multiple-actions .clu-action-primary {
+        flex: 1 1 0;
+    }
+
+    .files-list-actions.has-multiple-actions .clu-action-overflow {
+        flex: 0 0 auto;
     }
 
     .files-list-actions .clu-action-primary .btn,

@@ -2955,6 +2955,16 @@ function refreshDirectoryOverflowVisibility(renameRow) {
   overflowWrap.classList.toggle('show-actions', hasVisibleOverflowActions);
 }
 
+function refreshDirectoryActionRowDensity(renameRow) {
+  const primaryContainer = renameRow.querySelector('.clu-action-primary');
+  const overflowWrap = renameRow.querySelector('.clu-action-overflow');
+  const visiblePrimaryActions = primaryContainer
+    ? Array.from(primaryContainer.children).filter((child) => child.style.display !== 'none').length
+    : 0;
+  const visibleActionCount = visiblePrimaryActions + (overflowWrap && overflowWrap.classList.contains('show-actions') ? 1 : 0);
+  renameRow.classList.toggle('has-multiple-actions', visibleActionCount > 1);
+}
+
 function refreshVisibleDirectoryActionLayouts() {
   ['source', 'destination'].forEach((panel) => {
     const renameRowId = panel === 'source' ? 'source-directory-rename-row' : 'destination-directory-rename-row';
@@ -2972,6 +2982,9 @@ function setDirectoryActionRowVisibility(panel, visible) {
     return;
   }
   renameRow.style.display = visible ? '' : 'none';
+  if (!visible) {
+    renameRow.classList.remove('has-multiple-actions');
+  }
 }
 
 // Function to update rename button visibility and functionality
@@ -3209,10 +3222,12 @@ function updateRenameButtonVisibility(panel) {
     };
 
     refreshDirectoryOverflowVisibility(renameRow);
+    refreshDirectoryActionRowDensity(renameRow);
     renameRow.style.display = 'flex';
   } else {
     console.log('Hiding rename row:', panel, 'hasFiles=', hasFiles, 'isNotRoot=', isNotRoot, 'path=', currentPath);
     renameRow.style.display = 'none';
+    renameRow.classList.remove('has-multiple-actions');
 
     // Reset file count to 0 when hiding the button (no files in current directory)
     if (fileTracking[panel].fileCount > 0) {
