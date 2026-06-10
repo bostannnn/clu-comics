@@ -52,7 +52,7 @@
             <div class="row align-items-center">
                 <div class="col-md-6">
                     <div class="input-group">
-                        <span class="input-group-text bg-white"><i class="bi bi-search"></i></span>
+                        <span class="input-group-text bg-body"><i class="bi bi-search"></i></span>
                         <input type="text" class="form-control" id="searchInput" placeholder="Search publishers...">
                     </div>
                 </div>
@@ -68,7 +68,7 @@
         <div class="card-body p-0">
             <div class="table-responsive">
                 <table class="table table-hover align-middle mb-0" id="publishersTable">
-                    <thead class="table-light">
+                    <thead>
                         <tr>
                             <th scope="col" class="ps-4" style="width: 60px;">Logo</th>
                             <th scope="col" class="sortable" data-sort="name" style="cursor: pointer;">
@@ -91,7 +91,7 @@
                                 <img src="/cache/{{ pub.logo }}" alt="{{ pub.name }}" class="rounded"
                                     style="width: 40px; height: 40px; object-fit: contain;">
                                 {% else %}
-                                <div class="bg-light rounded d-flex align-items-center justify-content-center"
+                                <div class="bg-body-tertiary rounded d-flex align-items-center justify-content-center"
                                     style="width: 40px; height: 40px;">
                                     <i class="bi bi-building text-muted"></i>
                                 </div>
@@ -211,7 +211,7 @@
                     </div>
                 </form>
             </div>
-            <div class="modal-footer bg-light">
+            <div class="modal-footer bg-body-tertiary">
                 <button type="button" class="btn btn-link text-decoration-none text-muted" data-bs-dismiss="modal">
                     Cancel
                 </button>
@@ -250,7 +250,7 @@
                     <div class="form-text">Era/line identifiers for GetComics scoring (comma-separated). Defaults: DC=Rebirth,New 52 | Marvel=Marvel NOW,Legacy,Ultimate</div>
                 </div>
             </div>
-            <div class="modal-footer bg-light">
+            <div class="modal-footer bg-body-tertiary">
                 <button type="button" class="btn btn-link text-decoration-none text-muted" data-bs-dismiss="modal">
                     Cancel
                 </button>
@@ -390,7 +390,7 @@
                             ${pub.image ?
                     `<img src="${pub.image}" alt="${pub.name}" class="rounded me-3"
                                      style="width: 48px; height: 48px; object-fit: contain;">` :
-                    `<div class="bg-light rounded me-3 d-flex align-items-center justify-content-center"
+                    `<div class="bg-body-tertiary rounded me-3 d-flex align-items-center justify-content-center"
                                      style="width: 48px; height: 48px;">
                                     <i class="bi bi-building text-muted"></i>
                                 </div>`

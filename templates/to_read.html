@@ -18,7 +18,7 @@
     align-items: center;
     margin-bottom: 30px;
     padding-bottom: 15px;
-    border-bottom: 2px solid #e9ecef;
+    border-bottom: 2px solid var(--bs-border-color);
   }
 
   .to-read-header h2 {
@@ -31,7 +31,7 @@
   }
 
   .to-read-stats {
-    color: #6c757d;
+    color: var(--bs-secondary-color);
     font-size: 0.9rem;
   }
 
@@ -42,7 +42,7 @@
   }
 
   .to-read-card {
-    background: #1a1a1a;
+    background: var(--bs-tertiary-bg);
     border-radius: 12px;
     overflow: hidden;
     transition: transform 0.2s ease, box-shadow 0.2s ease;
@@ -60,7 +60,7 @@
     height: 280px;
     overflow: hidden;
     position: relative;
-    background: #2d2d2d;
+    background: var(--bs-secondary-bg);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -82,7 +82,7 @@
   }
 
   .to-read-card .card-title {
-    color: #fff;
+    color: var(--bs-body-color);
     font-size: 0.95rem;
     font-weight: 500;
     margin: 0 0 8px 0;
@@ -92,7 +92,7 @@
   }
 
   .to-read-card .card-meta {
-    color: #6c757d;
+    color: var(--bs-secondary-color);
     font-size: 0.8rem;
     display: flex;
     align-items: center;
@@ -134,7 +134,7 @@
   .empty-state {
     text-align: center;
     padding: 60px 20px;
-    color: #6c757d;
+    color: var(--bs-secondary-color);
   }
 
   .empty-state i {
@@ -146,7 +146,7 @@
 
   .empty-state h3 {
     margin-bottom: 10px;
-    color: #adb5bd;
+    color: var(--bs-secondary-color);
   }
 
   .empty-state p {
@@ -157,7 +157,7 @@
   .loading-state {
     text-align: center;
     padding: 60px 20px;
-    color: #6c757d;
+    color: var(--bs-secondary-color);
   }
 </style>
 {% endblock %}

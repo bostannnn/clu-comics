@@ -36,6 +36,13 @@ from models import gcd, metron, comicvine
 from models.gcd import STOPWORDS
 
 metadata_bp = Blueprint('metadata', __name__)
+_metadata_app_config = None
+
+
+@metadata_bp.record_once
+def _capture_metadata_app_config(state):
+    global _metadata_app_config
+    _metadata_app_config = state.app.config
 
 _comicinfo_write_locks = {}
 _comicinfo_write_locks_guard = threading.Lock()
@@ -4822,13 +4829,18 @@ def _rename_config_for(folder_path):
     """Build the response's rename_config, suppressing auto-rename in one-shot
     folders so a fetched match is applied but the rename waits for the user to
     confirm (guards against a wrong one-shot guess silently renaming the file)."""
-    auto = current_app.config.get("ENABLE_AUTO_RENAME", False)
+    try:
+        app_config = current_app.config
+    except RuntimeError:
+        app_config = _metadata_app_config or {}
+
+    auto = app_config.get("ENABLE_AUTO_RENAME", False)
     if _is_oneshot_folder_safe(folder_path):
         auto = False
-    pattern = current_app.config.get("CUSTOM_RENAME_PATTERN", "")
+    pattern = app_config.get("CUSTOM_RENAME_PATTERN", "")
     pattern = (pattern or "").replace("{year}", "{volume_year}")
     return {
-        "enabled": current_app.config.get("ENABLE_CUSTOM_RENAME", False),
+        "enabled": app_config.get("ENABLE_CUSTOM_RENAME", False),
         "pattern": pattern,
         "auto_rename": auto,
     }

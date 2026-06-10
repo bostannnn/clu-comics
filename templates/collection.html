@@ -82,7 +82,7 @@
                         <i class="bi bi-check2-square"></i>
                         <span>Multi-Select</span>
                     </button>
-                    <button class="btn btn-light border btn-sm" onclick="refreshCurrentView(true, true)" title="Refresh">
+                    <button class="btn btn-outline-secondary btn-sm" onclick="refreshCurrentView(true, true)" title="Refresh">
                         <i class="bi bi-arrow-clockwise text-muted"></i>
                     </button>
                 </div>
@@ -354,7 +354,7 @@
                             <p class="card-text">
                                 A detailed list of missing issues has been saved to:
                             </p>
-                            <div class="bg-light p-2 rounded mb-2">
+                            <div class="bg-body-tertiary p-2 rounded mb-2">
                                 <code id="missingFileCheckPath"></code>
                             </div>
                             <a href="#" id="missingFileCheckLink" class="btn btn-sm btn-primary" target="_blank">
@@ -683,7 +683,7 @@
 
             const card = `
                 <div class="col">
-                    <div class="card h-100 shadow-sm border-0" style="background: var(--card-bg, #fff);">
+                    <div class="card h-100 shadow-sm border-0" style="background: var(--bs-card-bg, var(--bs-body-bg));">
                         <div class="card-body">
                             <h6 class="card-title text-primary text-truncate" title="${title}">${title}</h6>
                             <h6 class="card-subtitle mb-2 text-muted small">${publisher}</h6>

@@ -2541,7 +2541,7 @@ function renderMetronLists(lists) {
     lists.forEach(list => {
         const div = document.createElement('div');
         div.className = 'metron-list-item d-flex align-items-center px-3 py-2';
-        div.style.borderBottom = '1px solid #dee2e6';
+        div.style.borderBottom = '1px solid var(--bs-border-color)';
 
         const name = list.name || 'Unnamed List';
         const user = (list.user && typeof list.user === 'object') ? (list.user.username || '') : (list.user || '');
@@ -2821,7 +2821,7 @@ function renderMetronArcs(arcs, append) {
     arcs.forEach(arc => {
         const div = document.createElement('div');
         div.className = 'metron-arc-item d-flex align-items-center px-3 py-2';
-        div.style.borderBottom = '1px solid #dee2e6';
+        div.style.borderBottom = '1px solid var(--bs-border-color)';
 
         const name = arc.name || 'Unnamed Arc';
         const desc = arc.desc || arc.description || '';
@@ -3001,7 +3001,7 @@ function renderCVArcs(arcs) {
     arcs.forEach(arc => {
         const div = document.createElement('div');
         div.className = 'cv-arc-item d-flex align-items-center px-3 py-2';
-        div.style.borderBottom = '1px solid #dee2e6';
+        div.style.borderBottom = '1px solid var(--bs-border-color)';
 
         const name = arc.name || 'Unnamed Arc';
         const desc = arc.description || '';

@@ -135,7 +135,7 @@
 
 .grid-item.folder .icon-overlay {
     opacity: 1;
-    background-color: #e9ecef;
+    background-color: var(--bs-tertiary-bg);
 }
 
 .grid-item.folder .thumbnail {
@@ -192,7 +192,7 @@
 
 /* Metadata loading state for progressive loading */
 .item-meta.metadata-loading {
-    color: #999;
+    color: var(--bs-tertiary-color);
     font-style: italic;
     animation: pulse 1.5s ease-in-out infinite;
 }
@@ -342,13 +342,14 @@
 
 /* Text File Viewer Modal Styling */
 .text-file-content {
-    background-color: #f8f9fa;
-    border: 1px solid #dee2e6;
+    background-color: var(--bs-tertiary-bg);
+    border: 1px solid var(--bs-border-color);
     border-radius: 4px;
     padding: 1rem;
     font-family: 'Courier New', monospace;
     font-size: 14px;
     line-height: 1.6;
+    color: var(--bs-body-color);
     white-space: pre-wrap;
     word-wrap: break-word;
     max-height: 70vh;
@@ -577,7 +578,7 @@
     aspect-ratio: auto;
     border-radius: 8px;
     overflow: hidden;
-    background-color: #f8f9fa;
+    background-color: var(--bs-tertiary-bg);
     box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
     margin-bottom: 8px;
     display: flex;
@@ -607,7 +608,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background-color: #e9ecef;
+    background-color: var(--bs-tertiary-bg);
 }
 
 .dashboard-card .icon-overlay i {
@@ -727,9 +728,10 @@
 .cbz-image-info {
     margin-top: 0.75rem;
     padding: 0.5rem 1rem;
-    background-color: rgba(0, 0, 0, 0.05);
+    background-color: color-mix(in srgb, var(--bs-tertiary-bg) 80%, transparent);
     border-radius: 0.375rem;
     font-size: 0.85rem;
+    color: var(--bs-secondary-color);
     text-align: center;
 }
 

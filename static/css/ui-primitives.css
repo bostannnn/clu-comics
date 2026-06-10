@@ -205,6 +205,15 @@
     text-align: center;
 }
 
+[data-bs-theme="dark"] .bg-white,
+[data-bs-theme="dark"] .bg-light:not(.badge) {
+    background-color: var(--bs-tertiary-bg) !important;
+}
+
+[data-bs-theme="dark"] .text-dark:not(.badge):not(.bg-warning) {
+    color: var(--bs-body-color) !important;
+}
+
 @media (max-width: 1199.98px) {
     .clu-panel-path {
         flex-basis: 100%;
