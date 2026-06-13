@@ -7,6 +7,7 @@ readme/
 logs/
 .claude/
 cache/
+/comic_utils.db
 static/cbl/
 sql/
 temp-*

@@ -80,6 +80,21 @@ class TestRedactedConfigIni:
         # Empty value stays empty (nothing to mask)
         assert "PIXELDRAIN_API_KEY" in out
 
+    def test_absolute_paths_masked_but_relative_patterns_preserved(self, tmp_path):
+        cfg = tmp_path / "config.ini"
+        cfg.write_text(
+            "[SETTINGS]\n"
+            "CACHE_DIR = /srv/clu cache\n"
+            "TRASH_DIR = /opt/clu-trash\n"
+            "CUSTOM_MOVE_PATTERN = {publisher}/{series_name}/v{start_year}\n"
+        )
+        out = dp._redacted_config_ini(str(cfg))
+
+        assert "/srv/clu cache" not in out
+        assert "/opt/clu-trash" not in out
+        assert out.count("[PATH REDACTED]") == 2
+        assert "CUSTOM_MOVE_PATTERN = {publisher}/{series_name}/v{start_year}" in out
+
     def test_missing_file_placeholder(self, tmp_path):
         out = dp._redacted_config_ini(str(tmp_path / "nope.ini"))
         assert "not found" in out
@@ -98,6 +113,75 @@ class TestTail:
         assert "not found" in out
 
 
+class TestLogRedaction:
+
+    def test_redacts_paths_urls_and_secret_assignments(self):
+        text = (
+            "FILE: /Volumes/Comics/Batman/Batman 001.cbz\n"
+            "Resolved -> https://example.com/download?token=SECRET1234VALUE\n"
+            "COMICVINE_API_KEY=SECRET1234VALUE\n"
+            "custom_headers={\"CF-Access-Client-Secret\": \"e5yjthyjfghjsecret\"}\n"
+        )
+
+        out = dp._redact_log_text(text)
+
+        assert "/Volumes/Comics" not in out
+        assert "https://example.com" not in out
+        assert "SECRET1234VALUE" not in out
+        assert "e5yjthyjfghjsecret" not in out
+        assert "[PATH REDACTED]" in out
+        assert "[URL REDACTED]" in out
+
+    def test_redacts_full_paths_with_spaces(self):
+        text = (
+            "FILE: /Volumes/Comic Books/Batman/Batman 001.cbz\n"
+            "Source path: /Users/me/Comic Library/Action Comics 001.cbz (exists: True)\n"
+        )
+
+        out = dp._redact_log_text(text)
+
+        assert "/Volumes/Comic Books" not in out
+        assert "Books/Batman" not in out
+        assert "Batman 001.cbz" not in out
+        assert "/Users/me" not in out
+        assert "Comic Library" not in out
+        assert "Action Comics 001.cbz" not in out
+        assert out.count("[PATH REDACTED]") == 2
+
+    def test_redacts_custom_absolute_paths_without_known_root(self):
+        text = (
+            "Watching: /srv/comic library/Batman/Batman 001.cbz\n"
+            "Archive path: /opt/clu/incoming/Action Comics 001.cbz\n"
+        )
+
+        out = dp._redact_log_text(text)
+
+        assert "/srv/comic library" not in out
+        assert "/opt/clu" not in out
+        assert "Batman 001.cbz" not in out
+        assert "Action Comics 001.cbz" not in out
+        assert out.count("[PATH REDACTED]") == 2
+
+    def test_sanitize_value_redacts_user_preference_paths(self):
+        out = dp._sanitize_value("watch", "/srv/downloads/temp")
+
+        assert out == "[PATH REDACTED]"
+
+    def test_redacted_tail_uses_tail_output(self, tmp_path):
+        log = tmp_path / "app.log"
+        log.write_text(
+            "line 1\n"
+            "FILE: /Users/me/Comics/Batman.cbz\n"
+            "Resolved -> https://example.com/token\n"
+        )
+
+        out = dp._redacted_tail(str(log), lines=2)
+
+        assert "line 1" not in out
+        assert "/Users/me" not in out
+        assert "https://example.com" not in out
+
+
 class TestSystemInfoJson:
 
     def test_has_version_and_no_obvious_secret(self):
@@ -105,3 +189,9 @@ class TestSystemInfoJson:
         assert "version" in info
         assert "paths" in info
         assert "flags" in info
+
+    def test_paths_are_redacted(self):
+        info = json.loads(dp._system_info_json())
+        assert info["paths"]["config_dir"] == "[PATH REDACTED]"
+        assert info["paths"]["log_dir"] == "[PATH REDACTED]"
+        assert info["paths"]["config_file"] == "[PATH REDACTED]"

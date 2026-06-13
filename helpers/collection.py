@@ -7,6 +7,7 @@ from core.app_logging import app_logger
 # Matches any year token variant ({volume_year}/{cover_year}/{issue_year}/
 # {store_year}) and the legacy {year}.
 _YEAR_TOKEN = r"\{(?:volume|cover|issue|store)?_?year\}"
+_MONTH_TOKEN = r"\{(?:cover|issue|store)_month_[mM]\}"
 
 
 def strip_year_token(pattern):
@@ -19,8 +20,27 @@ def strip_year_token(pattern):
     """
     if not pattern:
         return pattern
+    # " ({issue_year}-{issue_month_m})" / " [{volume_year}]" -> ""
+    # If a bracketed date group contains a year token, remove the whole group so
+    # matching stays year/month agnostic for incoming downloads.
+    pattern = re.sub(
+        r"\s*[\(\[]\s*[^()\[\]]*" + _YEAR_TOKEN + r"[^()\[\]]*[\)\]]",
+        "",
+        pattern,
+    )
     # " ({cover_year})" / " [{volume_year}]" -> ""
     pattern = re.sub(r"\s*[\(\[]\s*" + _YEAR_TOKEN + r"\s*[\)\]]", "", pattern)
+    # Bare " {issue_year}-{issue_month_m}" / " {issue_month_m}-{issue_year}" -> ""
+    pattern = re.sub(
+        r"\s*" + _MONTH_TOKEN + r"\s*[-,/.]\s*" + _YEAR_TOKEN,
+        "",
+        pattern,
+    )
+    pattern = re.sub(
+        r"\s*" + _YEAR_TOKEN + r"(?:\s*[-,/.]\s*" + _MONTH_TOKEN + r")?",
+        "",
+        pattern,
+    )
     # remaining bare " {...year}" -> ""
     pattern = re.sub(r"\s*" + _YEAR_TOKEN, "", pattern)
     return pattern.strip()

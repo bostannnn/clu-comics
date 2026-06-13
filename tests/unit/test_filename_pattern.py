@@ -143,6 +143,19 @@ class TestStripYearToken:
         out = strip_year_token("{series_name} [{volume_year}] {issue_number}")
         assert out == "{series_name} {issue_number}"
 
+    def test_strips_parenthesized_year_month_group(self):
+        out = strip_year_token("{series_name} {issue_number} ({issue_year}-{issue_month_m})")
+        assert out == "{series_name} {issue_number}"
+
+    def test_strips_parenthesized_month_name_year_group(self):
+        out = strip_year_token("{series_name} {issue_number} ({issue_month_M} {issue_year})")
+        assert out == "{series_name} {issue_number}"
+
+    def test_stripped_year_month_pattern_matches_plain_download_name(self):
+        match_pattern = strip_year_token("{series_name} {issue_number} ({issue_year}-{issue_month_m})")
+        regex = generate_filename_pattern(match_pattern, "Batman", "1")
+        assert regex.match("Batman 001.cbz")
+
     def test_strips_bare_year(self):
         out = strip_year_token("{series_name} - {cover_year}")
         assert out == "{series_name} -"
