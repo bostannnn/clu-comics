@@ -1178,6 +1178,9 @@ def write_cvinfo_fields(cvinfo_path: str, publisher_name: Optional[str], start_y
             else:
                 f.write("")
 
+        from helpers import match_parent_permissions
+        match_parent_permissions(cvinfo_path)
+
         app_logger.debug(f"Updated cvinfo fields: publisher_name={publisher_name}, start_year={start_year}")
         return True
 
@@ -1323,6 +1326,9 @@ def write_cvinfo_manga_fields(cvinfo_path: str, fields: Dict[str, str]) -> bool:
         with open(cvinfo_path, 'a', encoding='utf-8') as f:
             for line in lines_to_add:
                 f.write(f"\n{line}")
+
+        from helpers import match_parent_permissions
+        match_parent_permissions(cvinfo_path)
 
         app_logger.debug(f"Added manga fields to cvinfo: {', '.join(lines_to_add)}")
         return True

@@ -616,6 +616,9 @@ def _write_selected_manga_cvinfo(cvinfo_path, provider_type, series_id, title=""
         if lines:
             f.write("\n".join(lines) + "\n")
 
+    from helpers import match_parent_permissions
+    match_parent_permissions(cvinfo_path)
+
     if provider_type == 'mangaupdates':
         comicvine.write_cvinfo_manga_fields(cvinfo_path, {'mangaupdates_id': str(series_id)})
 
@@ -627,6 +630,8 @@ def _write_selected_comicvine_cvinfo(cvinfo_path, api_key, volume_id):
     url = f"https://comicvine.gamespot.com/volume/4050-{volume_id}/"
     with open(cvinfo_path, 'w', encoding='utf-8') as f:
         f.write(url)
+    from helpers import match_parent_permissions
+    match_parent_permissions(cvinfo_path)
 
     volume_details = comicvine.get_volume_details(api_key, volume_id)
     if volume_details:
@@ -648,6 +653,8 @@ def _write_selected_comicvine_cvinfo_fields(cvinfo_path, volume_id, volume_detai
     url = f"https://comicvine.gamespot.com/volume/4050-{volume_id}/"
     with open(cvinfo_path, 'w', encoding='utf-8') as f:
         f.write(url)
+    from helpers import match_parent_permissions
+    match_parent_permissions(cvinfo_path)
     if volume_details:
         comicvine.write_cvinfo_fields(
             cvinfo_path,
@@ -1369,6 +1376,9 @@ def save_cvinfo():
 
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(content.strip())
+
+        from helpers import match_parent_permissions
+        match_parent_permissions(file_path)
 
         app_logger.info(f"Saved cvinfo to {file_path}")
         return jsonify({"success": True, "path": file_path})
